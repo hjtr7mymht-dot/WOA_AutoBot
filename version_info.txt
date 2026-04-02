@@ -1,0 +1,32 @@
+# UTF-8
+# Windows 版本信息，用于减少杀软误报（提供完整元数据）
+# PyInstaller --version-file 使用，eval 在 versioninfo 模块上下文中执行
+VSVersionInfo(
+  ffi=FixedFileInfo(
+    filevers=(1, 0, 0, 0),
+    prodvers=(1, 0, 0, 0),
+    mask=0x3f,
+    flags=0x0,
+    OS=0x40004,
+    fileType=0x1,
+    subtype=0x0,
+    date=(0, 0)
+  ),
+  kids=[
+    StringFileInfo([
+      StringTable(
+        '040904B0',
+        [
+          StringStruct('CompanyName', 'WOA AutoBot'),
+          StringStruct('FileDescription', 'WOA Airport Game Automation Bot'),
+          StringStruct('FileVersion', '1.0.0'),
+          StringStruct('InternalName', 'WOA_Debug'),
+          StringStruct('LegalCopyright', 'Free Software'),
+          StringStruct('OriginalFilename', 'WOA_Debug.exe'),
+          StringStruct('ProductName', 'WOA AutoBot'),
+          StringStruct('ProductVersion', '1.0.0'),
+        ])
+    ]),
+    VarFileInfo([VarStruct('Translation', [1033, 1200])])
+  ]
+)

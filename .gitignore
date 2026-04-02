@@ -1,0 +1,51 @@
+# 排除打包生成物
+dist/
+dist_nuitka/
+build/
+*.dist/
+*.build/
+*.exe
+*.spec
+
+# 排除参考项目
+AzurLaneAutoScript-master/
+
+# 排除本地配置与日志
+config.json
+*.log
+woa_stats.csv
+nemu_ipc_debug/
+droidcast_raw_debug/
+list_detect_debug/
+woa_debug/
+
+# 排除 Python 缓存与环境
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.vscode/
+.idea/
+.cursor/
+.git/
+__pycache__/
+
+# 排除 Claude Code 本地配置
+.claude/
+
+# 排除临时文件
+_gen_obf.py
+Snipaste_*.png
+icon/Snipaste_*.png
+nuitka-crash-report.xml
+
+# 排除构建/发布辅助脚本与产物
+build_nuitka.bat
+debug_build_pyinstaller.bat
+create_build_bats.py
+generate_manifest.py
+generate_patch.py
+manifest_*.json
+patch_*.zip
+运行调试版(pyinstaller).bat
+运行调试版(点击后约10s没有任何窗口，是正常现象，nuitka).bat
