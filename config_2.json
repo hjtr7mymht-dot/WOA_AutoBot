@@ -1,0 +1,17 @@
+{
+    "adb_path": "c:\\Users\\wsnbb\\Desktop\\WOA_AutoBot_By.RAY_\\adb_tools\\adb.exe",
+    "initial_device_paths_detected": true,
+    "bonus_staff": false,
+    "vehicle_buy": false,
+    "speed_mode": false,
+    "skip_staff": false,
+    "delay_bribe": false,
+    "random_task_order": true,
+    "tower_open_stand_only": false,
+    "no_takeoff_logout_enabled": true,
+    "no_takeoff_switch_interval": 15.0,
+    "no_takeoff_auto_logout_interval": 30.0,
+    "standalone_logout_interval": 30.0,
+    "online_verified_once": false,
+    "auto_delay_count": 0
+}

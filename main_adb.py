@@ -131,21 +131,19 @@ class WoaBot:
             ((1533, 331), True), ((1537, 403), True), ((1542, 474), False)
         ]
         self.enable_no_takeoff_mode = False
-        self.enable_no_takeoff_logout = False
+        self.enable_standalone_logout = False
         self.enable_cancel_stand_filter = False
         self.enable_filter_stand_only_when_tower_open = False
         self.FILTER_POINT_A = (1535, 118)
         self.FILTER_POINT_B = (1542, 190)
-        self._filter_side = 0
-        self._filter_side_switch_time = 0.0
-        self._filter_no_pending_switch = False
-        self._filter_no_pending_next_switch_time = 0.0
-        self._request_apply_mode3 = False
+        self._no_takeoff_cycle_side = 'landing'
+        self._no_takeoff_cycle_next_switch_time = 0.0
+        self._no_takeoff_switch_interval = 15.0
         self._request_switch_mode1 = False
-        self._no_takeoff_logout_min = 0.0
-        self._no_takeoff_logout_max = 0.0
-        self._filter_no_pending_switch_interval = 5.0
-        self._no_takeoff_logout_next_time = 0.0
+        self._no_takeoff_auto_logout_interval = 30.0
+        self._no_takeoff_auto_logout_next_time = 0.0
+        self._standalone_logout_interval = 30.0
+        self._standalone_logout_next_time = 0.0
         self._stat_approach = 0
         self._stat_depart = 0
         self._stat_stand_count = 0
@@ -167,6 +165,9 @@ class WoaBot:
         self.consecutive_timeout_count = 0
         self.last_recovery_time = 0  # 冷却时间
         self.last_window_close_time = time.time()
+        self._anti_stuck_trigger_count = 0
+        self._anti_stuck_stop_threshold = 3
+        self._anti_stuck_stop_requested = False
 
         self.last_checked_avail_staff = -1
         self.last_read_success = False
@@ -221,43 +222,61 @@ class WoaBot:
         self.enable_no_takeoff_mode = enabled
         self.log(f">>> [配置] 不起飞模式: {'已开启' if enabled else '已关闭'}")
         if enabled:
-            self._request_apply_mode3 = True
+            self._no_takeoff_cycle_side = 'landing'
+            self._no_takeoff_cycle_next_switch_time = time.time() + self._no_takeoff_switch_interval
+            self._schedule_no_takeoff_auto_logout()
         else:
-            # 关闭不起飞模式时，主循环中请求切回模式1
+            self._no_takeoff_auto_logout_next_time = 0.0
             self._request_switch_mode1 = True
 
-    def set_no_takeoff_logout_enabled(self, enabled):
-        if self.enable_no_takeoff_logout == enabled:
-            return
-        self.enable_no_takeoff_logout = enabled
-        self.log(f">>> [配置] 小退: {'已开启' if enabled else '已关闭'}")
-        if enabled and self._no_takeoff_logout_max > 0:
-            self._no_takeoff_logout_next_time = time.time() + random.uniform(self._no_takeoff_logout_min, self._no_takeoff_logout_max) * 60
-
-    def set_no_takeoff_logout_interval(self, min_m, max_m):
+    def set_no_takeoff_switch_interval(self, seconds):
         try:
-            mn = float(min_m) if min_m is not None else 0.0
-            mx = float(max_m) if max_m is not None else 0.0
-            mn = max(0.0, mn)
-            mx = max(0.0, mx)
-            if mx < mn: mx = mn
+            interval = float(seconds)
         except (TypeError, ValueError):
-            mn, mx = 0.0, 0.0
-        if self._no_takeoff_logout_min == mn and self._no_takeoff_logout_max == mx:
+            interval = 15.0
+        interval = max(3.0, min(300.0, interval))
+        if self._no_takeoff_switch_interval == interval:
             return
-        self._no_takeoff_logout_min = mn
-        self._no_takeoff_logout_max = mx
-        if mn == 0 and mx == 0:
-            self.log(">>> [配置] 不起飞模式小退间隔随机范围: 关闭")
-        else:
-            self.log(f">>> [配置] 不起飞模式小退间隔随机范围: {mn}-{mx} 分钟")
+        self._no_takeoff_switch_interval = interval
+        self.log(f">>> [配置] 不起飞模式切换间隔: {interval:g} 秒")
+        if self.enable_no_takeoff_mode:
+            self._no_takeoff_cycle_next_switch_time = time.time() + self._no_takeoff_switch_interval
 
-    def set_filter_switch_interval(self, min_s, max_s):
-        interval = 5.0
-        if self._filter_no_pending_switch_interval == interval:
+    def set_no_takeoff_auto_logout_interval(self, minutes):
+        try:
+            interval = float(minutes)
+        except (TypeError, ValueError):
+            interval = 30.0
+        interval = max(1.0, min(120.0, interval))
+        if self._no_takeoff_auto_logout_interval == interval:
             return
-        self._filter_no_pending_switch_interval = interval
-        self.log(f">>> [配置] 无任务来回切换间隔: 固定 {interval} 秒")
+        self._no_takeoff_auto_logout_interval = interval
+        self.log(f">>> [配置] 不起飞模式自动小退间隔: {interval:g} 分钟")
+        if self.enable_no_takeoff_mode:
+            self._schedule_no_takeoff_auto_logout()
+
+    def set_standalone_logout_enabled(self, enabled):
+        if self.enable_standalone_logout == enabled:
+            return
+        self.enable_standalone_logout = enabled
+        self.log(f">>> [配置] 独立小退: {'已开启' if enabled else '已关闭'}")
+        if enabled:
+            self._schedule_standalone_logout()
+        else:
+            self._standalone_logout_next_time = 0.0
+
+    def set_standalone_logout_interval(self, minutes):
+        try:
+            interval = float(minutes)
+        except (TypeError, ValueError):
+            interval = 30.0
+        interval = max(1.0, min(120.0, interval))
+        if self._standalone_logout_interval == interval:
+            return
+        self._standalone_logout_interval = interval
+        self.log(f">>> [配置] 独立小退间隔: {interval:g} 分钟")
+        if self.enable_standalone_logout:
+            self._schedule_standalone_logout()
 
     def set_cancel_stand_filter_when_tower_off(self, enabled):
         if self.enable_cancel_stand_filter == enabled:
@@ -337,18 +356,32 @@ class WoaBot:
         b_dark = self._is_pixel_dark(screen, self.FILTER_POINT_B[0], self.FILTER_POINT_B[1])
         return (a_dark and not b_dark) or (not a_dark and b_dark)
 
-    def _do_filter_switch(self):
-        """在(1535,118)与(1542,190)之间切换：点击当前非当前侧，使该侧变深、另一侧变浅"""
-        if self._filter_side == 0:
-            x, y = self.FILTER_POINT_B[0], self.FILTER_POINT_B[1]
-        else:
-            x, y = self.FILTER_POINT_A[0], self.FILTER_POINT_A[1]
-        self._click_filter_point(x, y)
-        self.sleep(0.3)
-        self._filter_side = 1 - self._filter_side
-        self._filter_side_switch_time = time.time()
-        self._filter_no_pending_switch = False
-        #self.log(f"📋 [筛选] 不起飞模式：切换至{'进场' if self._filter_side == 0 else '停机位'}侧")
+    def _get_mode3_side(self, screen):
+        a_dark = self._is_pixel_dark(screen, self.FILTER_POINT_A[0], self.FILTER_POINT_A[1])
+        b_dark = self._is_pixel_dark(screen, self.FILTER_POINT_B[0], self.FILTER_POINT_B[1])
+        if a_dark and not b_dark:
+            return 'landing'
+        if b_dark and not a_dark:
+            return 'stand'
+        return None
+
+    def _schedule_no_takeoff_auto_logout(self):
+        self._no_takeoff_auto_logout_next_time = time.time() + self._no_takeoff_auto_logout_interval * 60.0
+
+    def _schedule_standalone_logout(self):
+        self._standalone_logout_next_time = time.time() + self._standalone_logout_interval * 60.0
+
+    def _toggle_no_takeoff_cycle_side(self, reason="定时切换"):
+        self._no_takeoff_cycle_side = 'stand' if self._no_takeoff_cycle_side == 'landing' else 'landing'
+        self._no_takeoff_cycle_next_switch_time = time.time() + self._no_takeoff_switch_interval
+        self.log(f"📋 [不起飞模式] {reason}，切换到{'待降落' if self._no_takeoff_cycle_side == 'landing' else '停机坪'}")
+
+    def _get_no_takeoff_strategy(self):
+        if all(self._tower_active_slots):
+            return 'stand_only'
+        if self._tower_active_slots == [False, False, False, True]:
+            return 'landing_stand_cycle'
+        return 'stand_only'
 
     def _do_no_takeoff_small_logout(self):
         """不起飞模式小退：点击主界面 -> 等待0.5s -> 点击换机场 -> 等待4s -> 点击 first_start_2(30s内) -> 等待10s -> 等待主界面(90s内)"""
@@ -492,8 +525,8 @@ class WoaBot:
                     self._click_filter_point(x, y)
                     self.sleep(0.2)
 
-        def apply_mode3():
-            """确保菜单深、(1542,474)深，(1533,331)(1537,403)浅，再根据 _filter_side 确保对应一侧深"""
+        def apply_mode3(target_side):
+            """确保菜单深、(1542,474)深，(1533,331)(1537,403)浅，再根据目标侧设置待降落/停机坪。"""
             for _ in range(8):
                 screen = self.adb.get_screenshot()
                 if screen is None:
@@ -518,7 +551,7 @@ class WoaBot:
                 bx, by = self.FILTER_POINT_B[0], self.FILTER_POINT_B[1]
                 a_dark = self._is_pixel_dark(screen, ax, ay)
                 b_dark = self._is_pixel_dark(screen, bx, by)
-                want_a_dark = self._filter_side == 0
+                want_a_dark = target_side == 'landing'
                 if want_a_dark and not a_dark:
                     self._click_filter_point(ax, ay)
                     self.sleep(0.2)
@@ -528,12 +561,17 @@ class WoaBot:
                 else:
                     break
 
-        # 不起飞模式优先：只要开启则强制进入模式3，不理会塔台关闭
         if self.enable_no_takeoff_mode:
-            if not is_mode3:
-                self.log("📋 [筛选] 应用不起飞模式(动态筛选)...")
-                apply_mode3()
-                self._filter_side_switch_time = time.time()
+            strategy = self._get_no_takeoff_strategy()
+            if strategy == 'landing_stand_cycle':
+                current_side = self._get_mode3_side(screen) if is_mode3 else None
+                if current_side != self._no_takeoff_cycle_side:
+                    self.log(f"📋 [不起飞模式] 应用{'待降落' if self._no_takeoff_cycle_side == 'landing' else '停机坪'}筛选...")
+                    apply_mode3(self._no_takeoff_cycle_side)
+            else:
+                if not is_mode2:
+                    self.log("📋 [不起飞模式] 塔台全开或非4号单开，强制切换至停机坪待处理...")
+                    apply_mode(self.FILTER_CHECK_POINTS_MODE2)
             return
 
         if self.enable_filter_stand_only_when_tower_open and all(self._tower_active_slots):
@@ -849,12 +887,28 @@ class WoaBot:
         # 3. 触发条件：连续3次警告 + 冷却时间已过
         if self.consecutive_timeout_count > 3:
             if time.time() - self.last_recovery_time > 10:
-                self.log("🚨 [防卡死] 检测到连续多次卡顿，尝试紧急寻找领奖图标...")
+                self._record_anti_stuck_trigger("检测到连续多次卡顿，尝试紧急寻找领奖图标")
                 self.consecutive_timeout_count = 0
                 self.last_recovery_time = time.time()
                 self._attempt_emergency_reward_recovery()
             else:
                 self.consecutive_timeout_count = 0  # 冷却中，暂时重置
+
+    def _record_anti_stuck_trigger(self, reason):
+        self._anti_stuck_trigger_count += 1
+        self.log(f"🚨 [防卡死] {reason}，累计 {self._anti_stuck_trigger_count}/{self._anti_stuck_stop_threshold} 次")
+        if self._anti_stuck_stop_requested:
+            return
+        if self._anti_stuck_trigger_count < self._anti_stuck_stop_threshold:
+            return
+        self._anti_stuck_stop_requested = True
+        self.log("🛑 [防卡死] 多次触发自动保护，脚本已停止，请检查模拟器界面或当前机场状态")
+        self.running = False
+        if self.config_callback:
+            try:
+                self.config_callback("bot_stopped", "防卡死多次触发，已自动停止")
+            except Exception:
+                pass
 
     def _attempt_emergency_reward_recovery(self):
         # 全屏搜索领奖图标
@@ -917,6 +971,8 @@ class WoaBot:
         self.consecutive_timeout_count = 0
         self.consecutive_errors = 0
         self.last_recovery_time = 0
+        self._anti_stuck_trigger_count = 0
+        self._anti_stuck_stop_requested = False
         # 重置塔台状态
         self._tower_disabled = False
         self._tower_was_active = False
@@ -1113,10 +1169,13 @@ class WoaBot:
         self.sleep(1.0)
         self.last_periodic_check_time = 0
         if self.enable_no_takeoff_mode:
-            self._filter_side_switch_time = time.time()
+            self._no_takeoff_cycle_side = 'landing'
+            self._no_takeoff_cycle_next_switch_time = time.time() + self._no_takeoff_switch_interval
         self._periodic_15s_check(force_initial_filter_check=True)
-        if self.enable_no_takeoff_logout and self._no_takeoff_logout_max > 0:
-            self._no_takeoff_logout_next_time = time.time() + random.uniform(self._no_takeoff_logout_min, self._no_takeoff_logout_max) * 60
+        if self.enable_no_takeoff_mode:
+            self._schedule_no_takeoff_auto_logout()
+        if self.enable_standalone_logout:
+            self._schedule_standalone_logout()
         # 启动时读取塔台倒计时
         try:
             self._init_tower_countdown()
@@ -1141,40 +1200,31 @@ class WoaBot:
                     self._stat_stand_staff = 0
                     self._stat_date = now_date
                 if self._is_module_enabled('lifecycle'):
-                    if getattr(self, '_request_apply_mode3', False):
-                        self._request_apply_mode3 = False
-                        self._periodic_15s_check(force_initial_filter_check=True)
-                        if self.enable_no_takeoff_mode and self._no_takeoff_logout_max > 0:
-                            self._no_takeoff_logout_next_time = time.time() + random.uniform(self._no_takeoff_logout_min, self._no_takeoff_logout_max) * 60
                     if getattr(self, '_request_switch_mode1', False):
                         self._request_switch_mode1 = False
                         self._force_switch_filter_mode1()
-                    if self.enable_no_takeoff_logout and self._no_takeoff_logout_max > 0 and self._no_takeoff_logout_next_time > 0 and time.time() >= self._no_takeoff_logout_next_time:
-                        self.log("📋 [小退] 到达小退间隔，执行小退...")
+                    now_ts = time.time()
+                    if self.enable_no_takeoff_mode and self._get_no_takeoff_strategy() == 'landing_stand_cycle' and now_ts >= self._no_takeoff_cycle_next_switch_time:
+                        self._toggle_no_takeoff_cycle_side(reason="到达切换间隔")
+                        self._periodic_15s_check(force_initial_filter_check=True)
+                    if self.enable_no_takeoff_mode and self._no_takeoff_auto_logout_next_time > 0 and now_ts >= self._no_takeoff_auto_logout_next_time:
+                        self.log("📋 [不起飞模式] 到达自动小退间隔，执行小退...")
                         self._do_no_takeoff_small_logout()
-                        self._no_takeoff_logout_next_time = time.time() + random.uniform(self._no_takeoff_logout_min, self._no_takeoff_logout_max) * 60
+                        self._schedule_no_takeoff_auto_logout()
+                    if self.enable_standalone_logout and self._standalone_logout_next_time > 0 and now_ts >= self._standalone_logout_next_time:
+                        self.log("📋 [独立小退] 到达小退间隔，执行小退...")
+                        self._do_no_takeoff_small_logout()
+                        self._schedule_standalone_logout()
                     # 检查塔台倒计时是否到期
                     if self._check_tower_countdown():
                         idle_count = 0
                         continue
                 did_work = self.scan_and_process() if self._is_module_enabled('scanner') else False
                 if did_work:
-                    self._filter_no_pending_switch = False
-                    self._filter_no_pending_next_switch_time = 0.0
-                    if self.enable_no_takeoff_mode and time.time() - self._filter_side_switch_time >= 15:
-                        self._do_filter_switch()
                     self.sleep(0.05)
                     idle_count = 0
                 else:
                     if self._is_module_enabled('idle_recovery'):
-                        if self.enable_no_takeoff_mode and self._filter_no_pending_switch:
-                            t = time.time()
-                            if self._filter_no_pending_next_switch_time == 0:
-                                self._do_filter_switch()
-                                self._filter_no_pending_next_switch_time = t + self._filter_no_pending_switch_interval
-                            elif t >= self._filter_no_pending_next_switch_time:
-                                self._do_filter_switch()
-                                self._filter_no_pending_next_switch_time = t + self._filter_no_pending_switch_interval
                         self.sleep(0.5)
                         idle_count += 1
                         if idle_count == 10:
@@ -2210,7 +2260,7 @@ class WoaBot:
             return
         elapsed = time.time() - self.last_seen_main_interface_time
         if elapsed > self.STUCK_TIMEOUT:
-            self.log(f"🚨 [防卡死] 未检测到主界面已 {int(elapsed)}秒，尝试强行返回...")
+            self._record_anti_stuck_trigger(f"未检测到主界面已 {int(elapsed)} 秒，尝试强行返回")
 
             # First Start 恢复逻辑
             if self.find_and_click('first_start_1.png', wait=0.5):
@@ -2311,10 +2361,10 @@ class WoaBot:
                     return det['handler'](None)
 
         valid_candidates = []
+        no_takeoff_strategy = self._get_no_takeoff_strategy() if self.enable_no_takeoff_mode else None
         skips_left = self.stand_skip_index
         for t in final_tasks:
-            if t['type'] == 'doing': continue
-            if self.enable_no_takeoff_mode and t['type'] != 'stand':
+            if t['type'] == 'doing' and not self.enable_no_takeoff_mode:
                 continue
             if t['type'] == 'stand':
                 if self.in_staff_shortage_mode: continue
@@ -2324,8 +2374,9 @@ class WoaBot:
             valid_candidates.append(t)
 
         if not valid_candidates:
-            if self.enable_no_takeoff_mode:
-                self._filter_no_pending_switch = True
+            if self.enable_no_takeoff_mode and no_takeoff_strategy == 'landing_stand_cycle':
+                self._toggle_no_takeoff_cycle_side(reason="当前分组无任务")
+                self._periodic_15s_check(force_initial_filter_check=True)
             if not getattr(self, '_no_candidate_closed', False):
                 self._no_candidate_closed = True
                 n_doing = len(doing_tasks)

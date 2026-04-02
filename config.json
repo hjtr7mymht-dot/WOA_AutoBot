@@ -8,8 +8,6 @@
     "random_task_order": true,
     "auto_delay_count": 1,
     "instruction_hash": "4e2c89dee3015ac2bbce521e16f50384",
-    "adb_path": "G:/MuMuPlayer/nx_main/adb.exe",
-    "mumu_path": "G:\\MuMuPlayer",
     "control_method": "uiautomator2",
     "screenshot_method": "nemu_ipc",
     "slide_min": 300,
@@ -17,9 +15,15 @@
     "thinking_mode": 1,
     "no_takeoff_mode": false,
     "cancel_stand_filter": false,
-    "no_takeoff_logout_min": 0,
-    "no_takeoff_logout_max": 0,
-    "tower_open_stand_only": true,
+    "tower_open_stand_only": false,
     "no_takeoff_logout_enabled": false,
-    "auto_staff_minus_one": true
+    "auto_staff_minus_one": true,
+    "online_verified_once": true,
+    "no_takeoff_cycle_seconds": 5,
+    "no_takeoff_switch_interval": 3.0,
+    "no_takeoff_auto_logout_interval": 1.0,
+    "standalone_logout_interval": 30.0,
+    "initial_device_paths_detected": true,
+    "adb_path": "G:/MuMuPlayer/nx_main/adb.exe",
+    "mumu_path": "G:/MuMuPlayer"
 }

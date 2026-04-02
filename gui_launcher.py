@@ -6,11 +6,13 @@ import json
 import datetime
 import collections
 import traceback
+import importlib.util
 import tkinter as tk
 import ctypes
 import subprocess
 import msvcrt
 import shutil
+import time
 import webbrowser
 import urllib.error
 import urllib.request
@@ -28,7 +30,12 @@ from ttkbootstrap.widgets import ToolTip  # type: ignore[import-untyped]
 from PIL import Image, ImageTk
 
 # 引入后端逻辑
-from adb_controller import set_custom_adb_path, AdbController, CURRENT_ADB_PATH, close_all_and_kill_server, get_woa_debug_dir
+from adb_controller import set_custom_adb_path, AdbController, CURRENT_ADB_PATH, close_all_and_kill_server, get_woa_debug_dir, ensure_local_platform_tools
+try:
+    from emulator_discovery import get_mumu_install_from_registry, get_mumu_adb_paths
+except ImportError:
+    get_mumu_install_from_registry = None
+    get_mumu_adb_paths = None
 
 # MuMu 常用 ADB 端口（部分机型如 MuMu12+Vulkan 需用 MuMu 自带 adb 才能正常点击）
 _MUMU_PORTS = {16384, 16385, 16416, 16448, 7555, 5555}
@@ -91,10 +98,17 @@ if INSTANCE_ID is None:
 CONFIG_FILE = "config.json" if INSTANCE_ID == 1 else f"config_{INSTANCE_ID}.json"
 STATS_FILE = "woa_stats.csv"
 
-LOCAL_VERSION = "1.0.0"
+LOCAL_VERSION = "1.0.1"
 OFFICIAL_REPO_URL = "https://github.com/hjtr7mymht-dot/WOA_AutoBot"
 OFFICIAL_REPO_NAME = "hjtr7mymht-dot/WOA_AutoBot"
 ONLINE_VERSION_PATH = "version.json"
+ONLINE_GUARD_RECHECK_SEC = 90
+REQUIRED_GUARD_MODULES = (
+    "adb_controller",
+    "main_adb",
+    "simple_ocr",
+    "emulator_discovery",
+)
 
 def _write_crash_report(exc_type, exc_value, exc_traceback):
     """写入崩溃报告文件，返回文件路径。任何阶段出错都不抛异常。"""
@@ -313,7 +327,7 @@ class TeeToFile:
 class Application(ttkb.Window):
     def __init__(self):
         try:
-            myappid = 'woabot.launcher.v1.0.0'
+            myappid = 'woabot.launcher.v1.0.1'
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
         except:
             pass
@@ -326,10 +340,13 @@ class Application(ttkb.Window):
         self.style.colors.info = "#6c8ead"
 
         self.title(f"WOA AutoBot {LOCAL_VERSION}" + (f" [实例 {INSTANCE_ID}]" if INSTANCE_ID > 1 else ""))
-        self.geometry("980x860")
-        self.last_geometry = "980x860"
+        self.geometry("1080x1200")
+        self.minsize(1080, 1200)
+        self.last_geometry = "1080x1200"
         self.is_mini_mode = False
+        self._strict_online_guard = bool(getattr(sys, 'frozen', False))
 
+        self._config_file_exists = os.path.exists(CONFIG_FILE)
         self.config = self.load_config()
         self.var_bonus_staff = tk.BooleanVar(value=self.config.get("bonus_staff", False))
         self.var_vehicle_buy = tk.BooleanVar(value=self.config.get("vehicle_buy", False))
@@ -339,9 +356,15 @@ class Application(ttkb.Window):
         self.var_delay_count = tk.StringVar(value=str(self.config.get("auto_delay_count", 0)))
         self.var_random_task = tk.BooleanVar(value=self.config.get("random_task_order", True))
         self.var_no_takeoff_mode = tk.BooleanVar(value=self.config.get("no_takeoff_mode", False))
+        legacy_logout_interval = self.config.get("standalone_logout_interval")
+        if legacy_logout_interval is None:
+            legacy_logout_interval = self.config.get("no_takeoff_logout_min", self.config.get("no_takeoff_logout_max", 30))
         self.var_no_takeoff_logout_enabled = tk.BooleanVar(
             value=self.config.get("no_takeoff_logout_enabled",
-                                  bool(self.config.get("no_takeoff_logout_min", 0) or self.config.get("no_takeoff_logout_max", 0))))
+                                  bool(legacy_logout_interval)))
+        self.var_no_takeoff_switch_interval = tk.StringVar(value=str(self.config.get("no_takeoff_switch_interval", 15)))
+        self.var_no_takeoff_auto_logout_interval = tk.StringVar(value=str(self.config.get("no_takeoff_auto_logout_interval", 30)))
+        self.var_standalone_logout_interval = tk.StringVar(value=str(legacy_logout_interval or 30))
         self.var_cancel_stand_filter = tk.BooleanVar(value=self.config.get("cancel_stand_filter", True))
         self.var_tower_open_stand_only = tk.BooleanVar(value=self.config.get("tower_open_stand_only", False))
         for legacy_key in (
@@ -353,9 +376,17 @@ class Application(ttkb.Window):
         self.var_mini_top = tk.BooleanVar(value=False)
         self.var_runtime_status = tk.StringVar(value="待命")
         self.var_device_status = tk.StringVar(value="等待扫描设备")
+        self.var_system_status = tk.StringVar(value="环境检查中")
         self.var_online_status = tk.StringVar(value="未验证")
         self.var_online_detail = tk.StringVar(value="官方仓库校验未执行")
         self._online_validation_running = False
+        self._online_validation_ok = False
+        self._online_validation_last_ok_ts = 0.0
+        self._online_last_error = "尚未执行在线验证"
+        self._online_guard_lockdown = False
+        self._online_verified_once = bool(self.config.get("online_verified_once", False))
+        self._missing_guard_modules = []
+        self._guard_integrity_ok = True
 
         if self.config.get("adb_path"):
             set_custom_adb_path(self.config["adb_path"])
@@ -376,6 +407,11 @@ class Application(ttkb.Window):
                 sys.stdout = self.redirector
         else:
             sys.stdout = self.redirector
+
+        self._prepare_first_run_environment(
+            force=(not self._config_file_exists) or (not self.config.get("initial_device_paths_detected", False)),
+            reason="首次启动",
+        )
 
         self.container_main = ttkb.Frame(self)
         self.container_mini = ttkb.Frame(self)
@@ -402,7 +438,8 @@ class Application(ttkb.Window):
         self.after(100, _emit_notice)
 
         self.after(500, self.setup_window_icon)
-        self.after(1200, lambda: self.run_online_validation(silent=True))
+        self.after(1200, self._bootstrap_online_guard)
+        self.after(4500, self._online_guard_tick)
         self.bind("<Map>", self._on_window_map)
         self._icon_loaded = False
 
@@ -528,6 +565,20 @@ class Application(ttkb.Window):
         self.config["tower_open_stand_only"] = self.var_tower_open_stand_only.get()
         self.config["no_takeoff_logout_enabled"] = self.var_no_takeoff_logout_enabled.get()
         try:
+            self.config["no_takeoff_switch_interval"] = max(3.0, min(300.0, float(self.var_no_takeoff_switch_interval.get())))
+        except Exception:
+            self.config["no_takeoff_switch_interval"] = 15.0
+        try:
+            self.config["no_takeoff_auto_logout_interval"] = max(1.0, min(120.0, float(self.var_no_takeoff_auto_logout_interval.get())))
+        except Exception:
+            self.config["no_takeoff_auto_logout_interval"] = 30.0
+        try:
+            self.config["standalone_logout_interval"] = max(1.0, min(120.0, float(self.var_standalone_logout_interval.get())))
+        except Exception:
+            self.config["standalone_logout_interval"] = 30.0
+        self.config["online_verified_once"] = bool(getattr(self, "_online_verified_once", False))
+        self.config["initial_device_paths_detected"] = bool(self.config.get("initial_device_paths_detected", False))
+        try:
             self.config["auto_delay_count"] = int(self.var_delay_count.get())
         except:
             self.config["auto_delay_count"] = 0
@@ -537,10 +588,158 @@ class Application(ttkb.Window):
         except Exception as e:
             print(f"配置保存失败: {e}")
 
+    def _set_system_status(self, message):
+        text = (message or "环境待检查").strip()
+        self.var_system_status.set(text)
+        if self.var_device_status.get() in ("等待扫描设备", "环境检查中") or "已自动" in self.var_device_status.get() or "Platform Tools" in self.var_device_status.get():
+            self.var_device_status.set(text)
+
+    def _ensure_local_android_sdk(self):
+        result = ensure_local_platform_tools()
+        messages = []
+        if result.get("copied"):
+            copied = result["copied"]
+            preview = ", ".join(copied[:3])
+            suffix = "..." if len(copied) > 3 else ""
+            messages.append(f"已自动安装 Platform Tools 缺失文件: {preview}{suffix}")
+        elif result.get("ready"):
+            messages.append("已检测到内置 Android SDK Platform Tools")
+        else:
+            messages.append("未检测到可用 Platform Tools")
+
+        adb_path = result.get("adb_path", "")
+        if adb_path:
+            set_custom_adb_path(adb_path)
+        return result, messages
+
+    def _normalize_mumu_root(self, path):
+        if not path:
+            return ""
+        norm = os.path.normpath(path)
+        lowered = norm.lower()
+        suffixes = [
+            os.path.normpath("nx_main").lower(),
+            os.path.normpath("MuMu").lower(),
+            os.path.normpath(os.path.join("emulator", "nemu")).lower(),
+        ]
+        for suffix in suffixes:
+            if lowered.endswith(suffix):
+                return os.path.dirname(norm)
+        return norm
+
+    def _detect_preferred_mumu_path(self):
+        candidates = []
+        if get_mumu_install_from_registry:
+            try:
+                candidates.extend(get_mumu_install_from_registry())
+            except Exception:
+                pass
+        for candidate in candidates:
+            norm = self._normalize_mumu_root(candidate)
+            if norm and os.path.isdir(norm):
+                return norm
+        adb_candidate = AdbController._find_mumu_adb()
+        if adb_candidate and os.path.isfile(adb_candidate):
+            return self._normalize_mumu_root(os.path.dirname(adb_candidate))
+        return ""
+
+    def _detect_preferred_adb_path(self, mumu_root=""):
+        local_adb = adb_mod.get_bundled_resource_path(os.path.join("adb_tools", "adb.exe"))
+        if os.path.isfile(local_adb):
+            return local_adb
+        if get_mumu_adb_paths:
+            try:
+                adb_candidates = get_mumu_adb_paths()
+                if adb_candidates:
+                    return adb_candidates[0]
+            except Exception:
+                pass
+        adb_candidate = AdbController._find_mumu_adb()
+        if adb_candidate and os.path.isfile(adb_candidate):
+            return adb_candidate
+        bundled = adb_mod.DEFAULT_ADB_PATH if hasattr(adb_mod, "DEFAULT_ADB_PATH") else CURRENT_ADB_PATH
+        if bundled and bundled != "adb" and os.path.isfile(bundled):
+            return bundled
+        if mumu_root:
+            for sub in ("nx_main", "MuMu", os.path.join("emulator", "nemu")):
+                candidate = os.path.join(mumu_root, sub, "adb.exe")
+                if os.path.isfile(candidate):
+                    return candidate
+        return ""
+
+    def _prepare_first_run_environment(self, force=False, reason="启动"):
+        sdk_result, messages = self._ensure_local_android_sdk()
+        changed = self._maybe_detect_initial_emulator_paths(force=force, reason=reason)
+
+        detected_mumu = self.config.get("mumu_path", "")
+        detected_adb = self.config.get("adb_path", "") or sdk_result.get("adb_path", "")
+        if detected_mumu:
+            messages.append("已自动识别 MuMu 路径")
+        if detected_adb:
+            messages.append("已切换 MuMu ADB" if "MuMu" in detected_adb or "Netease" in detected_adb else "已切换内置 ADB")
+
+        final_message = " / ".join(dict.fromkeys([m for m in messages if m])) or "环境初始化完成"
+        self._set_system_status(final_message)
+        if changed:
+            self.var_runtime_status.set("环境已就绪")
+        return changed
+
+    def _maybe_detect_initial_emulator_paths(self, force=False, reason="启动"):
+        if not force and self.config.get("initial_device_paths_detected", False):
+            return False
+
+        detected_mumu = self._detect_preferred_mumu_path()
+        detected_adb = self._detect_preferred_adb_path(detected_mumu)
+
+        changed = False
+        if force or detected_mumu:
+            normalized_mumu = self._normalize_mumu_root(detected_mumu) if detected_mumu else ""
+            if normalized_mumu:
+                if self.config.get("mumu_path") != normalized_mumu:
+                    self.config["mumu_path"] = normalized_mumu
+                    changed = True
+            else:
+                if "mumu_path" in self.config:
+                    self.config.pop("mumu_path", None)
+                    changed = True
+
+        if force or detected_adb:
+            if detected_adb:
+                detected_adb = os.path.normpath(detected_adb)
+                if self.config.get("adb_path") != detected_adb:
+                    self.config["adb_path"] = detected_adb
+                    changed = True
+                set_custom_adb_path(detected_adb)
+            else:
+                if "adb_path" in self.config:
+                    self.config.pop("adb_path", None)
+                    changed = True
+                set_custom_adb_path(None)
+
+        self.config["initial_device_paths_detected"] = True
+        if changed or force:
+            self.save_config()
+            print(
+                f">>> [初始化] {reason}自动检测完成: MuMu={self.config.get('mumu_path', '未发现')} | ADB={self.config.get('adb_path', '默认')}"
+            )
+        return changed or force
+
     def create_info_icon(self, parent, text):
         lbl = ttkb.Label(parent, text="ⓘ", font=("Segoe UI Symbol", 10), bootstyle="secondary", cursor="hand2")
         ToolTip(lbl, text=text, bootstyle="secondary-inverse")
         return lbl
+
+    def _build_two_columns(self, parent):
+        body = ttkb.Frame(parent)
+        body.pack(fill=BOTH, expand=True)
+        body.grid_columnconfigure(0, weight=1, uniform="settings_cols")
+        body.grid_columnconfigure(1, weight=1, uniform="settings_cols")
+
+        left_col = ttkb.Frame(body, padding=(0, 0, 10, 0))
+        right_col = ttkb.Frame(body, padding=(10, 0, 0, 0))
+        left_col.grid(row=0, column=0, sticky="nsew")
+        right_col.grid(row=0, column=1, sticky="nsew")
+        return left_col, right_col
 
     def toggle_mode(self):
         if self.is_mini_mode:
@@ -561,6 +760,20 @@ class Application(ttkb.Window):
     def toggle_mini_top_state(self):
         if self.is_mini_mode:
             self.attributes('-topmost', self.var_mini_top.get())
+
+    def launch_new_instance(self):
+        if self.bot and self.bot.running:
+            messagebox.showwarning("多开模式", "建议先确认当前实例已稳定运行，再开启新实例。", parent=self)
+        try:
+            creation_flags = 0x08000000
+            if getattr(sys, 'frozen', False):
+                cmd = [sys.executable]
+            else:
+                cmd = [sys.executable, os.path.abspath(__file__)]
+            subprocess.Popen(cmd, cwd=os.path.dirname(os.path.abspath(__file__)), creationflags=creation_flags)
+            print(">>> [多开模式] 已请求启动新的实例窗口")
+        except Exception as exc:
+            messagebox.showerror("多开模式", f"启动新实例失败: {exc}", parent=self)
 
     def setup_mini_ui(self):
         pad = 5
@@ -608,6 +821,10 @@ class Application(ttkb.Window):
         ttkb.Label(status_row, textvariable=self.var_runtime_status, padding=(10, 4), bootstyle="inverse-primary").pack(side=LEFT, padx=(8, 12))
         ttkb.Label(status_row, text="设备状态", font=("Microsoft YaHei UI", 9, "bold"), bootstyle="secondary").pack(side=LEFT)
         ttkb.Label(status_row, textvariable=self.var_device_status, padding=(10, 4), bootstyle="inverse-light").pack(side=LEFT, padx=(8, 0))
+        system_row = ttkb.Frame(hero_left)
+        system_row.pack(fill=X, pady=(8, 0))
+        ttkb.Label(system_row, text="环境状态", font=("Microsoft YaHei UI", 9, "bold"), bootstyle="secondary").pack(side=LEFT)
+        ttkb.Label(system_row, textvariable=self.var_system_status, padding=(10, 4), bootstyle="inverse-info").pack(side=LEFT, padx=(8, 12))
         online_row = ttkb.Frame(hero_left)
         online_row.pack(fill=X, pady=(8, 0))
         ttkb.Label(online_row, text="在线验证", font=("Microsoft YaHei UI", 9, "bold"), bootstyle="secondary").pack(side=LEFT)
@@ -623,17 +840,18 @@ class Application(ttkb.Window):
         self._help_badge = None
         ttkb.Button(hero_right, text="高级设置", bootstyle="outline-secondary", command=self.open_settings_window, width=14).pack(fill=X, pady=6)
         ttkb.Button(hero_right, text="在线验证", bootstyle="outline-success", command=self.run_online_validation, width=14).pack(fill=X, pady=(0, 6))
+        ttkb.Button(hero_right, text="多开模式", bootstyle="outline-primary", command=self.launch_new_instance, width=14).pack(fill=X, pady=(0, 6))
         ttkb.Button(hero_right, text="紧凑小窗", bootstyle="outline-warning", command=self.toggle_mode, width=14).pack(fill=X)
 
         content = ttkb.Frame(outer)
         content.pack(fill=BOTH, expand=False, pady=(16, 14))
-        left_col = ttkb.Frame(content)
-        left_col.pack(side=LEFT, fill=BOTH, expand=True)
-        right_col = ttkb.Frame(content)
-        right_col.pack(side=LEFT, fill=BOTH, padx=(16, 0))
+        content.grid_columnconfigure(0, weight=1, uniform="maincols")
+        content.grid_columnconfigure(1, weight=1, uniform="maincols")
+        content.grid_rowconfigure(0, weight=1)
+        content.grid_rowconfigure(1, weight=1)
 
-        connect_card = ttkb.Labelframe(left_col, text="连接与执行", padding=16, bootstyle="primary")
-        connect_card.pack(fill=X)
+        connect_card = ttkb.Labelframe(content, text="连接与执行", padding=16, bootstyle="primary")
+        connect_card.grid(row=0, column=0, sticky="nsew", padx=(0, 8), pady=(0, 10))
         ttkb.Label(
             connect_card,
             text="选择设备后即可直接启动，扫描结果会自动刷新到状态区。",
@@ -653,24 +871,8 @@ class Application(ttkb.Window):
         self.btn_main_stop = ttkb.Button(action_row, text="停止运行", bootstyle="danger", state="disabled", command=self.stop_bot)
         self.btn_main_stop.pack(side=LEFT, fill=X, expand=True, padx=(6, 0))
 
-        tower_card = ttkb.Labelframe(left_col, text="挂机节奏", padding=16, bootstyle="secondary")
-        tower_card.pack(fill=X, pady=(14, 0))
-        tower_top = ttkb.Frame(tower_card)
-        tower_top.pack(fill=X)
-        ttkb.Label(tower_top, text="自动延时塔台", font=("Microsoft YaHei UI", 10, "bold")).pack(side=LEFT)
-        ttkb.Label(tower_top, text="仅控制已手动开启的控制器", bootstyle="secondary").pack(side=LEFT, padx=(8, 0))
-        tower_row = ttkb.Frame(tower_card)
-        tower_row.pack(fill=X, pady=(10, 0))
-        ttkb.Entry(tower_row, textvariable=self.var_delay_count, width=6).pack(side=LEFT)
-        ttkb.Label(tower_row, text="次", bootstyle="secondary").pack(side=LEFT, padx=(6, 10))
-        ttkb.Button(tower_row, text="应用", bootstyle="outline-success", width=8, command=self.on_confirm_tower_delay).pack(side=LEFT)
-        self.create_info_icon(
-            tower_row,
-            "填 0 表示关闭，最大值 144。脚本只会延时你已手动开启的控制器，不会改动塔台布局。",
-        ).pack(side=LEFT, padx=8)
-
-        quick_card = ttkb.Labelframe(right_col, text="快捷策略", padding=16, bootstyle="success")
-        quick_card.pack(fill=X)
+        quick_card = ttkb.Labelframe(content, text="快捷策略", padding=16, bootstyle="success")
+        quick_card.grid(row=0, column=1, sticky="nsew", padx=(8, 0), pady=(0, 10))
 
         def add_toggle_row(parent, text, var, help_txt):
             row = ttkb.Frame(parent)
@@ -689,17 +891,62 @@ class Application(ttkb.Window):
         add_toggle_row(quick_card, "延误飞机贿赂", self.var_delay_bribe, "处理延误飞机时可自动贿赂代理，会消耗银飞机。")
         add_toggle_row(quick_card, "塔台全开仅停机位", self.var_tower_open_stand_only, "塔台四个控制器全开时，强制筛选为仅停机位待处理。")
 
-        tools_card = ttkb.Labelframe(right_col, text="工具入口", padding=16, bootstyle="warning")
-        tools_card.pack(fill=X, pady=(14, 0))
+        tower_card = ttkb.Labelframe(content, text="挂机节奏", padding=16, bootstyle="secondary")
+        tower_card.grid(row=1, column=0, sticky="nsew", padx=(0, 8), pady=(10, 0))
+        tower_top = ttkb.Frame(tower_card)
+        tower_top.pack(fill=X)
+        ttkb.Label(tower_top, text="自动延时塔台", font=("Microsoft YaHei UI", 10, "bold")).pack(side=LEFT)
+        ttkb.Label(tower_top, text="仅控制已手动开启的控制器", bootstyle="secondary").pack(side=LEFT, padx=(8, 0))
+        tower_row = ttkb.Frame(tower_card)
+        tower_row.pack(fill=X, pady=(10, 0))
+        ttkb.Entry(tower_row, textvariable=self.var_delay_count, width=6).pack(side=LEFT)
+        ttkb.Label(tower_row, text="次", bootstyle="secondary").pack(side=LEFT, padx=(6, 10))
+        ttkb.Button(tower_row, text="应用", bootstyle="outline-success", width=8, command=self.on_confirm_tower_delay).pack(side=LEFT)
+        self.create_info_icon(
+            tower_row,
+            "填 0 表示关闭，最大值 144。脚本只会延时你已手动开启的控制器，不会改动塔台布局。",
+        ).pack(side=LEFT, padx=8)
+
+        ttkb.Separator(tower_card).pack(fill=X, pady=(10, 10))
+        ttkb.Label(tower_card, text="运行与防检测快速开关", font=("Microsoft YaHei UI", 10, "bold")).pack(anchor="w")
+
+        quick_runtime = ttkb.Frame(tower_card)
+        quick_runtime.pack(fill=X, pady=(8, 0))
+
+        def add_runtime_toggle(parent, text, var, tip):
+            row = ttkb.Frame(parent)
+            row.pack(side=LEFT, padx=(0, 12))
+            ttkb.Checkbutton(
+                row,
+                text=text,
+                variable=var,
+                bootstyle="success-round-toggle",
+                command=self.sync_all_configs_to_bot,
+            ).pack(side=LEFT)
+            self.create_info_icon(row, tip).pack(side=LEFT, padx=(4, 0))
+
+        add_runtime_toggle(quick_runtime, "不起飞模式", self.var_no_takeoff_mode, "快速启停不起飞模式；轮切和自动小退时间仍在高级设置中调整。")
+        add_runtime_toggle(quick_runtime, "独立小退", self.var_no_takeoff_logout_enabled, "快速启停独立小退；时间参数在高级设置中调整。")
+        add_runtime_toggle(quick_runtime, "随机任务", self.var_random_task, "快速启停随机任务选择，降低固定操作模式。")
+
+        quick_runtime_2 = ttkb.Frame(tower_card)
+        quick_runtime_2.pack(fill=X, pady=(6, 0))
+        add_runtime_toggle(quick_runtime_2, "跳过二次校验", self.var_speed_mode, "开启后略微提速，适合稳定场景。")
+        add_runtime_toggle(quick_runtime_2, "跳过地勤验证", self.var_skip_staff, "开启后提速明显，但有一定误判风险。")
+        add_runtime_toggle(quick_runtime_2, "塔台关闭筛选全部", self.var_cancel_stand_filter, "塔台关闭时取消停机位筛选，处理全部待处理飞机。")
+
+        tools_card = ttkb.Labelframe(content, text="工具入口", padding=16, bootstyle="warning")
+        tools_card.grid(row=1, column=1, sticky="nsew", padx=(8, 0), pady=(10, 0))
         ttkb.Label(
             tools_card,
-            text="高级配置、在线验证、国内网络方案和紧凑模式都集中到了这里。",
-            wraplength=260,
+            text="高级配置、在线验证、国内网络方案、多开模式和紧凑模式都集中到了这里。",
+            wraplength=360,
             justify="left",
             bootstyle="secondary",
         ).pack(anchor="w", pady=(0, 10))
         ttkb.Button(tools_card, text="打开高级设置", bootstyle="secondary", command=self.open_settings_window).pack(fill=X)
         ttkb.Button(tools_card, text="立即在线验证", bootstyle="success-outline", command=self.run_online_validation).pack(fill=X, pady=8)
+        ttkb.Button(tools_card, text="启动新实例", bootstyle="primary-outline", command=self.launch_new_instance).pack(fill=X)
         ttkb.Button(tools_card, text="官方仓库", bootstyle="primary-outline", command=self.open_official_repo).pack(fill=X)
         ttkb.Button(tools_card, text="国内网络方案", bootstyle="warning-outline", command=self.show_cn_network_help).pack(fill=X, pady=8)
         ttkb.Button(tools_card, text="查看使用说明", bootstyle="info-outline", command=self.open_help_window).pack(fill=X, pady=8)
@@ -822,6 +1069,131 @@ class Application(ttkb.Window):
             "message": f"已连接官方仓库主页\n\n本地版本: {LOCAL_VERSION}\n版本清单: 不可用\n仓库地址: {url}\n版本清单错误: {manifest_error or '未返回'}",
         }
 
+    def _set_online_validation_state(self, ok, detail=""):
+        self._online_validation_ok = bool(ok)
+        if ok:
+            self._online_validation_last_ok_ts = time.time()
+            self._online_last_error = ""
+            self._online_guard_lockdown = False
+            self._online_verified_once = True
+            self.config["online_verified_once"] = True
+            self.save_config()
+        else:
+            if detail:
+                self._online_last_error = detail
+
+    def _detect_missing_guard_modules(self):
+        missing = []
+        for mod_name in REQUIRED_GUARD_MODULES:
+            try:
+                spec = importlib.util.find_spec(mod_name)
+                if spec is None:
+                    missing.append(mod_name)
+            except Exception:
+                missing.append(mod_name)
+        if not os.path.exists(os.path.abspath(__file__)):
+            missing.append("gui_launcher")
+        self._missing_guard_modules = sorted(set(missing))
+        self._guard_integrity_ok = len(self._missing_guard_modules) == 0
+        return self._guard_integrity_ok
+
+    def _missing_modules_text(self):
+        if not self._missing_guard_modules:
+            return ""
+        return ", ".join(self._missing_guard_modules)
+
+    def _lockdown_runtime(self, reason):
+        if self.bot:
+            self.stop_bot()
+        self._online_guard_lockdown = True
+        self.var_runtime_status.set("在线校验阻断")
+        self.var_online_status.set("阻断")
+        self.var_online_detail.set(reason)
+        for btn in [self.btn_main_start, self.btn_mini_start]:
+            try:
+                btn.configure(state="disabled", text="已阻断")
+            except Exception:
+                pass
+        print(f">>> [在线验证阻断] {reason}")
+
+    def _unlock_runtime_if_possible(self):
+        if not self._online_guard_lockdown:
+            return
+        if not self._guard_integrity_ok:
+            return
+        self._online_guard_lockdown = False
+        if not (getattr(self, 'bot', None) and self.bot.running):
+            for btn in [self.btn_main_start, self.btn_mini_start]:
+                try:
+                    btn.configure(state="normal", text="▶ 启动脚本")
+                except Exception:
+                    pass
+
+    def _bootstrap_online_guard(self):
+        if not self._strict_online_guard:
+            self.var_online_status.set("社区模式")
+            self.var_online_detail.set("源码运行默认不做强制在线阻断，避免影响开源社区二创；可手动点击在线验证。")
+            return
+        guard_ok = self._detect_missing_guard_modules()
+        if not guard_ok:
+            missing = self._missing_modules_text()
+            self._lockdown_runtime(f"检测到校验模块缺失: {missing}")
+            self.run_online_validation(silent=True)
+            return
+        if not self._online_verified_once:
+            self.run_online_validation(silent=True)
+            return
+        self.var_online_status.set("已授权")
+        self.var_online_detail.set("首次在线验证已完成，当前无需重复验证")
+
+    def _enforce_online_guard(self, scene, interactive=True):
+        if not self._strict_online_guard:
+            return True
+        guard_ok = self._detect_missing_guard_modules()
+        if not guard_ok:
+            missing = self._missing_modules_text()
+            self._lockdown_runtime(f"检测到校验模块缺失: {missing}")
+            if not self._online_validation_running:
+                self.run_online_validation(silent=True)
+            if interactive:
+                messagebox.showerror(
+                    "校验模块缺失",
+                    f"检测到关键校验模块缺失，已拒绝执行当前操作({scene})。\n\n缺失模块: {missing}",
+                    parent=self,
+                )
+            return False
+
+        if self._online_verified_once:
+            self._unlock_runtime_if_possible()
+            return True
+
+        if self._online_validation_running:
+            if interactive:
+                messagebox.showwarning("在线验证中", "在线验证正在进行，请稍后再试。", parent=self)
+            return False
+        self.run_online_validation(silent=not interactive)
+        if interactive:
+            messagebox.showwarning(
+                "在线验证未通过",
+                f"当前操作({scene})需要完成首次在线验证。\n\n请等待验证完成后重试。",
+                parent=self,
+            )
+        return False
+
+    def _online_guard_tick(self):
+        try:
+            if not self._strict_online_guard:
+                return
+            if not self._detect_missing_guard_modules():
+                missing = self._missing_modules_text()
+                if self.bot and self.bot.running:
+                    self._lockdown_runtime(f"运行期间发现校验模块缺失: {missing}")
+                if not self._online_validation_running:
+                    self.run_online_validation(silent=True)
+        finally:
+            if not getattr(self, "_is_closing", False):
+                self.after(ONLINE_GUARD_RECHECK_SEC * 1000, self._online_guard_tick)
+
     def run_online_validation(self, silent=False):
         if self._online_validation_running:
             return
@@ -840,8 +1212,11 @@ class Application(ttkb.Window):
             def _finish():
                 self._online_validation_running = False
                 if error:
+                    self._set_online_validation_state(False, detail=error)
                     self.var_online_status.set("不可达")
                     self.var_online_detail.set("GitHub 直连和国内镜像均不可用")
+                    if self.bot and self.bot.running:
+                        self._lockdown_runtime("运行期间在线验证失败，已自动停止")
                     if not silent:
                         messagebox.showerror(
                             "在线验证失败",
@@ -850,8 +1225,10 @@ class Application(ttkb.Window):
                         )
                     return
 
+                self._set_online_validation_state(True)
                 self.var_online_status.set(result["status"])
                 self.var_online_detail.set(result["detail"])
+                self._unlock_runtime_if_possible()
                 print(f">>> [在线验证] {result['detail']}")
                 if not silent:
                     messagebox.showinfo("在线验证", result["message"], parent=self)
@@ -1239,10 +1616,13 @@ class Application(ttkb.Window):
         if hasattr(self, 'settings_win') and self.settings_win.winfo_exists():
             self.settings_win.lift()
             return
+        if not self._enforce_online_guard("打开高级设置", interactive=True):
+            return
         win = ttkb.Toplevel(self)
         self.settings_win = win
         win.title("高级设置")
-        win.geometry("1120x760")
+        win.geometry("1280x860")
+        win.minsize(1220, 820)
         win.transient(self)
         win.grab_set()
         body = ttkb.Frame(win, padding=20)
@@ -1252,6 +1632,9 @@ class Application(ttkb.Window):
         header.pack(fill=X, pady=(0, 12))
         ttkb.Label(header, text="高级设置中心", font=("Microsoft YaHei UI", 15, "bold"), bootstyle="primary").pack(anchor="w")
         ttkb.Label(header, text="统一新版风格，保留设备、触控、防检测和在线校验相关配置。", bootstyle="secondary").pack(anchor="w", pady=(4, 0))
+
+        top_action_row = ttkb.Frame(body)
+        top_action_row.pack(fill=X, pady=(0, 12))
 
         online_frame = ttkb.Labelframe(body, text="在线验证", padding=12, bootstyle="success")
         online_frame.pack(fill=X, pady=(0, 12))
@@ -1269,8 +1652,11 @@ class Application(ttkb.Window):
         notebook.add(tab_device, text="设备与方案")
         notebook.add(tab_runtime, text="运行与防检测")
 
-        ttkb.Label(tab_device, text="手动连接", font=("bold")).pack(anchor="w")
-        f_manual = ttkb.Frame(tab_device);
+        tab_device_left, tab_device_right = self._build_two_columns(tab_device)
+        tab_runtime_left, tab_runtime_right = self._build_two_columns(tab_runtime)
+
+        ttkb.Label(tab_device_left, text="手动连接", font=("bold")).pack(anchor="w")
+        f_manual = ttkb.Frame(tab_device_left);
         f_manual.pack(fill=X, pady=5)
         e_manual_ip = ttkb.Entry(f_manual)
         e_manual_ip.pack(side=LEFT, fill=X, expand=True, padx=(0, 5))
@@ -1289,9 +1675,9 @@ class Application(ttkb.Window):
         # 【颜色统一】手动连接按钮 -> 绿色
         ttkb.Button(f_manual, text="连接", bootstyle="success", command=run_manual_connect).pack(side=LEFT)
 
-        ttkb.Separator(tab_device).pack(fill=X, pady=10)
-        ttkb.Label(tab_device, text="ADB 路径", font=("bold")).pack(anchor="w")
-        f_adb = ttkb.Frame(tab_device);
+        ttkb.Separator(tab_device_left).pack(fill=X, pady=10)
+        ttkb.Label(tab_device_left, text="ADB 路径", font=("bold")).pack(anchor="w")
+        f_adb = ttkb.Frame(tab_device_left);
         f_adb.pack(fill=X, pady=5)
         e_adb = ttkb.Entry(f_adb)
         e_adb.pack(side=LEFT, fill=X, expand=True, padx=(0, 5))
@@ -1305,8 +1691,8 @@ class Application(ttkb.Window):
         # 【颜色统一】浏览路径按钮 -> 绿色边框
         ttkb.Button(f_adb, text="...", bootstyle="outline-success", command=browse).pack(side=LEFT)
 
-        ttkb.Label(tab_device, text="MuMu 安装路径", font=("bold")).pack(anchor="w")
-        f_mumu = ttkb.Frame(tab_device)
+        ttkb.Label(tab_device_left, text="MuMu 安装路径", font=("bold")).pack(anchor="w")
+        f_mumu = ttkb.Frame(tab_device_left)
         f_mumu.pack(fill=X, pady=5)
         e_mumu = ttkb.Entry(f_mumu)
         e_mumu.pack(side=LEFT, fill=X, expand=True, padx=(0, 5))
@@ -1324,9 +1710,9 @@ class Application(ttkb.Window):
         ttkb.Button(f_mumu, text="...", bootstyle="outline-success", command=browse_mumu).pack(side=LEFT)
         ToolTip(e_mumu, text="此路径仅用于 nemu_ipc 截图，非必需。留空则自动检测；自动检测成功时会回填此处。", bootstyle="info")
 
-        ttkb.Separator(tab_device).pack(fill=X, pady=10)
-        ttkb.Label(tab_device, text="触控方式（影响运行速度，但总体不明显）", font=("bold")).pack(anchor="w")
-        f_ctrl = ttkb.Frame(tab_device)
+        ttkb.Separator(tab_device_right).pack(fill=X, pady=10)
+        ttkb.Label(tab_device_right, text="触控方式（影响运行速度，但总体不明显）", font=("bold")).pack(anchor="w")
+        f_ctrl = ttkb.Frame(tab_device_right)
         f_ctrl.pack(fill=X, pady=5)
         ctrl_values = ("ADB", "uiautomator2")
         ctrl_method = ttkb.Combobox(f_ctrl, values=ctrl_values, state="readonly", width=16)
@@ -1339,8 +1725,8 @@ class Application(ttkb.Window):
                "• uiautomator2：速度较快，滑动速度慢。")
         self.create_info_icon(f_ctrl, tip).pack(side=LEFT, padx=5)
 
-        ttkb.Label(tab_device, text="截图方式（对整体运行速度影响最大）", font=("bold")).pack(anchor="w")
-        f_scshot = ttkb.Frame(tab_device)
+        ttkb.Label(tab_device_right, text="截图方式（对整体运行速度影响最大）", font=("bold")).pack(anchor="w")
+        f_scshot = ttkb.Frame(tab_device_right)
         f_scshot.pack(fill=X, pady=5)
         scshot_method = ttkb.Combobox(f_scshot, values=("ADB", "nemu_ipc", "uiautomator2", "DroidCast_raw"), state="readonly", width=16)
         scshot_method.pack(side=LEFT, padx=(0, 5))
@@ -1360,7 +1746,7 @@ class Application(ttkb.Window):
             "• DroidCast_raw：速度较慢。\n"
             "• ADB：系统自带方式，兼容性最好但最慢。").pack(side=LEFT, padx=5)
 
-        f_probe = ttkb.Frame(tab_device)
+        f_probe = ttkb.Frame(tab_device_right)
         f_probe.pack(fill=X, pady=(2, 8))
 
         def run_method_probe():
@@ -1425,9 +1811,9 @@ class Application(ttkb.Window):
         self.create_info_icon(f_probe, "连接当前设备并检测触控/截图方案可用性；不可用时会自动回退到可用组合。")\
             .pack(side=LEFT, padx=6)
 
-        ttkb.Separator(tab_runtime).pack(fill=X, pady=2)
-        ttkb.Label(tab_runtime, text="速度优化（风险选项）", font=("bold")).pack(anchor="w")
-        f_speed_row = ttkb.Frame(tab_runtime)
+        ttkb.Separator(tab_runtime_left).pack(fill=X, pady=2)
+        ttkb.Label(tab_runtime_left, text="速度优化（风险选项）", font=("bold")).pack(anchor="w")
+        f_speed_row = ttkb.Frame(tab_runtime_left)
         f_speed_row.pack(fill=X, pady=5)
         ttkb.Checkbutton(f_speed_row, text="跳过二次校验", variable=self.var_speed_mode,
                          bootstyle="success-round-toggle").pack(side=LEFT)
@@ -1438,52 +1824,92 @@ class Application(ttkb.Window):
         self.create_info_icon(f_speed_row,
                               "地勤分配后不进行图标验证和颜色验证，直接开始；\n风险中等，可能导致飞机延误；\n仅推荐高峰期且有人在场时打开。").pack(side=LEFT, padx=5)
 
-        ttkb.Separator(tab_runtime).pack(fill=X, pady=10)
-        ttkb.Label(tab_runtime, text="不起飞模式", font=("bold")).pack(anchor="w")
+        ttkb.Separator(tab_runtime_left).pack(fill=X, pady=10)
+        ttkb.Label(tab_runtime_left, text="不起飞模式", font=("bold")).pack(anchor="w")
 
-        f_no_takeoff_enable = ttkb.Frame(tab_runtime)
+        f_no_takeoff_enable = ttkb.Frame(tab_runtime_left)
         f_no_takeoff_enable.pack(fill=X, pady=5)
         ttkb.Checkbutton(f_no_takeoff_enable, text="启用不起飞模式", variable=self.var_no_takeoff_mode,
                          bootstyle="success-round-toggle").pack(side=LEFT)
         self.create_info_icon(f_no_takeoff_enable,
-                              "开启后，脚本会控制筛选状态在停机位：\n"
-                              "并且可以自动点击更改机场再重进以清空起飞飞机。\n"
-                              "此功能开启后，需要搭配自动塔台。").pack(side=LEFT, padx=5)
+                              "全新不起飞模式策略：\n"
+                              "1. 塔台四个控制器全开时，只筛选停机坪待处理。\n"
+                              "2. 仅 4 号塔台开启时，在待降落与停机坪之间轮流切换。\n"
+                              "3. 开启不起飞模式后，会自动启用该模式自己的小退调度。\n"
+                              "4. 当前筛选页中出现的任务，不再按图标类型限制，只要在目标页就执行。\n"
+                              "建议配合塔台使用。").pack(side=LEFT, padx=5)
 
-        f_logout_enable = ttkb.Frame(tab_runtime)
+        f_no_takeoff_custom = ttkb.Frame(tab_runtime_left)
+        f_no_takeoff_custom.pack(fill=X, pady=5)
+        ttkb.Label(f_no_takeoff_custom, text="轮切间隔(秒):").pack(side=LEFT)
+        e_nt_switch = ttkb.Entry(f_no_takeoff_custom, textvariable=self.var_no_takeoff_switch_interval, width=6)
+        e_nt_switch.pack(side=LEFT, padx=(5, 10))
+        ttkb.Label(f_no_takeoff_custom, text="自动小退间隔(分钟):").pack(side=LEFT)
+        e_nt_auto_logout = ttkb.Entry(f_no_takeoff_custom, textvariable=self.var_no_takeoff_auto_logout_interval, width=6)
+        e_nt_auto_logout.pack(side=LEFT, padx=(5, 10))
+
+        def apply_no_takeoff_profile():
+            try:
+                switch_interval = max(3.0, min(300.0, float(e_nt_switch.get().strip())))
+                logout_interval = max(1.0, min(120.0, float(e_nt_auto_logout.get().strip())))
+            except ValueError:
+                messagebox.showerror("错误", "不起飞模式时间设置必须为数字", parent=win)
+                return
+            self.var_no_takeoff_switch_interval.set(f"{switch_interval:g}")
+            self.var_no_takeoff_auto_logout_interval.set(f"{logout_interval:g}")
+            self.config["no_takeoff_switch_interval"] = switch_interval
+            self.config["no_takeoff_auto_logout_interval"] = logout_interval
+            self.save_config()
+            self.sync_all_configs_to_bot(from_advanced_save=True)
+            print(f">>> [不起飞模式] 轮切间隔已更新: {switch_interval:g} 秒")
+            print(f">>> [不起飞模式] 自动小退间隔已更新: {logout_interval:g} 分钟")
+
+        ttkb.Button(f_no_takeoff_custom, text="确定", bootstyle="success-outline", command=apply_no_takeoff_profile, width=8).pack(side=LEFT)
+
+        f_logout_enable = ttkb.Frame(tab_runtime_left)
         f_logout_enable.pack(fill=X, pady=5)
-        ttkb.Checkbutton(f_logout_enable, text="启用小退", variable=self.var_no_takeoff_logout_enabled,
+        ttkb.Checkbutton(f_logout_enable, text="启用独立小退", variable=self.var_no_takeoff_logout_enabled,
                          bootstyle="success-round-toggle").pack(side=LEFT)
         self.create_info_icon(f_logout_enable,
-                              "开启后将根据下方随机时长执行小退：\n"
-                              "点击左上角菜单->更改机场->开始->等待返回主界面。\n"
-                              "填 0-0 表示关闭自动小退。单位：分钟，最大 120 分钟。\n"
-                              "该功能可独立开启，不依赖于不起飞模式。").pack(side=LEFT, padx=5)
+                              "独立小退功能与不起飞模式自动小退分开。\n"
+                              "即使不开启不起飞模式，也可以单独按固定间隔执行小退。\n"
+                              "点击确定后立即写入配置并同步到运行中的脚本。").pack(side=LEFT, padx=5)
 
-        f_cancel_filter = ttkb.Frame(tab_runtime)
+        f_cancel_filter = ttkb.Frame(tab_runtime_left)
         f_cancel_filter.pack(fill=X, pady=5)
         ttkb.Checkbutton(f_cancel_filter, text="塔台关闭时筛选全部飞机", variable=self.var_cancel_stand_filter,
                          bootstyle="success-round-toggle").pack(side=LEFT)
         self.create_info_icon(f_cancel_filter,
                               "开启后，塔台关闭时，脚本会强制取消停机位飞机的筛选，处理全部的待处理飞机。" ).pack(side=LEFT, padx=5)
 
-        f_logout = ttkb.Frame(tab_runtime)
+        f_logout = ttkb.Frame(tab_runtime_left)
         f_logout.pack(fill=X, pady=5)
-        ttkb.Label(f_logout, text="小退间隔随机范围(分钟):").pack(side=LEFT)
-        e_logout_min = ttkb.Entry(f_logout, width=5)
-        e_logout_min.pack(side=LEFT, padx=5)
-        e_logout_min.insert(0, str(self.config.get("no_takeoff_logout_min", 30)))
-        ttkb.Label(f_logout, text="-").pack(side=LEFT)
-        e_logout_max = ttkb.Entry(f_logout, width=5)
-        e_logout_max.pack(side=LEFT, padx=5)
-        e_logout_max.insert(0, str(self.config.get("no_takeoff_logout_max", 40)))
+        ttkb.Label(f_logout, text="独立小退间隔(分钟):").pack(side=LEFT)
+        e_logout_single = ttkb.Entry(f_logout, textvariable=self.var_standalone_logout_interval, width=6)
+        e_logout_single.pack(side=LEFT, padx=5)
+
+        def apply_standalone_logout():
+            try:
+                logout_interval = max(1.0, min(120.0, float(e_logout_single.get().strip())))
+            except ValueError:
+                messagebox.showerror("错误", "独立小退时间必须为数字", parent=win)
+                return
+            self.var_standalone_logout_interval.set(f"{logout_interval:g}")
+            self.config["standalone_logout_interval"] = logout_interval
+            self.config["no_takeoff_logout_enabled"] = self.var_no_takeoff_logout_enabled.get()
+            self.save_config()
+            self.sync_all_configs_to_bot(from_advanced_save=True)
+            print(f">>> [独立小退] 间隔已更新: {logout_interval:g} 分钟")
+            print(f">>> [独立小退] 状态: {'开启' if self.var_no_takeoff_logout_enabled.get() else '关闭'}")
+
+        ttkb.Button(f_logout, text="确定", bootstyle="success-outline", command=apply_standalone_logout, width=8).pack(side=LEFT, padx=(8, 0))
         self.create_info_icon(f_logout,
-                              "启用小退后，每隔该随机时长执行一次小退，清空起飞飞机\n（点击左上角菜单->更改机场->开始->等待返回主界面）。\n填 0-0 表示关闭自动小退。单位：分钟，最大 120 分钟。\n默认 30-40 分钟。").pack(side=LEFT, padx=5)
+                              "独立小退采用固定间隔，不再使用随机范围。\n单位：分钟，范围 1-120。\n点击确定后生效。").pack(side=LEFT, padx=5)
 
-        ttkb.Separator(tab_runtime).pack(fill=X, pady=10)
-        ttkb.Label(tab_runtime, text="防检测设置", font=("bold")).pack(anchor="w")
+        ttkb.Separator(tab_runtime_right).pack(fill=X, pady=10)
+        ttkb.Label(tab_runtime_right, text="防检测设置", font=("bold")).pack(anchor="w")
 
-        f_rnd = ttkb.Frame(tab_runtime);
+        f_rnd = ttkb.Frame(tab_runtime_right);
         f_rnd.pack(fill=X, pady=5)
         # 【颜色统一】随机任务选择 -> 绿色开关
         ttkb.Checkbutton(f_rnd, text="随机任务选择", variable=self.var_random_task,
@@ -1492,7 +1918,7 @@ class Application(ttkb.Window):
                               "开启后，脚本将在列表前3个任务中随机选择（80%概率），或从下方任务中随机选择（20%概率），以模拟真实操作。").pack(
             side=LEFT, padx=5)
 
-        f_s = ttkb.Frame(tab_runtime);
+        f_s = ttkb.Frame(tab_runtime_right);
         f_s.pack(fill=X, pady=5)
         ttkb.Label(f_s, text="地勤分配—拖动随机耗时(ms):").pack(side=LEFT)
         e_min = ttkb.Entry(f_s, width=5);
@@ -1506,7 +1932,7 @@ class Application(ttkb.Window):
                               "控制地勤分配界面中滑块操作的持续时间。\n建议范围 200-500ms。\n若最低值小于200，可能出现地勤分配时滑动不到位的情况").pack(
             side=LEFT, padx=5)
 
-        f_t = ttkb.Frame(tab_runtime);
+        f_t = ttkb.Frame(tab_runtime_right);
         f_t.pack(fill=X, pady=5)
         ttkb.Label(f_t, text="随机思考时间:").pack(side=LEFT)
         c_th = ttkb.Combobox(f_t, values=("关闭", "短(0.1-0.4)", "中(0.3-1.0)", "长(0.8-2.0)"), state="readonly")
@@ -1520,7 +1946,7 @@ class Application(ttkb.Window):
                               "在点击操作前增加随机的“发呆”时间，\n模拟人类思考过程，大幅降低检测风险。\n追求极限速度可选择“关闭”。").pack(
             side=LEFT, padx=5)
 
-        ttkb.Separator(tab_runtime).pack(fill=X, pady=16)
+        ttkb.Separator(tab_runtime_right).pack(fill=X, pady=16)
 
         def save():
             old_cfg = dict(self.config)
@@ -1561,19 +1987,21 @@ class Application(ttkb.Window):
             self.config["random_task_order"] = self.var_random_task.get()
             self.config.pop("filter_switch_min", None)
             self.config.pop("filter_switch_max", None)
-            if self.var_no_takeoff_logout_enabled.get():
-                try:
-                    lo_min = float(e_logout_min.get().strip())
-                    lo_max = float(e_logout_max.get().strip())
-                    lo_min = max(0, lo_min)
-                    lo_max = max(0, min(120, lo_max))
-                    if lo_max < lo_min: lo_max = lo_min
-                except (ValueError, AttributeError):
-                    lo_min, lo_max = 0, 0
-            else:
-                lo_min, lo_max = 0, 0
-            self.config["no_takeoff_logout_min"] = lo_min
-            self.config["no_takeoff_logout_max"] = lo_max
+            try:
+                nt_switch = max(3.0, min(300.0, float(e_nt_switch.get().strip())))
+                nt_logout = max(1.0, min(120.0, float(e_nt_auto_logout.get().strip())))
+                logout_single = max(1.0, min(120.0, float(e_logout_single.get().strip())))
+            except (ValueError, AttributeError):
+                messagebox.showerror("错误", "不起飞模式或小退时间必须为数字", parent=win)
+                return
+            self.var_no_takeoff_switch_interval.set(f"{nt_switch:g}")
+            self.var_no_takeoff_auto_logout_interval.set(f"{nt_logout:g}")
+            self.var_standalone_logout_interval.set(f"{logout_single:g}")
+            self.config["no_takeoff_switch_interval"] = nt_switch
+            self.config["no_takeoff_auto_logout_interval"] = nt_logout
+            self.config["standalone_logout_interval"] = logout_single
+            self.config.pop("no_takeoff_logout_min", None)
+            self.config.pop("no_takeoff_logout_max", None)
 
             changed = []
             if old_cfg.get("adb_path") != self.config.get("adb_path"):
@@ -1593,12 +2021,15 @@ class Application(ttkb.Window):
             if old_cfg.get("no_takeoff_mode") != self.config.get("no_takeoff_mode"):
                 changed.append(("不起飞模式", "开" if self.config.get("no_takeoff_mode") else "关"))
             if old_cfg.get("no_takeoff_logout_enabled") != self.config.get("no_takeoff_logout_enabled"):
-                changed.append(("小退", "开" if self.config.get("no_takeoff_logout_enabled") else "关"))
+                changed.append(("独立小退", "开" if self.config.get("no_takeoff_logout_enabled") else "关"))
             if old_cfg.get("cancel_stand_filter") != self.config.get("cancel_stand_filter"):
                 changed.append(("塔台关闭筛选全部飞机", "开" if self.config.get("cancel_stand_filter") else "关"))
-            if (old_cfg.get("no_takeoff_logout_min") != self.config.get("no_takeoff_logout_min") or
-                    old_cfg.get("no_takeoff_logout_max") != self.config.get("no_takeoff_logout_max")):
-                changed.append(("小退间隔随机范围", f"{self.config.get('no_takeoff_logout_min', 30)}-{self.config.get('no_takeoff_logout_max', 40)} 分钟"))
+            if old_cfg.get("no_takeoff_switch_interval") != self.config.get("no_takeoff_switch_interval"):
+                changed.append(("不起飞轮切间隔", f"{self.config.get('no_takeoff_switch_interval', 15)} 秒"))
+            if old_cfg.get("no_takeoff_auto_logout_interval") != self.config.get("no_takeoff_auto_logout_interval"):
+                changed.append(("不起飞自动小退间隔", f"{self.config.get('no_takeoff_auto_logout_interval', 30)} 分钟"))
+            if old_cfg.get("standalone_logout_interval") != self.config.get("standalone_logout_interval"):
+                changed.append(("独立小退间隔", f"{self.config.get('standalone_logout_interval', 30)} 分钟"))
 
             anti_changed = (
                 old_cfg.get("slide_min") != self.config.get("slide_min") or
@@ -1616,15 +2047,19 @@ class Application(ttkb.Window):
             self.sync_all_configs_to_bot(from_advanced_save=True)
             win.destroy()
 
-        action_row = ttkb.Frame(body)
-        action_row.pack(fill=X)
-        ttkb.Button(action_row, text="📊 统计图表", bootstyle="info-outline", width=20,
-                    command=self._open_stats_chart).pack(pady=(0, 5))
+        ttkb.Button(top_action_row, text="保存设置", bootstyle="success", width=18, command=save).pack(side=LEFT)
+        ttkb.Button(top_action_row, text="📊 统计图表", bootstyle="info-outline", width=18,
+                command=self._open_stats_chart).pack(side=LEFT, padx=(10, 0))
         ttkb.Separator(body).pack(fill=X, pady=10)
-        ttkb.Button(body, text="保存设置", bootstyle="success", width=20, command=save).pack(pady=(5, 0))
         win.after(50, lambda: self._center_toplevel_on_parent(win))
 
     def refresh_devices(self):
+        if not self._enforce_online_guard("扫描设备", interactive=True):
+            return
+        self._prepare_first_run_environment(
+            force=not self.config.get("initial_device_paths_detected", False),
+            reason="首次智能扫描",
+        )
         print(">>> 正在扫描设备...")
         self.var_device_status.set("扫描中")
         self.btn_scan.configure(text="扫描中...", state="disabled")
@@ -1668,6 +2103,8 @@ class Application(ttkb.Window):
             print(f">>> [MuMu] 检测到 MuMu 设备，已切换至模拟器自带 ADB 以支持点击操作")
 
     def start_bot(self):
+        if not self._enforce_online_guard("启动脚本", interactive=True):
+            return
         device = self.combo_devices.get()
         if not device: messagebox.showwarning("提示", "请先选择设备"); return
         if self.bot and self.bot.running: return
@@ -1703,6 +2140,8 @@ class Application(ttkb.Window):
             print(">>> 脚本已停止")
 
     def on_confirm_tower_delay(self):
+        if not self._enforce_online_guard("应用挂机节奏", interactive=True):
+            return
         self.sync_all_configs_to_bot()
         val_str = self.var_delay_count.get()
         if val_str == "0":
@@ -1711,6 +2150,8 @@ class Application(ttkb.Window):
             print(f">>> [配置] 自动延时塔台: 已更新为 {val_str} 次")
 
     def sync_all_configs_to_bot(self, from_advanced_save=False):
+        if not from_advanced_save and not self._enforce_online_guard("同步配置", interactive=False):
+            return
         no_log = from_advanced_save
         try:
             cnt = int(self.var_delay_count.get())
@@ -1735,9 +2176,10 @@ class Application(ttkb.Window):
                 self.config.get("slide_min", 250), self.config.get("slide_max", 500), log_change=not no_log)
             self.bot.set_thinking_time_mode(self.config.get("thinking_mode", 0), log_change=not no_log)
             self.bot.set_no_takeoff_mode(self.var_no_takeoff_mode.get())
-            self.bot.set_no_takeoff_logout_interval(
-                self.config.get("no_takeoff_logout_min", 30), self.config.get("no_takeoff_logout_max", 40))
-            self.bot.set_no_takeoff_logout_enabled(self.config.get("no_takeoff_logout_enabled", False))
+            self.bot.set_no_takeoff_switch_interval(self.config.get("no_takeoff_switch_interval", 15))
+            self.bot.set_no_takeoff_auto_logout_interval(self.config.get("no_takeoff_auto_logout_interval", 30))
+            self.bot.set_standalone_logout_interval(self.config.get("standalone_logout_interval", 30))
+            self.bot.set_standalone_logout_enabled(self.config.get("no_takeoff_logout_enabled", False))
             self.bot.set_cancel_stand_filter_when_tower_off(self.var_cancel_stand_filter.get())
             self.bot.set_filter_stand_only_when_tower_open(self.var_tower_open_stand_only.get())
             self.bot.set_control_method(self.config.get("control_method", "adb"))
@@ -1747,13 +2189,28 @@ class Application(ttkb.Window):
             self.bot.set_module_flags(self.config.get("modules", {}), log_change=not no_log)
 
     def on_bot_config_update(self, key, value):
-        if key == "auto_delay_count":
-            self.var_delay_count.set(str(value))
-        elif key == "vehicle_buy":
-            self.var_vehicle_buy.set(bool(value))
-        elif key == "mumu_path":
-            self.config["mumu_path"] = value
-            self.save_config()
+        def _apply_update():
+            if key == "auto_delay_count":
+                self.var_delay_count.set(str(value))
+            elif key == "vehicle_buy":
+                self.var_vehicle_buy.set(bool(value))
+            elif key == "mumu_path":
+                self.config["mumu_path"] = value
+                self.save_config()
+            elif key == "bot_stopped":
+                self.bot = None
+                self.var_runtime_status.set("已停止")
+                for btn in [self.btn_main_start, self.btn_mini_start]:
+                    btn.configure(state="normal", text="▶ 启动脚本")
+                for btn in [self.btn_main_stop, self.btn_mini_stop]:
+                    btn.configure(state="disabled")
+                self.combo_devices.configure(state="readonly")
+                print(f">>> [自动停止] {value}")
+
+        try:
+            self.after(0, _apply_update)
+        except Exception:
+            _apply_update()
 
     def log_to_queue(self, msg):
         self.log_queue.put(msg)

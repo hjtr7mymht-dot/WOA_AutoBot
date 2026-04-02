@@ -91,6 +91,49 @@ def get_bundled_resource_path(relative_path):
         return os.path.join(os.path.dirname(os.path.abspath(__file__)), relative_path)
 
 
+def ensure_local_platform_tools():
+    """确保 adb_tools 目录存在可用的本地 ADB 运行文件，缺失时从内置 platform-tools 自动补齐。"""
+    source_dir = get_bundled_resource_path("platform-tools")
+    target_dir = get_bundled_resource_path("adb_tools")
+    copied = []
+    errors = []
+
+    try:
+        os.makedirs(target_dir, exist_ok=True)
+    except Exception as exc:
+        errors.append(f"创建 adb_tools 目录失败: {exc}")
+
+    if os.path.isdir(source_dir):
+        try:
+            for name in os.listdir(source_dir):
+                src = os.path.join(source_dir, name)
+                dst = os.path.join(target_dir, name)
+                if not os.path.isfile(src):
+                    continue
+                if os.path.isfile(dst) and os.path.getsize(dst) > 0:
+                    continue
+                try:
+                    shutil.copy2(src, dst)
+                    copied.append(name)
+                except Exception as exc:
+                    errors.append(f"复制 {name} 失败: {exc}")
+        except Exception as exc:
+            errors.append(f"遍历 platform-tools 失败: {exc}")
+    else:
+        errors.append("未找到内置 platform-tools 目录")
+
+    adb_path = os.path.join(target_dir, "adb.exe")
+    ready = os.path.isfile(adb_path)
+    return {
+        "source_dir": source_dir,
+        "target_dir": target_dir,
+        "copied": copied,
+        "adb_path": adb_path if ready else "",
+        "ready": ready,
+        "errors": errors,
+    }
+
+
 def _get_u2_jar_candidate_dirs():
     """返回 u2.jar 可能存在的目录（兼容开发环境与打包后，参考 ALAS uiautomator2cache）"""
     candidates = []
