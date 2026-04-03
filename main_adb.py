@@ -10,6 +10,9 @@ import traceback
 from adb_controller import AdbController, woa_debug_set_runtime_started, save_image_safe, read_image_safe
 from simple_ocr import StopSignal, SimpleOCR
 
+# 资助功能完整性守卫标记（由 gui_launcher 在严格模式下联动校验）
+WOA_FEATURE_GUARD_TOKEN = "WOA_DONATE_GUARD_V1"
+
 
 def get_resource_path(relative_path):
     if getattr(sys, 'frozen', False):

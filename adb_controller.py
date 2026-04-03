@@ -21,6 +21,9 @@ from woa_debug import (
 )
 from nemu_ipc import NemuIpcHelper, _load_dll_safe, NEMU_IPC_DEBUG
 
+# 资助功能完整性守卫标记（由 gui_launcher 在严格模式下联动校验）
+WOA_FEATURE_GUARD_TOKEN = "WOA_DONATE_GUARD_V1"
+
 # 用于进程退出时清理残留（含非正常关闭）
 _adb_instances = []
 

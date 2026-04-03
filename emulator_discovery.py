@@ -9,6 +9,9 @@ import re
 import sys
 from typing import List, Optional, Tuple
 
+# 资助功能完整性守卫标记（由 gui_launcher 在严格模式下联动校验）
+WOA_FEATURE_GUARD_TOKEN = "WOA_DONATE_GUARD_V1"
+
 # Windows 专用
 if sys.platform == "win32":
     import winreg

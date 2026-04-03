@@ -100,7 +100,7 @@ if INSTANCE_ID is None:
 CONFIG_FILE = "config.json" if INSTANCE_ID == 1 else f"config_{INSTANCE_ID}.json"
 STATS_FILE = "woa_stats.csv"
 
-LOCAL_VERSION = "1.0.3"
+LOCAL_VERSION = "1.0.4"
 OFFICIAL_REPO_URL = "https://github.com/hjtr7mymht-dot/WOA_AutoBot"
 OFFICIAL_REPO_NAME = "hjtr7mymht-dot/WOA_AutoBot"
 ONLINE_VERSION_PATH = "version.json"
@@ -111,6 +111,24 @@ REQUIRED_GUARD_MODULES = (
     "simple_ocr",
     "emulator_discovery",
 )
+FEATURE_GUARD_TOKEN = "WOA_DONATE_GUARD_V1"
+
+DONATE_IMAGE_CANDIDATES = {
+    "微信支付": (
+        os.path.join("assets", "donate", "wechat_pay.png"),
+        os.path.join("assets", "donate", "wechat_pay.jpg"),
+        os.path.join("assets", "donate", "wechat_pay.jpeg"),
+        os.path.join("assets", "donate", "wechat_pay.webp"),
+        os.path.join("assets", "donate", "wechat.png"),
+    ),
+    "支付宝": (
+        os.path.join("assets", "donate", "alipay_pay.png"),
+        os.path.join("assets", "donate", "alipay_pay.jpg"),
+        os.path.join("assets", "donate", "alipay_pay.jpeg"),
+        os.path.join("assets", "donate", "alipay_pay.webp"),
+        os.path.join("assets", "donate", "alipay.png"),
+    ),
+}
 
 
 def _version_tuple(version):
@@ -349,7 +367,7 @@ class TeeToFile:
 class Application(ttkb.Window):
     def __init__(self):
         try:
-            myappid = 'woabot.launcher.v1.0.3'
+            myappid = 'woabot.launcher.v1.0.4'
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
         except:
             pass
@@ -1281,6 +1299,13 @@ exit /b 1
                 spec = importlib.util.find_spec(mod_name)
                 if spec is None:
                     missing.append(mod_name)
+                    continue
+                module_obj = sys.modules.get(mod_name)
+                if module_obj is None:
+                    module_obj = __import__(mod_name)
+                token = str(getattr(module_obj, "WOA_FEATURE_GUARD_TOKEN", "")).strip()
+                if token != FEATURE_GUARD_TOKEN:
+                    missing.append(f"{mod_name}.guard")
             except Exception:
                 missing.append(mod_name)
 
@@ -1291,6 +1316,17 @@ exit /b 1
             launcher_exists = os.path.exists(os.path.abspath(__file__))
         if not launcher_exists:
             missing.append("gui_launcher")
+
+        # 关键功能守卫：资助入口和资源目录被删除/篡改时在严格模式触发阻断。
+        donate_fn = getattr(self, "open_donate_window", None)
+        if not callable(donate_fn):
+            missing.append("donate.entry")
+        if not isinstance(DONATE_IMAGE_CANDIDATES, dict) or not DONATE_IMAGE_CANDIDATES:
+            missing.append("donate.candidates")
+        donate_readme = get_resource_path(os.path.join("assets", "donate", "README.md"))
+        if not os.path.isfile(donate_readme):
+            missing.append("assets.donate")
+
         self._missing_guard_modules = sorted(set(missing))
         self._guard_integrity_ok = len(self._missing_guard_modules) == 0
         return self._guard_integrity_ok
@@ -1455,6 +1491,100 @@ exit /b 1
             "4. 如需人工访问仓库，可先打开官方仓库按钮，必要时通过浏览器代理访问。"
         )
         messagebox.showinfo("国内网络方案", message, parent=self)
+
+    def _resolve_donate_image(self, pay_type):
+        candidates = DONATE_IMAGE_CANDIDATES.get(pay_type, ())
+        fallback_rel = candidates[0] if candidates else ""
+        for rel_path in candidates:
+            abs_path = get_resource_path(rel_path)
+            if os.path.isfile(abs_path):
+                return abs_path, rel_path
+        return "", fallback_rel
+
+    def _load_donate_photo(self, image_path, max_width=330, max_height=520):
+        with Image.open(image_path) as img:
+            img.load()
+            src_w, src_h = img.size
+            if src_w <= 0 or src_h <= 0:
+                raise ValueError("无效图片尺寸")
+            scale = min(max_width / float(src_w), max_height / float(src_h), 1.0)
+            new_w = max(1, int(src_w * scale))
+            new_h = max(1, int(src_h * scale))
+            if hasattr(Image, "Resampling"):
+                resample = Image.Resampling.LANCZOS
+            else:
+                resample = Image.LANCZOS
+            resized = img.resize((new_w, new_h), resample)
+            return ImageTk.PhotoImage(resized)
+
+    def open_donate_window(self):
+        donate_win = getattr(self, "donate_win", None)
+        if donate_win and donate_win.winfo_exists():
+            donate_win.lift()
+            donate_win.focus_force()
+            return
+
+        parent = self.settings_win if hasattr(self, "settings_win") and self.settings_win.winfo_exists() else self
+        win = ttkb.Toplevel(self)
+        self.donate_win = win
+        win.title("自愿资助")
+        win.geometry("860x760")
+        win.minsize(760, 620)
+        win.transient(parent)
+        win.grab_set()
+
+        outer = ttkb.Frame(win, padding=16)
+        outer.pack(fill=BOTH, expand=True)
+        ttkb.Label(outer, text="自愿资助作者买杯咖啡", font=("Microsoft YaHei UI", 16, "bold"), bootstyle="primary").pack(anchor="w")
+        ttkb.Label(
+            outer,
+            text="完全自愿，无任何功能限制；感谢支持项目持续维护。",
+            bootstyle="secondary",
+        ).pack(anchor="w", pady=(4, 12))
+
+        cards = ttkb.Frame(outer)
+        cards.pack(fill=BOTH, expand=True)
+        cards.grid_columnconfigure(0, weight=1, uniform="donate_cols")
+        cards.grid_columnconfigure(1, weight=1, uniform="donate_cols")
+
+        self._donate_image_refs = []
+        for idx, pay_type in enumerate(("微信支付", "支付宝")):
+            card = ttkb.Labelframe(cards, text=pay_type, padding=10, bootstyle="info")
+            card.grid(row=0, column=idx, sticky="nsew", padx=(0, 8) if idx == 0 else (8, 0))
+
+            abs_path, expected_rel = self._resolve_donate_image(pay_type)
+            if abs_path:
+                try:
+                    photo = self._load_donate_photo(abs_path)
+                    img_label = ttkb.Label(card, image=photo)
+                    img_label.image = photo
+                    img_label.pack(fill=BOTH, expand=True)
+                    self._donate_image_refs.append(photo)
+                    ttkb.Label(card, text=f"已加载: {os.path.basename(abs_path)}", bootstyle="secondary").pack(anchor="w", pady=(8, 0))
+                except Exception as exc:
+                    ttkb.Label(card, text=f"图片加载失败: {exc}", bootstyle="danger").pack(anchor="w", pady=(8, 0))
+            else:
+                ttkb.Label(
+                    card,
+                    text=(
+                        "未找到收款码图片。\n"
+                        f"请将图片放到: {expected_rel}"
+                    ),
+                    justify="left",
+                    bootstyle="warning",
+                ).pack(fill=BOTH, expand=True)
+
+        ttkb.Label(
+            outer,
+            text="提示: 高级设置中点击“自愿资助”按钮时才会显示本窗口。",
+            bootstyle="secondary",
+        ).pack(anchor="w", pady=(12, 8))
+
+        action_row = ttkb.Frame(outer)
+        action_row.pack(fill=X)
+        ttkb.Button(action_row, text="关闭", bootstyle="secondary-outline", command=win.destroy, width=10).pack(side=RIGHT)
+
+        win.after(50, lambda: self._center_toplevel_on_parent(win))
 
     def _center_toplevel_on_parent(self, win):
         """将子窗口居中于主窗口"""
@@ -2251,6 +2381,8 @@ exit /b 1
         ttkb.Button(top_action_row, text="保存设置", bootstyle="success", width=18, command=save).pack(side=LEFT)
         ttkb.Button(top_action_row, text="📊 统计图表", bootstyle="info-outline", width=18,
                 command=self._open_stats_chart).pack(side=LEFT, padx=(10, 0))
+        ttkb.Button(top_action_row, text="自愿资助", bootstyle="warning-outline", width=18,
+            command=self.open_donate_window).pack(side=LEFT, padx=(10, 0))
         ttkb.Separator(body).pack(fill=X, pady=10)
         win.after(50, lambda: self._center_toplevel_on_parent(win))
 
