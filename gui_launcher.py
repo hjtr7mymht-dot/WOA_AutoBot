@@ -98,7 +98,7 @@ if INSTANCE_ID is None:
 CONFIG_FILE = "config.json" if INSTANCE_ID == 1 else f"config_{INSTANCE_ID}.json"
 STATS_FILE = "woa_stats.csv"
 
-LOCAL_VERSION = "1.0.1"
+LOCAL_VERSION = "1.0.2"
 OFFICIAL_REPO_URL = "https://github.com/hjtr7mymht-dot/WOA_AutoBot"
 OFFICIAL_REPO_NAME = "hjtr7mymht-dot/WOA_AutoBot"
 ONLINE_VERSION_PATH = "version.json"
@@ -327,7 +327,7 @@ class TeeToFile:
 class Application(ttkb.Window):
     def __init__(self):
         try:
-            myappid = 'woabot.launcher.v1.0.1'
+            myappid = 'woabot.launcher.v1.0.2'
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
         except:
             pass
@@ -341,7 +341,7 @@ class Application(ttkb.Window):
 
         self.title(f"WOA AutoBot {LOCAL_VERSION}" + (f" [实例 {INSTANCE_ID}]" if INSTANCE_ID > 1 else ""))
         self.geometry("1080x1200")
-        self.minsize(1080, 1200)
+        self.minsize(120, 120)
         self.last_geometry = "1080x1200"
         self.is_mini_mode = False
         self._strict_online_guard = bool(getattr(sys, 'frozen', False))
@@ -1091,7 +1091,13 @@ class Application(ttkb.Window):
                     missing.append(mod_name)
             except Exception:
                 missing.append(mod_name)
-        if not os.path.exists(os.path.abspath(__file__)):
+
+        # 打包后入口以 exe 形式存在，源码模式才检查当前 py 文件。
+        if getattr(sys, "frozen", False):
+            launcher_exists = os.path.exists(os.path.abspath(sys.executable))
+        else:
+            launcher_exists = os.path.exists(os.path.abspath(__file__))
+        if not launcher_exists:
             missing.append("gui_launcher")
         self._missing_guard_modules = sorted(set(missing))
         self._guard_integrity_ok = len(self._missing_guard_modules) == 0

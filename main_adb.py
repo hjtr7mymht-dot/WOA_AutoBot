@@ -173,6 +173,10 @@ class WoaBot:
         self.last_read_success = False
         self.thinking_mode = 0
         self.thinking_range = (0, 0)
+        self._task_fail_cooldown = {}
+        self._task_fail_cooldown_sec = 5.0
+        self._no_operable_count = 0
+        self._no_operable_threshold = 3
 
         self.ICON_ROIS = {
             'cross_runway.png': self.REGION_BOTTOM_ROI,
@@ -973,6 +977,7 @@ class WoaBot:
         self.last_recovery_time = 0
         self._anti_stuck_trigger_count = 0
         self._anti_stuck_stop_requested = False
+        self._no_operable_count = 0
         # 重置塔台状态
         self._tower_disabled = False
         self._tower_was_active = False
@@ -1843,6 +1848,7 @@ class WoaBot:
         self.log(">>> [任务] 检查 Doing 状态...")
         red_warn = self.safe_locate('red_warning.png', confidence=0.75)
         if red_warn:
+            self._no_operable_count = 0
             if self.enable_vehicle_buy:
                 self.log("   -> 🚨 发现车辆不足，准备购买")
                 self.adb.click(red_warn[0], red_warn[1], random_offset=1)
@@ -1867,20 +1873,39 @@ class WoaBot:
             res_done = self.adb.locate_image(self.icon_path + 'ground_support_done.png', confidence=0.8,
                                              screen_image=roi_img)
             if res_done:
+                self._no_operable_count = 0
                 self.log("   -> 🕒 发现延误/完成飞机")
                 if self.enable_delay_bribe:
                     agent_loc = self.safe_locate('stand_agent_false.png')
                     if agent_loc:
                         self.log("   -> [贿赂] 点击服务代理...")
                         self.adb.click(agent_loc[0], agent_loc[1])
-                        if self.wait_and_click('stand_agent_true.png', timeout=2.0, click_wait=0):
+                        self.sleep(0.25)
+                        bribe_ok = False
+                        verify_start = time.time()
+                        while time.time() - verify_start < 2.0:
+                            self._check_running()
+                            if self.safe_locate('stand_agent_true.png', confidence=0.8):
+                                bribe_ok = True
+                                break
+                            self.sleep(0.1)
+                        if bribe_ok:
                             self.log("   -> [贿赂] 代理已激活")
+                        else:
+                            self.log("   -> [贿赂] 激活未确认，跳过结束服务避免误推出")
+                            self.close_window()
+                            return False
                 self.adb.click(res_done[0] + bx, res_done[1] + by)
                 self.log("   -> ✅ 点击结束服务")
                 self.sleep(0.5)
                 return True
-        self.log("   -> 未发现可操作项目")
+        self._no_operable_count += 1
+        self.log(f"   -> 未发现可操作项目 ({self._no_operable_count}/{self._no_operable_threshold})")
         self.close_window()
+        if self._no_operable_count >= self._no_operable_threshold:
+            self.log("📋 [调度] 未发现可操作项目达到阈值，切换下个任务")
+            self._no_operable_count = 0
+            return False
         return True
 
     def handle_approach_task(self, target_pos=None):
@@ -2297,9 +2322,47 @@ class WoaBot:
             self.close_window()
             self.last_seen_main_interface_time = time.time() - (self.STUCK_TIMEOUT - 5)
 
+    def _task_key(self, task):
+        center = task.get('center', (0, 0))
+        return f"{task.get('name', '')}:{center[0]}:{center[1]}"
+
+    def _is_task_on_cooldown(self, task):
+        key = self._task_key(task)
+        until = self._task_fail_cooldown.get(key, 0.0)
+        return time.time() < until
+
+    def _mark_task_failed(self, task):
+        key = self._task_key(task)
+        self._task_fail_cooldown[key] = time.time() + self._task_fail_cooldown_sec
+
+    def _cleanup_task_cooldown(self):
+        now = time.time()
+        expired = [k for k, v in self._task_fail_cooldown.items() if v <= now]
+        for k in expired:
+            self._task_fail_cooldown.pop(k, None)
+
+    def _execute_task(self, task):
+        self.log(f"识别结果: {task['name']} (分数: {task['score']:.2f})")
+        self.adb.click(task['center'][0] + 60, task['center'][1], random_offset=3)
+        try:
+            result = task['handler']()
+        except (StopSignal, KeyboardInterrupt, SystemExit):
+            raise
+        except Exception:
+            result = task['handler'](None)
+
+        if result:
+            self._task_fail_cooldown.pop(self._task_key(task), None)
+            return True
+
+        self._mark_task_failed(task)
+        self.log(f"📋 [调度] 当前任务未满足，自动切换下一任务: {task['name']}")
+        return False
+
     def scan_and_process(self):
         self._check_and_recover_interface()
         self._periodic_15s_check()
+        self._cleanup_task_cooldown()
 
         current_screen = self.adb.get_screenshot()
         if current_screen is None:
@@ -2351,14 +2414,11 @@ class WoaBot:
             for det in doing_tasks:
                 if time.time() <= self.doing_task_forbidden_until:
                     continue
+                if self._is_task_on_cooldown(det):
+                    continue
                 self.log(f"⚡ [高优] 发现 Doing 任务 (分数: {det['score']:.2f})")
-                self.adb.click(det['center'][0] + 60, det['center'][1], random_offset=3)
-                try:
-                    return det['handler']()
-                except (StopSignal, KeyboardInterrupt, SystemExit):
-                    raise
-                except Exception:
-                    return det['handler'](None)
+                if self._execute_task(det):
+                    return True
 
         valid_candidates = []
         no_takeoff_strategy = self._get_no_takeoff_strategy() if self.enable_no_takeoff_mode else None
@@ -2371,6 +2431,8 @@ class WoaBot:
                 if skips_left > 0:
                     skips_left -= 1
                     continue
+            if self._is_task_on_cooldown(t):
+                continue
             valid_candidates.append(t)
 
         if not valid_candidates:
@@ -2386,30 +2448,27 @@ class WoaBot:
             return False
 
         self._no_candidate_closed = False
-        selected_task = None
+        ordered_tasks = []
         if self.enable_random_task and len(valid_candidates) > 1:
             top_k = 3
             if random.random() < 0.8:
                 pool = valid_candidates[:top_k]
-                selected_task = random.choice(pool)
+                first = random.choice(pool)
             else:
                 pool = valid_candidates[top_k:]
                 if not pool:
                     pool = valid_candidates[:top_k]
-                selected_task = random.choice(pool)
+                first = random.choice(pool)
+            ordered_tasks = [first] + [t for t in valid_candidates if t is not first]
         else:
-            selected_task = valid_candidates[0]
+            ordered_tasks = valid_candidates
 
         time_until_refresh = self.next_list_refresh_time - time.time()
         if 0 < time_until_refresh < 0.8:
             self.sleep(time_until_refresh + 0.5)
             return False
 
-        self.log(f"识别结果: {selected_task['name']} (分数: {selected_task['score']:.2f})")
-        self.adb.click(selected_task['center'][0] + 60, selected_task['center'][1], random_offset=3)
-        try:
-            return selected_task['handler']()
-        except (StopSignal, KeyboardInterrupt, SystemExit):
-            raise
-        except Exception:
-            return selected_task['handler'](None)
+        for task in ordered_tasks:
+            if self._execute_task(task):
+                return True
+        return False
