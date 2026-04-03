@@ -21,47 +21,91 @@ class SimpleOCR:
         self._load_templates("global", self.templates_global)
         self._load_templates("task", self.templates_task)
 
+    def _to_gray(self, img):
+        if img is None or img.size == 0:
+            return None
+        if len(img.shape) == 3:
+            return cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        return img
+
     def _process_image(self, img):
-        if img is None or img.size == 0: return None
+        if img is None or img.size == 0:
+            return None
         h, w = img.shape[:2]
         try:
-            scaled_img = cv2.resize(img, (w * self.SCALE_FACTOR, h * self.SCALE_FACTOR), interpolation=cv2.INTER_LINEAR)
-            if len(scaled_img.shape) == 3:
-                gray = cv2.cvtColor(scaled_img, cv2.COLOR_BGR2GRAY)
-            else:
-                gray = scaled_img
+            scaled_img = cv2.resize(img, (w * self.SCALE_FACTOR, h * self.SCALE_FACTOR), interpolation=cv2.INTER_CUBIC)
+            gray = self._to_gray(scaled_img)
+            if gray is None:
+                return None
             _, binary = cv2.threshold(gray, 170, 255, cv2.THRESH_BINARY)
             return binary
         except Exception:
             return None
 
-    def _load_templates(self, sub_folder, target_dict):
-        folder_path = os.path.join(self.root_path, sub_folder) + os.sep
-        if not os.path.exists(folder_path): return
-        chars = [str(i) for i in range(10)] + ['slash', 'h', 'm', 's']
-        for char in chars:
-            path = folder_path + char + ".png"
-            if os.path.exists(path):
-                img = cv2.imdecode(np.fromfile(path, dtype=np.uint8), cv2.IMREAD_GRAYSCALE)
-                target_dict[char] = img
+    def _build_processed_variants(self, img):
+        gray = self._to_gray(img)
+        if gray is None:
+            return []
+        h, w = gray.shape[:2]
+        scale_candidates = [self.SCALE_FACTOR]
+        if h <= 26 or w <= 90:
+            scale_candidates.append(max(self.SCALE_FACTOR + 2, 6))
+        variants = []
+        seen = set()
+        for scale in scale_candidates:
+            try:
+                scaled = cv2.resize(gray, (w * scale, h * scale), interpolation=cv2.INTER_CUBIC)
+            except Exception:
+                continue
+            normalized = cv2.normalize(scaled, None, 0, 255, cv2.NORM_MINMAX)
+            blurred = cv2.GaussianBlur(normalized, (3, 3), 0)
+            threshold_variants = []
+            for threshold in (145, 160, 175, 190):
+                _, binary = cv2.threshold(blurred, threshold, 255, cv2.THRESH_BINARY)
+                threshold_variants.append(binary)
+            _, otsu = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            threshold_variants.append(otsu)
+            adaptive = cv2.adaptiveThreshold(
+                blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2
+            )
+            threshold_variants.append(adaptive)
+            for binary in threshold_variants:
+                signature = (binary.shape[0], binary.shape[1], int(binary.mean()))
+                if signature in seen:
+                    continue
+                seen.add(signature)
+                variants.append(binary)
+        return variants
 
-    def recognize_number(self, region, mode='global', screen_image=None):
+    def _region_candidates(self, region, screen_shape):
         x, y, w, h = region
-        if screen_image is not None:
-            full_screen = screen_image
-        else:
-            full_screen = self.adb.get_screenshot()
-        if full_screen is None: return None
+        max_h, max_w = screen_shape[:2]
+        pad_x = max(3, int(round(w * 0.18)))
+        pad_y = max(2, int(round(h * 0.25)))
+        candidates = []
+        raw_candidates = [
+            (x, y, w, h),
+            (x - pad_x, y - pad_y, w + pad_x * 2, h + pad_y * 2),
+            (x - pad_x, y, w + pad_x * 2, h),
+            (x, y - pad_y, w, h + pad_y * 2),
+            (x + pad_x // 2, y, w, h),
+            (x - pad_x // 2, y, w, h),
+        ]
+        for cx, cy, cw, ch in raw_candidates:
+            nx = max(0, cx)
+            ny = max(0, cy)
+            nw = min(max_w - nx, cw)
+            nh = min(max_h - ny, ch)
+            if nw <= 2 or nh <= 2:
+                continue
+            candidate = (nx, ny, nw, nh)
+            if candidate not in candidates:
+                candidates.append(candidate)
+        return candidates
 
-        if y < 0 or x < 0 or y + h > full_screen.shape[0] or x + w > full_screen.shape[1]:
-            return None
-
-        crop_img = full_screen[y:y + h, x:x + w]
-        processed_crop = self._process_image(crop_img)
-        if processed_crop is None: return None
-
-        templates = self.templates_global if mode == 'global' else self.templates_task
-        if not templates: return None
+    def _extract_text_from_processed(self, processed_crop, templates):
+        if processed_crop is None or processed_crop.size == 0:
+            return None, 0.0
         matches = []
         threshold = 0.7
         for char, template in templates.items():
@@ -71,12 +115,13 @@ class SimpleOCR:
             loc = np.where(res >= threshold)
             t_w = template.shape[1]
             for pt in zip(*loc[::-1]):
-                score = res[pt[1], pt[0]]
+                score = float(res[pt[1], pt[0]])
                 matches.append({'x': pt[0], 'char': '/' if char == 'slash' else char, 'score': score, 'width': t_w})
-        if not matches: return None
+        if not matches:
+            return None, 0.0
         matches.sort(key=lambda k: k['x'])
         final_results = []
-        while len(matches) > 0:
+        while matches:
             curr = matches.pop(0)
             keep_curr = True
             if final_results:
@@ -98,7 +143,68 @@ class SimpleOCR:
             if keep_curr:
                 final_results.append(curr)
         result_str = "".join([m['char'] for m in final_results])
-        return result_str
+        if not result_str:
+            return None, 0.0
+        total_score = sum(m['score'] for m in final_results)
+        quality = total_score / max(1, len(final_results))
+        return result_str, quality
+
+    def _score_text(self, text, quality, mode):
+        if not text:
+            return -1.0
+        score = float(quality)
+        digit_count = sum(ch.isdigit() for ch in text)
+        score += min(digit_count, 6) * 0.03
+        if '/' in text:
+            score += 0.12
+        if mode == 'global' and '/' in text and digit_count >= 2:
+            score += 0.15
+        if any(ch in text for ch in ('h', 'm', 's')):
+            score += 0.08
+        return score
+
+    def _load_templates(self, sub_folder, target_dict):
+        folder_path = os.path.join(self.root_path, sub_folder) + os.sep
+        if not os.path.exists(folder_path): return
+        chars = [str(i) for i in range(10)] + ['slash', 'h', 'm', 's']
+        for char in chars:
+            path = folder_path + char + ".png"
+            if os.path.exists(path):
+                img = cv2.imdecode(np.fromfile(path, dtype=np.uint8), cv2.IMREAD_GRAYSCALE)
+                target_dict[char] = img
+
+    def recognize_number(self, region, mode='global', screen_image=None):
+        if screen_image is not None:
+            full_screen = screen_image
+        else:
+            full_screen = self.adb.get_screenshot()
+        if full_screen is None:
+            return None
+        templates = self.templates_global if mode == 'global' else self.templates_task
+        if not templates:
+            return None
+
+        best_text = None
+        best_score = -1.0
+        for candidate_region in self._region_candidates(region, full_screen.shape):
+            x, y, w, h = candidate_region
+            if y < 0 or x < 0 or y + h > full_screen.shape[0] or x + w > full_screen.shape[1]:
+                continue
+            crop_img = full_screen[y:y + h, x:x + w]
+            processed_variants = []
+            primary = self._process_image(crop_img)
+            if primary is not None:
+                processed_variants.append(primary)
+            processed_variants.extend(self._build_processed_variants(crop_img))
+            for processed_crop in processed_variants:
+                result_str, quality = self._extract_text_from_processed(processed_crop, templates)
+                text_score = self._score_text(result_str, quality, mode)
+                if text_score > best_score:
+                    best_score = text_score
+                    best_text = result_str
+                if mode == 'global' and result_str and '/' in result_str and sum(ch.isdigit() for ch in result_str) >= 2:
+                    return result_str
+        return best_text
 
     def parse_staff_count(self, text):
         try:

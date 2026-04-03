@@ -43,6 +43,8 @@ class WoaBot:
         self.ocr = None
         self.stand_skip_index = 0
         self.in_staff_shortage_mode = False
+        self._next_staff_recovery_probe_time = 0.0
+        self._staff_recovery_probe_interval = 8.0
         self.enable_bonus_staff = False
         self.last_bonus_staff_time = 0
         self.BONUS_COOLDOWN = 2 * 60 * 60
@@ -969,6 +971,7 @@ class WoaBot:
         if self.running: return
         self.stand_skip_index = 0
         self.in_staff_shortage_mode = False
+        self._next_staff_recovery_probe_time = 0.0
         self.last_checked_avail_staff = -1
         self.last_window_close_time = time.time()
         # 初始化计数器
@@ -1333,11 +1336,31 @@ class WoaBot:
             return (result[0] + x, result[1] + y)
         return None
 
+    def _iter_region_fallbacks(self, region, pad_x=0, pad_y=0):
+        x, y, w, h = region
+        candidates = [region]
+        if pad_x > 0 or pad_y > 0:
+            candidates.extend([
+                (x - pad_x, y - pad_y, w + pad_x * 2, h + pad_y * 2),
+                (x - pad_x, y, w + pad_x * 2, h),
+                (x, y - pad_y, w, h + pad_y * 2),
+                (x + pad_x // 2, y, w, h),
+                (x - pad_x // 2, y, w, h),
+            ])
+        unique = []
+        for candidate in candidates:
+            if candidate not in unique:
+                unique.append(candidate)
+        return unique
+
     def check_global_staff(self, screen_image=None):
-        text = self.ocr.recognize_number(self.REGION_GLOBAL_STAFF, mode='global', screen_image=screen_image)
-        if not text: return None
-        result = self.ocr.parse_staff_count(text)
-        if result: return result[2]
+        for region in self._iter_region_fallbacks(self.REGION_GLOBAL_STAFF, pad_x=14, pad_y=6):
+            text = self.ocr.recognize_number(region, mode='global', screen_image=screen_image)
+            if not text:
+                continue
+            result = self.ocr.parse_staff_count(text)
+            if result:
+                return result[2]
         return None
 
     def _verify_and_redirect(self, expected_status_img):
@@ -2075,8 +2098,12 @@ class WoaBot:
                 self._update_staff_tracker(None)
                 avail_staff = 999
                 is_read_success = False
-            cost_text = self.ocr.recognize_number(self.REGION_TASK_COST, mode='task')
-            required_cost = self.ocr.parse_cost(cost_text)
+            required_cost = None
+            for region in self._iter_region_fallbacks(self.REGION_TASK_COST, pad_x=12, pad_y=6):
+                cost_text = self.ocr.recognize_number(region, mode='task')
+                required_cost = self.ocr.parse_cost(cost_text)
+                if required_cost is not None:
+                    break
             self._stat_last_required_cost = required_cost
             if required_cost is None:
                 self.log(f"⚠️ 读取花费失败，盲做")
@@ -2098,6 +2125,8 @@ class WoaBot:
             self.log(f"   -> 需求: {required_cost}+1 | 可用: {avail_staff}")
 
             if avail_staff >= (required_cost + 1):
+                self.in_staff_shortage_mode = False
+                self._next_staff_recovery_probe_time = 0.0
                 if self.safe_locate('green_dot.png', region=self.REGION_GREEN_DOT):
                     self.log("   -> ✅ 地勤人员充足，开始分配")
                     if self._perform_stand_action_sequence(force_verify=not is_read_success):
@@ -2124,6 +2153,7 @@ class WoaBot:
                 return True
             self.stand_skip_index += 1
             self.in_staff_shortage_mode = True
+            self._next_staff_recovery_probe_time = time.time() + self._staff_recovery_probe_interval
             self.last_known_available_staff = avail_staff
             return False
 
@@ -2385,7 +2415,8 @@ class WoaBot:
         now = time.time()
         prev_staff = self.last_checked_avail_staff
         staff_this_round = None
-        if now - self.last_staff_check_time > 3.0:
+        staff_check_interval = 1.0 if (self.in_staff_shortage_mode or self.stand_skip_index > 0) else 3.0
+        if now - self.last_staff_check_time > staff_check_interval:
             staff_this_round = self.check_global_staff(screen_image=current_screen)
             self._update_staff_tracker(staff_this_round)
             self.last_staff_check_time = now
@@ -2397,10 +2428,16 @@ class WoaBot:
                 is_changed = (prev_staff != -1) and (current_avail != prev_staff)
                 is_zero_recovery = (prev_staff == 0) and (current_avail > 0)
                 is_safe_amount = current_avail >= 15
-                if is_safe_amount or is_changed or is_blind_recovery or is_zero_recovery:
-                    if is_changed: self.log(f"✅ 地勤变化 ({prev_staff}->{current_avail})，恢复")
+                required_cost = self._stat_last_required_cost
+                meets_required_cost = required_cost is not None and current_avail >= (required_cost + 1)
+                if is_safe_amount or is_changed or is_blind_recovery or is_zero_recovery or meets_required_cost:
+                    if meets_required_cost:
+                        self.log(f"✅ 地勤已满足当前需求 ({current_avail} >= {required_cost + 1})，恢复执行")
+                    elif is_changed:
+                        self.log(f"✅ 地勤变化 ({prev_staff}->{current_avail})，恢复")
                     self.in_staff_shortage_mode = False
                     self.stand_skip_index = 0
+                    self._next_staff_recovery_probe_time = 0.0
                 self.last_checked_avail_staff = current_avail
 
         if self._check_and_perform_auto_delay(current_screen): return True
@@ -2427,7 +2464,11 @@ class WoaBot:
             if t['type'] == 'doing' and not self.enable_no_takeoff_mode:
                 continue
             if t['type'] == 'stand':
-                if self.in_staff_shortage_mode: continue
+                if self.in_staff_shortage_mode:
+                    if time.time() < self._next_staff_recovery_probe_time:
+                        continue
+                    self.log("📋 [调度] 地勤短缺恢复探测：尝试执行一个停机位任务")
+                    self._next_staff_recovery_probe_time = time.time() + self._staff_recovery_probe_interval
                 if skips_left > 0:
                     skips_left -= 1
                     continue
