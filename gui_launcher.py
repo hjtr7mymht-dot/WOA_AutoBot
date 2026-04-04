@@ -11,13 +11,10 @@ import tkinter as tk
 import ctypes
 import subprocess
 import msvcrt
-import shutil
 import time
-import tempfile
 import webbrowser
 import urllib.error
 import urllib.request
-import zipfile
 import adb_controller as adb_mod
 from tkinter import filedialog, messagebox
 from tkinter.scrolledtext import ScrolledText
@@ -100,7 +97,7 @@ if INSTANCE_ID is None:
 CONFIG_FILE = "config.json" if INSTANCE_ID == 1 else f"config_{INSTANCE_ID}.json"
 STATS_FILE = "woa_stats.csv"
 
-LOCAL_VERSION = "1.0.5"
+LOCAL_VERSION = "1.0.6"
 OFFICIAL_REPO_URL = "https://github.com/hjtr7mymht-dot/WOA_AutoBot"
 OFFICIAL_REPO_NAME = "hjtr7mymht-dot/WOA_AutoBot"
 ONLINE_VERSION_PATH = "version.json"
@@ -367,7 +364,7 @@ class TeeToFile:
 class Application(ttkb.Window):
     def __init__(self):
         try:
-            myappid = 'woabot.launcher.v1.0.5'
+            myappid = 'woabot.launcher.v1.0.6'
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
         except:
             pass
@@ -427,8 +424,7 @@ class Application(ttkb.Window):
         self._online_verified_once = bool(self.config.get("online_verified_once", False))
         self._missing_guard_modules = []
         self._guard_integrity_ok = True
-        self._auto_update_running = False
-        self._auto_update_target_version = ""
+        self._startup_update_checked = False
 
         if self.config.get("adb_path"):
             set_custom_adb_path(self.config["adb_path"])
@@ -481,6 +477,7 @@ class Application(ttkb.Window):
 
         self.after(500, self.setup_window_icon)
         self.after(1200, self._bootstrap_online_guard)
+        self.after(2200, self._startup_online_update_check)
         self.after(4500, self._online_guard_tick)
         self.bind("<Map>", self._on_window_map)
         self._icon_loaded = False
@@ -1066,168 +1063,6 @@ class Application(ttkb.Window):
                 errors.append(f"{source_name}: {exc}")
         raise RuntimeError(" | ".join(errors) if errors else "未知网络错误")
 
-    def _extract_package_sources(self, manifest):
-        sources = []
-        package_urls = manifest.get("package_urls") if isinstance(manifest, dict) else None
-        package_url = manifest.get("package_url") if isinstance(manifest, dict) else None
-        package_path = manifest.get("package_path") if isinstance(manifest, dict) else None
-
-        if isinstance(package_urls, list):
-            for index, item in enumerate(package_urls, start=1):
-                if isinstance(item, str) and item.strip():
-                    sources.append((f"更新包源{index}", item.strip()))
-                elif isinstance(item, dict):
-                    url = str(item.get("url", "")).strip()
-                    name = str(item.get("name", f"更新包源{index}")).strip() or f"更新包源{index}"
-                    if url:
-                        sources.append((name, url))
-        elif isinstance(package_url, str) and package_url.strip():
-            sources.append(("更新包", package_url.strip()))
-
-        if not sources and isinstance(package_path, str) and package_path.strip():
-            sources.extend(self._build_online_sources(package_path.strip()))
-        return sources
-
-    def _download_binary_file(self, sources, target_path, timeout=30):
-        headers = {
-            "User-Agent": f"WOA-AutoBot/{LOCAL_VERSION}",
-            "Accept": "application/octet-stream,application/zip,*/*;q=0.8",
-        }
-        errors = []
-        os.makedirs(os.path.dirname(target_path), exist_ok=True)
-        for source_name, url in sources:
-            tmp_path = target_path + ".part"
-            try:
-                req = urllib.request.Request(url, headers=headers)
-                with urllib.request.urlopen(req, timeout=timeout) as resp, open(tmp_path, "wb") as fw:
-                    shutil.copyfileobj(resp, fw)
-                if os.path.isfile(tmp_path) and os.path.getsize(tmp_path) > 1024:
-                    if os.path.exists(target_path):
-                        os.remove(target_path)
-                    os.replace(tmp_path, target_path)
-                    return source_name, url
-                errors.append(f"{source_name}: 下载文件过小或为空")
-            except Exception as exc:
-                errors.append(f"{source_name}: {exc}")
-            finally:
-                try:
-                    if os.path.exists(tmp_path):
-                        os.remove(tmp_path)
-                except Exception:
-                    pass
-        raise RuntimeError(" | ".join(errors) if errors else "更新包下载失败")
-
-    def _find_update_payload_root(self, extract_dir):
-        for root, _, files in os.walk(extract_dir):
-            if "WOA_AutoBot.exe" in files:
-                return root
-        subdirs = [os.path.join(extract_dir, name) for name in os.listdir(extract_dir)] if os.path.isdir(extract_dir) else []
-        subdirs = [path for path in subdirs if os.path.isdir(path)]
-        if len(subdirs) == 1:
-            return subdirs[0]
-        return extract_dir
-
-    def _write_auto_update_script(self, script_path, source_dir, target_dir, exe_path, pid, cleanup_dir):
-        script = f"""@echo off
-setlocal enableextensions
-set "PID={pid}"
-set "SOURCE={source_dir}"
-set "TARGET={target_dir}"
-set "EXE={exe_path}"
-set "CLEANUP={cleanup_dir}"
-
-:waitloop
-tasklist /FI "PID eq %PID%" | find "%PID%" >nul
-if not errorlevel 1 (
-    timeout /t 1 /nobreak >nul
-    goto waitloop
-)
-
-robocopy "%SOURCE%" "%TARGET%" /E /NFL /NDL /NJH /NJS /NP /R:2 /W:1 >nul
-if errorlevel 8 goto fail
-
-if exist "%CLEANUP%" rmdir /s /q "%CLEANUP%"
-start "" "%EXE%"
-start "" cmd /c del /f /q "%~f0" >nul 2>nul
-exit /b 0
-
-:fail
-start "" cmd /c del /f /q "%~f0" >nul 2>nul
-exit /b 1
-"""
-        with open(script_path, "w", encoding="ascii", errors="ignore") as fw:
-            fw.write(script)
-
-    def _start_auto_update(self, result, silent=False):
-        if not getattr(sys, "frozen", False):
-            return False
-        if self._auto_update_running:
-            return True
-        remote_version = str(result.get("remote_version", "")).strip()
-        package_sources = result.get("package_sources") or []
-        if not remote_version or not package_sources:
-            return False
-
-        self._auto_update_running = True
-        self._auto_update_target_version = remote_version
-        self.var_online_status.set("更新中")
-        self.var_online_detail.set(f"检测到新版本 {remote_version}，正在下载更新包...")
-
-        def _worker():
-            error = None
-            source_name = ""
-            url = ""
-            try:
-                update_root = tempfile.mkdtemp(prefix="woa_autobot_update_")
-                zip_path = os.path.join(update_root, "WOA_AutoBot_update.zip")
-                source_name, url = self._download_binary_file(package_sources, zip_path)
-                extract_dir = os.path.join(update_root, "payload")
-                os.makedirs(extract_dir, exist_ok=True)
-                with zipfile.ZipFile(zip_path, "r") as zf:
-                    zf.extractall(extract_dir)
-                payload_root = self._find_update_payload_root(extract_dir)
-                new_exe = os.path.join(payload_root, os.path.basename(sys.executable))
-                if not os.path.isfile(new_exe):
-                    raise RuntimeError("更新包中未找到可执行文件，无法自动更新")
-                script_path = os.path.join(update_root, "apply_update.bat")
-                target_dir = os.path.dirname(sys.executable)
-                self._write_auto_update_script(
-                    script_path=script_path,
-                    source_dir=payload_root,
-                    target_dir=target_dir,
-                    exe_path=sys.executable,
-                    pid=os.getpid(),
-                    cleanup_dir=update_root,
-                )
-                subprocess.Popen(
-                    ["cmd", "/c", script_path],
-                    creationflags=0x08000000,
-                    cwd=target_dir,
-                )
-            except Exception as exc:
-                error = str(exc)
-
-            def _finish():
-                if error:
-                    self._auto_update_running = False
-                    self.var_online_status.set("发现更新")
-                    self.var_online_detail.set(f"检测到新版本 {remote_version}，但自动更新失败: {error}")
-                    print(f">>> [版本更新] 自动更新失败: {error}")
-                    if not silent:
-                        messagebox.showerror("自动更新失败", f"检测到新版本 {remote_version}，但自动更新失败。\n\n{error}", parent=self)
-                    return
-                print(f">>> [版本更新] 已下载 {remote_version} 更新包，来源 {source_name}: {url}")
-                self.var_online_status.set("准备重启")
-                self.var_online_detail.set(f"已下载新版本 {remote_version}，正在退出当前程序并自动完成更新")
-                if not silent:
-                    messagebox.showinfo("自动更新", f"检测到新版本 {remote_version}，已开始自动更新，程序将关闭并在更新后自动重启。", parent=self)
-                self.after(300, self._on_closing)
-
-            self.after(0, _finish)
-
-        threading.Thread(target=_worker, daemon=True).start()
-        return True
-
     def _resolve_online_validation(self):
         manifest_sources = self._build_online_sources(ONLINE_VERSION_PATH)
         readme_sources = self._build_online_sources("README.md")
@@ -1241,7 +1076,6 @@ exit /b 1
             text, source_name, url = self._fetch_online_text(manifest_sources)
             manifest = json.loads(text)
             remote_version = str(manifest.get("version", "")).strip().lstrip("vV")
-            package_sources = self._extract_package_sources(manifest)
             if remote_version:
                 version_cmp = _compare_version(remote_version, LOCAL_VERSION)
                 if version_cmp <= 0:
@@ -1250,14 +1084,12 @@ exit /b 1
                         "detail": f"官方源可达，当前已是最新版，来源 {source_name}",
                         "message": f"在线验证通过\n\n本地版本: {LOCAL_VERSION}\n线上版本: {remote_version}\n来源: {source_name}\n地址: {url}",
                         "remote_version": remote_version,
-                        "package_sources": package_sources,
                     }
                 return {
                     "status": "发现更新",
                     "detail": f"检测到线上版本 {remote_version}，来源 {source_name}",
                     "message": f"检测到新版本\n\n本地版本: {LOCAL_VERSION}\n线上版本: {remote_version}\n来源: {source_name}\n地址: {url}",
                     "remote_version": remote_version,
-                    "package_sources": package_sources,
                 }
         except Exception as exc:
             manifest_error = str(exc)
@@ -1428,6 +1260,16 @@ exit /b 1
             if not getattr(self, "_is_closing", False):
                 self.after(ONLINE_GUARD_RECHECK_SEC * 1000, self._online_guard_tick)
 
+    def _startup_online_update_check(self):
+        """仅在启动阶段执行一次联网版本检测，不执行自动下载更新。"""
+        if self._startup_update_checked or getattr(self, "_is_closing", False):
+            return
+        if self._online_validation_running:
+            self.after(1200, self._startup_online_update_check)
+            return
+        self._startup_update_checked = True
+        self.run_online_validation(silent=True)
+
     def run_online_validation(self, silent=False):
         if self._online_validation_running:
             return
@@ -1464,9 +1306,6 @@ exit /b 1
                 self.var_online_detail.set(result["detail"])
                 self._unlock_runtime_if_possible()
                 print(f">>> [在线验证] {result['detail']}")
-                if result.get("status") == "发现更新" and getattr(sys, "frozen", False):
-                    if self._start_auto_update(result, silent=silent):
-                        return
                 if not silent:
                     messagebox.showinfo("在线验证", result["message"], parent=self)
 

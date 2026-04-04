@@ -94,7 +94,9 @@ class WoaBot:
         self.REWARD_FLOW_BUTTONS = ['get_award_1.png', 'get_award_2.png', 'get_award_3.png', 'get_award_4.png',
                                     'push_back.png', 'taxi_to_runway.png', 'start_general.png']
         self.last_seen_main_interface_time = time.time()
-        self.STUCK_TIMEOUT = 15.0
+        self.STUCK_TIMEOUT = 28.0
+        self._interface_check_interval = 0.35
+        self._next_interface_check_time = 0.0
         self.auto_delay_count = 0
         self.TOWER_CHECK_POINTS = [(656, 809), (634, 831), (634, 809), (656, 830)]
         # BGR: 红(需延时) 绿(无需延时) 灰(塔台关闭)
@@ -170,8 +172,10 @@ class WoaBot:
         self.consecutive_timeout_count = 0
         self.last_recovery_time = 0  # 冷却时间
         self.last_window_close_time = time.time()
+        self._anti_stuck_warn_threshold = 6
         self._anti_stuck_trigger_count = 0
-        self._anti_stuck_stop_threshold = 3
+        self._anti_stuck_stop_threshold = 6
+        self._anti_stuck_hard_stop_threshold = 12
         self._anti_stuck_stop_requested = False
 
         self.last_checked_avail_staff = -1
@@ -683,33 +687,26 @@ class WoaBot:
                     'score': item['score'], 'type': type_for_logic, 'raw_type': t_type
                 })
 
-        def _same_row(y1, y2):
-            return abs(y1 - y2) <= ROW_HEIGHT
+        if not all_matches:
+            return [], []
 
+        # 按 y 先排序，再线性分组，避免 used+全表扫描导致的 O(n^2) 开销。
+        all_matches.sort(key=lambda d: d['y'])
         final_tasks = []
-        used = [False] * len(all_matches)
-        for i, det in enumerate(all_matches):
-            if used[i]:
-                continue
-            cy = det['y']
-            same_row = [all_matches[j] for j in range(len(all_matches)) if not used[j] and _same_row(all_matches[j]['y'], cy)]
-            if len(same_row) <= 1:
-                final_tasks.append(det)
-                used[i] = True
-                for j, d in enumerate(all_matches):
-                    if d is det or (not used[j] and _same_row(d['y'], cy)):
-                        used[j] = True
-                continue
-            same_row.sort(key=lambda x: x['score'], reverse=True)
-            best = same_row[0]
+        i = 0
+        n = len(all_matches)
+        while i < n:
+            row = [all_matches[i]]
+            row_anchor = all_matches[i]['y']
+            j = i + 1
+            while j < n and abs(all_matches[j]['y'] - row_anchor) <= ROW_HEIGHT:
+                row.append(all_matches[j])
+                j += 1
+            best = max(row, key=lambda x: x['score'])
             final_tasks.append(best)
-            for j, d in enumerate(all_matches):
-                if not used[j] and _same_row(d['y'], cy):
-                    used[j] = True
+            i = j
 
-        final_tasks.sort(key=lambda t: t['y'])
-        raw_detections = all_matches
-        return raw_detections, final_tasks
+        return all_matches, final_tasks
 
     def _fast_locate_all(self, screen_roi, template_name, confidence=0.8):
         if template_name not in self.task_templates:
@@ -724,26 +721,47 @@ class WoaBot:
             return []
 
         h, w = template.shape[:2]
-        loc = np.where(res >= confidence)
-        found_items = []
-        for pt in zip(*loc[::-1]):
-            score = res[pt[1], pt[0]]
-            is_duplicate = False
-            for item in found_items:
-                if abs(pt[0] - item['box'][0]) < 10 and abs(pt[1] - item['box'][1]) < 10:
-                    if score > item['score']:
-                        item['score'] = score
-                        item['box'] = (pt[0], pt[1], w, h)
-                        item['center'] = (pt[0] + w // 2, pt[1] + h // 2)
-                    is_duplicate = True
-                    break
-            if not is_duplicate:
-                found_items.append({
-                    'box': (pt[0], pt[1], w, h),
-                    'center': (pt[0] + w // 2, pt[1] + h // 2),
-                    'score': score
-                })
-        return found_items
+        ys, xs = np.where(res >= confidence)
+        if len(xs) == 0:
+            return []
+
+        # 用 10px 网格桶聚合重复命中，保留每个桶内最高分，避免逐项 O(n^2) 去重。
+        bucket_size = 10
+        best_by_bucket = {}
+        for x, y in zip(xs, ys):
+            key = (int(x) // bucket_size, int(y) // bucket_size)
+            score = float(res[y, x])
+            old = best_by_bucket.get(key)
+            if old is None or score > old['score']:
+                best_by_bucket[key] = {
+                    'box': (int(x), int(y), w, h),
+                    'center': (int(x) + w // 2, int(y) + h // 2),
+                    'score': score,
+                }
+        return list(best_by_bucket.values())
+
+    def _locate_on_screen(self, image_name, screen, confidence=0.8, region=None):
+        if screen is None:
+            return None
+        if region is None:
+            return self.adb.locate_image(self.icon_path + image_name, confidence=confidence, screen_image=screen)
+        x, y, w, h = region
+        x = max(0, int(x))
+        y = max(0, int(y))
+        roi = screen[y:y + h, x:x + w]
+        result = self.adb.locate_image(self.icon_path + image_name, confidence=confidence, screen_image=roi)
+        if result:
+            return result[0] + x, result[1] + y
+        return None
+
+    def _batch_locate_on_screen(self, screen, specs):
+        """在同一帧内做多图匹配，降低重复截图与重复匹配开销。"""
+        if screen is None:
+            return {key: None for key, _, _, _ in specs}
+        results = {}
+        for key, image_name, confidence, region in specs:
+            results[key] = self._locate_on_screen(image_name, screen, confidence=confidence, region=region)
+        return results
 
     def set_thinking_time_mode(self, mode_index, log_change=True):
         mode_index = int(mode_index)
@@ -895,9 +913,9 @@ class WoaBot:
         elif "✅" in message or "成功" in message:
             self.consecutive_timeout_count = 0
 
-        # 3. 触发条件：连续3次警告 + 冷却时间已过
-        if self.consecutive_timeout_count > 3:
-            if time.time() - self.last_recovery_time > 10:
+        # 3. 触发条件：连续告警超过阈值 + 冷却时间已过
+        if self.consecutive_timeout_count >= self._anti_stuck_warn_threshold:
+            if time.time() - self.last_recovery_time > 16:
                 self._record_anti_stuck_trigger("检测到连续多次卡顿，尝试紧急寻找领奖图标")
                 self.consecutive_timeout_count = 0
                 self.last_recovery_time = time.time()
@@ -908,24 +926,71 @@ class WoaBot:
     def _record_anti_stuck_trigger(self, reason):
         self._anti_stuck_trigger_count += 1
         self.log(f"🚨 [防卡死] {reason}，累计 {self._anti_stuck_trigger_count}/{self._anti_stuck_stop_threshold} 次")
-        if self._anti_stuck_stop_requested:
-            return
         if self._anti_stuck_trigger_count < self._anti_stuck_stop_threshold:
             return
+        self.log("🛠️ [防卡死] 已达到自修复阈值，开始执行恢复流程...")
+        if self._attempt_self_heal_and_resume():
+            self._anti_stuck_trigger_count = 0
+            self._anti_stuck_stop_requested = False
+            self.consecutive_timeout_count = 0
+            self.last_seen_main_interface_time = time.time()
+            self.log("✅ [防卡死] 界面恢复正常，脚本已自动继续运行")
+            return
+
+        self.log("⚠️ [防卡死] 本轮自修复未完全恢复，将继续监控并重试")
+        if self._anti_stuck_trigger_count < self._anti_stuck_hard_stop_threshold:
+            return
+
+        if self._anti_stuck_stop_requested:
+            return
         self._anti_stuck_stop_requested = True
-        self.log("🛑 [防卡死] 多次触发自动保护，脚本已停止，请检查模拟器界面或当前机场状态")
+        self.log("🛑 [防卡死] 长时间无法恢复，脚本已停止，请检查模拟器界面或当前机场状态")
         self.running = False
         if self.config_callback:
             try:
-                self.config_callback("bot_stopped", "防卡死多次触发，已自动停止")
+                self.config_callback("bot_stopped", "防卡死多次触发且自修复失败，已自动停止")
             except Exception:
                 pass
 
-    def _attempt_emergency_reward_recovery(self):
+    def _attempt_self_heal_and_resume(self):
+        if self._is_main_interface_ready(retries=2, interval=0.3):
+            return True
+
+        for _ in range(3):
+            self._attempt_emergency_reward_recovery(max_rounds=4)
+            if self._is_main_interface_ready(retries=2, interval=0.4):
+                return True
+
+            if self.wait_and_click('back.png', timeout=1.2, click_wait=0.4, random_offset=2):
+                self.log("   -> [自修复] 点击 Back")
+            if self.wait_and_click('cancel.png', timeout=1.2, click_wait=0.4):
+                self.log("   -> [自修复] 点击 Cancel")
+            if self._is_main_interface_ready(retries=2, interval=0.4):
+                return True
+
+            self.log("   -> [自修复] 执行盲点关闭尝试")
+            self.close_window()
+            self.sleep(0.8)
+            if self._is_main_interface_ready(retries=2, interval=0.5):
+                return True
+
+        return False
+
+    def _is_main_interface_ready(self, retries=1, interval=0.0):
+        retries = max(1, int(retries))
+        for i in range(retries):
+            if self.safe_locate('main_interface.png', region=self.REGION_MAIN_ANCHOR, confidence=0.8):
+                return True
+            if interval > 0 and i < retries - 1:
+                self.sleep(interval)
+        return False
+
+    def _attempt_emergency_reward_recovery(self, max_rounds=3):
         # 全屏搜索领奖图标
         targets = ['get_award_1.png', 'get_award_2.png', 'get_award_3.png', 'get_award_4.png']
-        # 尝试循环检测3次，确保如果点到第1步能接着点第2步
-        for _ in range(3):
+        max_rounds = max(1, int(max_rounds))
+        # 尝试循环检测，确保如果点到第1步能接着点第2步
+        for _ in range(max_rounds):
             clicked = False
             for t in targets:
                 # 使用 region=None 进行全屏搜索，降低一点阈值以防图标变灰或变暗
@@ -983,6 +1048,10 @@ class WoaBot:
         self.consecutive_timeout_count = 0
         self.consecutive_errors = 0
         self.last_recovery_time = 0
+        self._next_interface_check_time = 0.0
+        self._anti_stuck_warn_threshold = max(4, int(self._anti_stuck_warn_threshold))
+        self._anti_stuck_stop_threshold = max(self._anti_stuck_warn_threshold, int(self._anti_stuck_stop_threshold))
+        self._anti_stuck_hard_stop_threshold = max(self._anti_stuck_stop_threshold + 2, int(self._anti_stuck_hard_stop_threshold))
         self._anti_stuck_trigger_count = 0
         self._anti_stuck_stop_requested = False
         self._no_operable_count = 0
@@ -1382,21 +1451,17 @@ class WoaBot:
             ('status_doing.png', self.handle_vehicle_check_task)
         ]
 
-        def _check_expected(roi_img):
-            return self.adb.locate_image(self.icon_path + expected_status_img, confidence=0.7, screen_image=roi_img)
-
-        def _find_any_status(roi_img):
-            for img, _ in status_map:
-                if self.adb.locate_image(self.icon_path + img, confidence=0.7, screen_image=roi_img):
-                    return img
-            return None
-
         x, y, w, h = self.REGION_STATUS_TITLE
+
+        def _scan_statuses(full_screen):
+            specs = [(img, img, 0.7, (x, y, w, h)) for img, _ in status_map]
+            return self._batch_locate_on_screen(full_screen, specs)
+
         for attempt in range(2):
             full_screen = self.adb.get_screenshot()
             if full_screen is None: continue
-            roi_image = full_screen[y:y + h, x:x + w]
-            if _check_expected(roi_image):
+            status_hits = _scan_statuses(full_screen)
+            if status_hits.get(expected_status_img):
                 return True
             if attempt == 0:
                 self.sleep(0.15)
@@ -1404,8 +1469,8 @@ class WoaBot:
         self.log(f"   -> 状态校验不匹配 ({expected_status_img})，尝试纠错...")
         full_screen = self.adb.get_screenshot()
         if full_screen is None: return False
-        roi_image = full_screen[y:y + h, x:x + w]
-        found = _find_any_status(roi_image)
+        status_hits = _scan_statuses(full_screen)
+        found = next((img for img, _ in status_map if status_hits.get(img)), None)
         if found:
             for img, handler in status_map:
                 if img == found:
@@ -1422,10 +1487,10 @@ class WoaBot:
         self.sleep(0.2)
         full_screen = self.adb.get_screenshot()
         if full_screen is not None:
-            roi_image = full_screen[y:y + h, x:x + w]
-            if _check_expected(roi_image):
+            status_hits = _scan_statuses(full_screen)
+            if status_hits.get(expected_status_img):
                 return True
-            found = _find_any_status(roi_image)
+            found = next((img for img, _ in status_map if status_hits.get(img)), None)
             if found:
                 for img, handler in status_map:
                     if img == found:
@@ -1515,7 +1580,8 @@ class WoaBot:
             return False
         self._last_error_popup_check_ts = now
 
-        ok_pos = self.safe_locate('error_ok.png', confidence=0.75)
+        screen = self.adb.get_screenshot()
+        ok_pos = self._locate_on_screen('error_ok.png', screen, confidence=0.75)
         if not ok_pos:
             return False
 
@@ -1523,10 +1589,12 @@ class WoaBot:
         for _ in range(3):
             self.adb.click(ok_pos[0], ok_pos[1], random_offset=4)
             self.sleep(0.35)
-            if not self.safe_locate('error_ok.png', confidence=0.75):
+            next_screen = self.adb.get_screenshot()
+            next_ok = self._locate_on_screen('error_ok.png', next_screen, confidence=0.75)
+            if not next_ok:
                 self.log("✅ [异常弹窗] 错误弹窗已关闭")
                 return True
-            ok_pos = self.safe_locate('error_ok.png', confidence=0.75) or ok_pos
+            ok_pos = next_ok
         self.log("⚠️ [异常弹窗] 尝试关闭失败，将在后续循环继续处理")
         return True
 
@@ -1916,7 +1984,12 @@ class WoaBot:
     def handle_vehicle_check_task(self, target_pos=None):
         self.sleep(0.2)
         self.log(">>> [任务] 检查 Doing 状态...")
-        red_warn = self.safe_locate('red_warning.png', confidence=0.75)
+        screen = self.adb.get_screenshot()
+        batch_hits = self._batch_locate_on_screen(screen, [
+            ('red_warning', 'red_warning.png', 0.75, None),
+            ('ground_done', 'ground_support_done.png', 0.8, self.REGION_BOTTOM_ROI),
+        ])
+        red_warn = batch_hits.get('red_warning')
         if red_warn:
             self._no_operable_count = 0
             if self.enable_vehicle_buy:
@@ -1936,17 +2009,13 @@ class WoaBot:
                 self.log("   -> 🚨 发现车辆不足，忽略")
             self.close_window()
             return True
-        screen = self.adb.get_screenshot()
         if screen is not None:
-            bx, by, bw, bh = self.REGION_BOTTOM_ROI
-            roi_img = screen[by:by + bh, bx:bx + bw]
-            res_done = self.adb.locate_image(self.icon_path + 'ground_support_done.png', confidence=0.8,
-                                             screen_image=roi_img)
+            res_done = batch_hits.get('ground_done')
             if res_done:
                 self._no_operable_count = 0
                 self.log("   -> 🕒 发现延误/完成飞机")
                 if self.enable_delay_bribe:
-                    agent_loc = self.safe_locate('stand_agent_false.png')
+                    agent_loc = self._locate_on_screen('stand_agent_false.png', screen)
                     if agent_loc:
                         self.log("   -> [贿赂] 点击服务代理...")
                         self.adb.click(agent_loc[0], agent_loc[1])
@@ -1955,7 +2024,8 @@ class WoaBot:
                         verify_start = time.time()
                         while time.time() - verify_start < 2.0:
                             self._check_running()
-                            if self.safe_locate('stand_agent_true.png', confidence=0.8):
+                            verify_screen = self.adb.get_screenshot()
+                            if self._locate_on_screen('stand_agent_true.png', verify_screen, confidence=0.8):
                                 bribe_ok = True
                                 break
                             self.sleep(0.1)
@@ -1965,7 +2035,7 @@ class WoaBot:
                             self.log("   -> [贿赂] 激活未确认，跳过结束服务避免误推出")
                             self.close_window()
                             return False
-                self.adb.click(res_done[0] + bx, res_done[1] + by)
+                self.adb.click(res_done[0], res_done[1])
                 self.log("   -> ✅ 点击结束服务")
                 self.sleep(0.5)
                 return True
@@ -2174,7 +2244,8 @@ class WoaBot:
             if avail_staff >= (required_cost + 1):
                 self.in_staff_shortage_mode = False
                 self._next_staff_recovery_probe_time = 0.0
-                if self.safe_locate('green_dot.png', region=self.REGION_GREEN_DOT):
+                green_screen = self.adb.get_screenshot()
+                if self._locate_on_screen('green_dot.png', green_screen, region=self.REGION_GREEN_DOT):
                     self.log("   -> ✅ 地勤人员充足，开始分配")
                     if self._perform_stand_action_sequence(force_verify=not is_read_success):
                         self.log("   -> 地勤保障开始成功")
@@ -2356,11 +2427,20 @@ class WoaBot:
             self.close_window()
             return False
 
-    def _check_and_recover_interface(self):
-        if self.safe_locate('main_interface.png', region=self.REGION_MAIN_ANCHOR, confidence=0.8):
-            self.last_seen_main_interface_time = time.time()
+    def _check_and_recover_interface(self, current_screen=None):
+        now_ts = time.time()
+        if now_ts < self._next_interface_check_time:
             return
-        elapsed = time.time() - self.last_seen_main_interface_time
+        self._next_interface_check_time = now_ts + self._interface_check_interval
+
+        main_hit = self._locate_on_screen('main_interface.png', current_screen, confidence=0.8, region=self.REGION_MAIN_ANCHOR)
+        if main_hit:
+            self.last_seen_main_interface_time = now_ts
+            return
+        if current_screen is None and self.safe_locate('main_interface.png', region=self.REGION_MAIN_ANCHOR, confidence=0.8):
+            self.last_seen_main_interface_time = now_ts
+            return
+        elapsed = now_ts - self.last_seen_main_interface_time
         if elapsed > self.STUCK_TIMEOUT:
             self._record_anti_stuck_trigger(f"未检测到主界面已 {int(elapsed)} 秒，尝试强行返回")
 
@@ -2437,11 +2517,11 @@ class WoaBot:
         return False
 
     def scan_and_process(self):
-        self._check_and_recover_interface()
+        current_screen = self.adb.get_screenshot()
+        self._check_and_recover_interface(current_screen=current_screen)
         self._periodic_15s_check()
         self._cleanup_task_cooldown()
 
-        current_screen = self.adb.get_screenshot()
         if current_screen is None:
             if not hasattr(self, '_scan_screenshot_fails'):
                 self._scan_screenshot_fails = 0
@@ -2490,7 +2570,7 @@ class WoaBot:
         if self._check_and_perform_auto_delay(current_screen): return True
         lx, ly, lw, lh = self.LIST_ROI_X, 0, self.LIST_ROI_W, self.LIST_ROI_H
         list_roi_img = current_screen[ly:ly + lh, lx:lx + lw]
-        raw_detections, final_tasks = self._run_pending_detection(list_roi_img)
+        _, final_tasks = self._run_pending_detection(list_roi_img)
         # 注意：运行过程中不再与 ADB 校验后自动回退，仅在启动时通过截图方案测试和回退链确定方案
 
         doing_tasks = [d for d in final_tasks if d['type'] == 'doing']
