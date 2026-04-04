@@ -1,13 +1,13 @@
 {
-  "version": "1.0.4",
+  "version": "1.0.5",
   "package_urls": [
     {
       "name": "GitHub Release",
-      "url": "https://github.com/hjtr7mymht-dot/WOA_AutoBot/releases/download/v1.0.4/WOA_AutoBot.zip"
+      "url": "https://github.com/hjtr7mymht-dot/WOA_AutoBot/releases/download/v1.0.5/WOA_AutoBot.zip"
     },
     {
       "name": "ghproxy Release",
-      "url": "https://ghproxy.cn/https://github.com/hjtr7mymht-dot/WOA_AutoBot/releases/download/v1.0.4/WOA_AutoBot.zip"
+      "url": "https://ghproxy.cn/https://github.com/hjtr7mymht-dot/WOA_AutoBot/releases/download/v1.0.5/WOA_AutoBot.zip"
     }
   ],
   "notes": "打包版检测到新版本后会自动下载更新包，退出当前程序并完成覆盖更新。"

@@ -244,6 +244,8 @@ class SimpleOCR:
             return None
         try:
             text = text.strip().replace(' ', '')
+            # OCR 容错：统一大小写，去除常见干扰符号。
+            text = text.lower().replace('|', '').replace(':', '')
             # 匹配 XhYm 格式
             m = re.match(r'^(\d+)h(\d+)m$', text)
             if m:
@@ -264,6 +266,21 @@ class SimpleOCR:
             m = re.match(r'^(\d+)s$', text)
             if m:
                 return int(m.group(1))
+            # OCR 有时会丢失单位，回退到纯数字推断：
+            # 3位按 mss（如 835 -> 8m35s），4位按 mmss（如 1230 -> 12m30s）。
+            m = re.match(r'^(\d{3,4})$', text)
+            if m:
+                digits = m.group(1)
+                if len(digits) == 3:
+                    minutes = int(digits[0])
+                    seconds = int(digits[1:])
+                    if seconds < 60:
+                        return minutes * 60 + seconds
+                elif len(digits) == 4:
+                    minutes = int(digits[:2])
+                    seconds = int(digits[2:])
+                    if seconds < 60:
+                        return minutes * 60 + seconds
             return None
         except Exception:
             return None

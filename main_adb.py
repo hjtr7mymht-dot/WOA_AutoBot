@@ -182,6 +182,8 @@ class WoaBot:
         self._task_fail_cooldown_sec = 5.0
         self._no_operable_count = 0
         self._no_operable_threshold = 3
+        self._last_error_popup_check_ts = 0.0
+        self._error_popup_check_interval = 1.2
 
         self.ICON_ROIS = {
             'cross_runway.png': self.REGION_BOTTOM_ROI,
@@ -1199,6 +1201,9 @@ class WoaBot:
         gc_counter = 0
         while self.running:
             try:
+                if self._handle_server_error_popup():
+                    idle_count = 0
+                    continue
                 now_date = time.strftime("%Y-%m-%d")
                 if self._stat_date and now_date != self._stat_date:
                     a, d, sc, ss = self._stat_approach, self._stat_depart, self._stat_stand_count, self._stat_stand_staff
@@ -1471,20 +1476,59 @@ class WoaBot:
                 return [None, None, None, None]
         else:
             self.log("🗼 [塔台] 菜单已打开，直接读取...")
-        screen = self.adb.get_screenshot()
-        if screen is None:
-            self.log("🗼 [塔台] ⚠️ 截图失败，无法读取控制器时间")
-            return [None, None, None, None]
-        times = []
-        for i, region in enumerate(self.TOWER_TIME_REGIONS):
-            text = self.ocr.recognize_number(region, mode='task', screen_image=screen)
-            secs = self.ocr.parse_tower_time(text)
-            if secs is not None:
-                self.log(f"   塔台控制器 {i+1}: {text} ({secs}s)")
+        times = [None, None, None, None]
+        raw_by_slot = [set() for _ in range(4)]
+        for _ in range(3):
+            screen = self.adb.get_screenshot()
+            if screen is None:
+                self.log("🗼 [塔台] ⚠️ 截图失败，无法读取控制器时间")
+                continue
+            for i, region in enumerate(self.TOWER_TIME_REGIONS):
+                best_secs = times[i]
+                for candidate in self._iter_region_fallbacks(region, pad_x=12, pad_y=4):
+                    text = self.ocr.recognize_number(candidate, mode='task', screen_image=screen)
+                    if text:
+                        raw_by_slot[i].add(text)
+                    secs = self.ocr.parse_tower_time(text)
+                    if secs is None:
+                        continue
+                    # 取更大值可减少 OCR 漏位把 8m35s 误读成 35s 的情况。
+                    if best_secs is None or secs > best_secs:
+                        best_secs = secs
+                times[i] = best_secs
+            if all(v is not None for v in times):
+                break
+            self.sleep(0.2)
+
+        for i in range(4):
+            if times[i] is not None:
+                self.log(f"   塔台控制器 {i+1}: {times[i]}s")
             else:
-                self.log(f"   塔台控制器 {i+1}: 无有效数字 (raw={text})")
-            times.append(secs)
+                raw_preview = ", ".join(sorted(raw_by_slot[i])) if raw_by_slot[i] else "无"
+                self.log(f"   塔台控制器 {i+1}: 无有效数字 (raw={raw_preview})")
         return times
+
+    def _handle_server_error_popup(self, force=False):
+        """处理游戏内部错误弹窗，检测到 `error_ok.png` 时自动点击“好的”。"""
+        now = time.time()
+        if not force and now - self._last_error_popup_check_ts < self._error_popup_check_interval:
+            return False
+        self._last_error_popup_check_ts = now
+
+        ok_pos = self.safe_locate('error_ok.png', confidence=0.75)
+        if not ok_pos:
+            return False
+
+        self.log("⚠️ [异常弹窗] 检测到服务器错误弹窗，正在点击“好的”关闭...")
+        for _ in range(3):
+            self.adb.click(ok_pos[0], ok_pos[1], random_offset=4)
+            self.sleep(0.35)
+            if not self.safe_locate('error_ok.png', confidence=0.75):
+                self.log("✅ [异常弹窗] 错误弹窗已关闭")
+                return True
+            ok_pos = self.safe_locate('error_ok.png', confidence=0.75) or ok_pos
+        self.log("⚠️ [异常弹窗] 尝试关闭失败，将在后续循环继续处理")
+        return True
 
     def _open_tower_menu(self):
         """点击(646,822)打开塔台菜单，并通过 ROI 内检测 tower_1.png 校验是否成功。
