@@ -169,6 +169,7 @@ class WoaBot:
         self.REGION_VACANT_ROI = (390, 690, 730, 150)
 
         # 防卡死相关
+        self.enable_anti_stuck = True
         self.consecutive_timeout_count = 0
         self.last_recovery_time = 0  # 冷却时间
         self.last_window_close_time = time.time()
@@ -820,6 +821,40 @@ class WoaBot:
         self.enable_delay_bribe = enabled
         self.log(f">>> [配置] 延误飞机贿赂: {'已开启' if enabled else '已关闭'}")
 
+    def set_anti_stuck_config(self, enabled, threshold=None, log_change=True):
+        enabled = bool(enabled)
+        changed = (self.enable_anti_stuck != enabled)
+        self.enable_anti_stuck = enabled
+
+        if threshold is not None:
+            try:
+                val = int(threshold)
+            except (TypeError, ValueError):
+                val = self._anti_stuck_warn_threshold
+            val = max(3, min(20, val))
+            if self._anti_stuck_warn_threshold != val:
+                self._anti_stuck_warn_threshold = val
+                changed = True
+            stop_val = max(self._anti_stuck_warn_threshold, val)
+            if self._anti_stuck_stop_threshold != stop_val:
+                self._anti_stuck_stop_threshold = stop_val
+                changed = True
+            hard_val = max(self._anti_stuck_stop_threshold + 2, val * 2)
+            if self._anti_stuck_hard_stop_threshold != hard_val:
+                self._anti_stuck_hard_stop_threshold = hard_val
+                changed = True
+
+        if not self.enable_anti_stuck:
+            self._anti_stuck_trigger_count = 0
+            self._anti_stuck_stop_requested = False
+            self.consecutive_timeout_count = 0
+
+        if log_change and changed:
+            state = "已开启" if self.enable_anti_stuck else "已关闭"
+            self.log(
+                f">>> [配置] 防卡死: {state}，阈值={self._anti_stuck_warn_threshold}，自动停机阈值={self._anti_stuck_hard_stop_threshold}"
+            )
+
     def set_slide_duration_range(self, min_d, max_d, log_change=True):
         min_d = int(min_d)
         max_d = int(max_d)
@@ -903,6 +938,9 @@ class WoaBot:
             except Exception:
                 pass
 
+        if not self.enable_anti_stuck:
+            return
+
         # 【核心修正】智能防卡死逻辑
         # 1. 过滤掉恢复日志本身，防止递归触发
         if "防卡死" in message: return
@@ -924,6 +962,8 @@ class WoaBot:
                 self.consecutive_timeout_count = 0  # 冷却中，暂时重置
 
     def _record_anti_stuck_trigger(self, reason):
+        if not self.enable_anti_stuck:
+            return
         self._anti_stuck_trigger_count += 1
         self.log(f"🚨 [防卡死] {reason}，累计 {self._anti_stuck_trigger_count}/{self._anti_stuck_stop_threshold} 次")
         if self._anti_stuck_trigger_count < self._anti_stuck_stop_threshold:
@@ -1049,7 +1089,7 @@ class WoaBot:
         self.consecutive_errors = 0
         self.last_recovery_time = 0
         self._next_interface_check_time = 0.0
-        self._anti_stuck_warn_threshold = max(4, int(self._anti_stuck_warn_threshold))
+        self._anti_stuck_warn_threshold = max(3, int(self._anti_stuck_warn_threshold))
         self._anti_stuck_stop_threshold = max(self._anti_stuck_warn_threshold, int(self._anti_stuck_stop_threshold))
         self._anti_stuck_hard_stop_threshold = max(self._anti_stuck_stop_threshold + 2, int(self._anti_stuck_hard_stop_threshold))
         self._anti_stuck_trigger_count = 0
@@ -2439,6 +2479,8 @@ class WoaBot:
             return
         if current_screen is None and self.safe_locate('main_interface.png', region=self.REGION_MAIN_ANCHOR, confidence=0.8):
             self.last_seen_main_interface_time = now_ts
+            return
+        if not self.enable_anti_stuck:
             return
         elapsed = now_ts - self.last_seen_main_interface_time
         if elapsed > self.STUCK_TIMEOUT:

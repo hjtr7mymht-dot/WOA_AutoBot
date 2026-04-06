@@ -97,7 +97,7 @@ if INSTANCE_ID is None:
 CONFIG_FILE = "config.json" if INSTANCE_ID == 1 else f"config_{INSTANCE_ID}.json"
 STATS_FILE = "woa_stats.csv"
 
-LOCAL_VERSION = "1.0.6"
+LOCAL_VERSION = "1.0.7"
 OFFICIAL_REPO_URL = "https://github.com/hjtr7mymht-dot/WOA_AutoBot"
 OFFICIAL_REPO_NAME = "hjtr7mymht-dot/WOA_AutoBot"
 ONLINE_VERSION_PATH = "version.json"
@@ -364,7 +364,7 @@ class TeeToFile:
 class Application(ttkb.Window):
     def __init__(self):
         try:
-            myappid = 'woabot.launcher.v1.0.6'
+            myappid = 'woabot.launcher.v1.0.7'
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
         except:
             pass
@@ -404,6 +404,8 @@ class Application(ttkb.Window):
         self.var_standalone_logout_interval = tk.StringVar(value=str(legacy_logout_interval or 30))
         self.var_cancel_stand_filter = tk.BooleanVar(value=self.config.get("cancel_stand_filter", True))
         self.var_tower_open_stand_only = tk.BooleanVar(value=self.config.get("tower_open_stand_only", False))
+        self.var_anti_stuck_enabled = tk.BooleanVar(value=self.config.get("anti_stuck_enabled", True))
+        self.var_anti_stuck_threshold = tk.StringVar(value=str(self.config.get("anti_stuck_threshold", 6)))
         for legacy_key in (
             "auto_exit_time", "auto_exit_enabled", "auto_exit_rest_time", "auto_exit_rest_enabled",
             "auto_exit_loop_count", "auto_exit_loop_infinite", "restart_game_icon_file",
@@ -602,6 +604,7 @@ class Application(ttkb.Window):
         self.config["delay_bribe"] = self.var_delay_bribe.get()
         self.config["random_task_order"] = self.var_random_task.get()
         self.config["tower_open_stand_only"] = self.var_tower_open_stand_only.get()
+        self.config["anti_stuck_enabled"] = self.var_anti_stuck_enabled.get()
         self.config["no_takeoff_logout_enabled"] = self.var_no_takeoff_logout_enabled.get()
         try:
             self.config["no_takeoff_switch_interval"] = max(3.0, min(300.0, float(self.var_no_takeoff_switch_interval.get())))
@@ -621,6 +624,13 @@ class Application(ttkb.Window):
             self.config["auto_delay_count"] = int(self.var_delay_count.get())
         except:
             self.config["auto_delay_count"] = 0
+        try:
+            anti_stuck_threshold = int(self.var_anti_stuck_threshold.get())
+            anti_stuck_threshold = max(3, min(20, anti_stuck_threshold))
+        except Exception:
+            anti_stuck_threshold = 6
+        self.var_anti_stuck_threshold.set(str(anti_stuck_threshold))
+        self.config["anti_stuck_threshold"] = anti_stuck_threshold
         try:
             with open(CONFIG_FILE, "w", encoding="utf-8") as f:
                 json.dump(self.config, f, indent=4)
@@ -973,6 +983,17 @@ class Application(ttkb.Window):
         add_runtime_toggle(quick_runtime_2, "跳过二次校验", self.var_speed_mode, "开启后略微提速，适合稳定场景。")
         add_runtime_toggle(quick_runtime_2, "跳过地勤验证", self.var_skip_staff, "开启后提速明显，但有一定误判风险。")
         add_runtime_toggle(quick_runtime_2, "塔台关闭筛选全部", self.var_cancel_stand_filter, "塔台关闭时取消停机位筛选，处理全部待处理飞机。")
+
+        quick_runtime_3 = ttkb.Frame(tower_card)
+        quick_runtime_3.pack(fill=X, pady=(6, 0))
+        add_runtime_toggle(quick_runtime_3, "防卡死", self.var_anti_stuck_enabled, "关闭后仅停用自动防卡死恢复/自动停机；错误弹窗检测仍会强制执行。")
+        ttkb.Label(quick_runtime_3, text="阈值", bootstyle="secondary").pack(side=LEFT, padx=(8, 4))
+        ttkb.Entry(quick_runtime_3, textvariable=self.var_anti_stuck_threshold, width=5).pack(side=LEFT)
+        ttkb.Button(quick_runtime_3, text="应用", bootstyle="outline-success", width=8, command=self.on_confirm_anti_stuck).pack(side=LEFT, padx=(8, 0))
+        self.create_info_icon(
+            quick_runtime_3,
+            "阈值范围 3-20。数值越小触发越频繁。关闭防卡死时，服务器错误弹窗检测依然强制启用。",
+        ).pack(side=LEFT, padx=(6, 0))
 
         tools_card = ttkb.Labelframe(content, text="工具入口", padding=16, bootstyle="warning")
         tools_card.grid(row=1, column=1, sticky="nsew", padx=(8, 0), pady=(10, 0))
@@ -1995,6 +2016,45 @@ class Application(ttkb.Window):
                               "地勤分配后不进行图标验证和颜色验证，直接开始；\n风险中等，可能导致飞机延误；\n仅推荐高峰期且有人在场时打开。").pack(side=LEFT, padx=5)
 
         ttkb.Separator(tab_runtime_left).pack(fill=X, pady=10)
+        ttkb.Label(tab_runtime_left, text="防卡死", font=("bold")).pack(anchor="w")
+        f_anti_stuck = ttkb.Frame(tab_runtime_left)
+        f_anti_stuck.pack(fill=X, pady=5)
+        ttkb.Checkbutton(
+            f_anti_stuck,
+            text="启用防卡死自动恢复与自动停机",
+            variable=self.var_anti_stuck_enabled,
+            bootstyle="success-round-toggle",
+        ).pack(side=LEFT)
+        self.create_info_icon(
+            f_anti_stuck,
+            "关闭后不再执行防卡死自修复和自动停机；\n游戏内错误弹窗检测与自动点击好的逻辑不会关闭。",
+        ).pack(side=LEFT, padx=5)
+
+        f_anti_stuck_threshold = ttkb.Frame(tab_runtime_left)
+        f_anti_stuck_threshold.pack(fill=X, pady=5)
+        ttkb.Label(f_anti_stuck_threshold, text="防卡死触发阈值:").pack(side=LEFT)
+        e_anti_stuck_threshold = ttkb.Entry(f_anti_stuck_threshold, textvariable=self.var_anti_stuck_threshold, width=6)
+        e_anti_stuck_threshold.pack(side=LEFT, padx=5)
+        ttkb.Label(f_anti_stuck_threshold, text="范围 3-20", bootstyle="secondary").pack(side=LEFT, padx=(0, 8))
+
+        def apply_anti_stuck_profile():
+            try:
+                threshold = int(e_anti_stuck_threshold.get().strip())
+                threshold = max(3, min(20, threshold))
+            except ValueError:
+                messagebox.showerror("错误", "防卡死阈值必须为整数", parent=win)
+                return
+            self.var_anti_stuck_threshold.set(str(threshold))
+            self.config["anti_stuck_enabled"] = self.var_anti_stuck_enabled.get()
+            self.config["anti_stuck_threshold"] = threshold
+            self.save_config()
+            self.sync_all_configs_to_bot(from_advanced_save=True)
+            print(f">>> [防卡死] 状态: {'开启' if self.var_anti_stuck_enabled.get() else '关闭'}")
+            print(f">>> [防卡死] 触发阈值已更新: {threshold}")
+
+        ttkb.Button(f_anti_stuck_threshold, text="确定", bootstyle="success-outline", command=apply_anti_stuck_profile, width=8).pack(side=LEFT)
+
+        ttkb.Separator(tab_runtime_left).pack(fill=X, pady=10)
         ttkb.Label(tab_runtime_left, text="不起飞模式", font=("bold")).pack(anchor="w")
 
         f_no_takeoff_enable = ttkb.Frame(tab_runtime_left)
@@ -2155,6 +2215,7 @@ class Application(ttkb.Window):
             self.config["no_takeoff_logout_enabled"] = self.var_no_takeoff_logout_enabled.get()
             self.config["cancel_stand_filter"] = self.var_cancel_stand_filter.get()
             self.config["random_task_order"] = self.var_random_task.get()
+            self.config["anti_stuck_enabled"] = self.var_anti_stuck_enabled.get()
             self.config.pop("filter_switch_min", None)
             self.config.pop("filter_switch_max", None)
             try:
@@ -2172,6 +2233,14 @@ class Application(ttkb.Window):
             self.config["standalone_logout_interval"] = logout_single
             self.config.pop("no_takeoff_logout_min", None)
             self.config.pop("no_takeoff_logout_max", None)
+            try:
+                anti_stuck_threshold = int(e_anti_stuck_threshold.get().strip())
+                anti_stuck_threshold = max(3, min(20, anti_stuck_threshold))
+            except (ValueError, AttributeError):
+                messagebox.showerror("错误", "防卡死阈值必须为整数", parent=win)
+                return
+            self.var_anti_stuck_threshold.set(str(anti_stuck_threshold))
+            self.config["anti_stuck_threshold"] = anti_stuck_threshold
 
             changed = []
             if old_cfg.get("adb_path") != self.config.get("adb_path"):
@@ -2194,6 +2263,10 @@ class Application(ttkb.Window):
                 changed.append(("独立小退", "开" if self.config.get("no_takeoff_logout_enabled") else "关"))
             if old_cfg.get("cancel_stand_filter") != self.config.get("cancel_stand_filter"):
                 changed.append(("塔台关闭筛选全部飞机", "开" if self.config.get("cancel_stand_filter") else "关"))
+            if old_cfg.get("anti_stuck_enabled") != self.config.get("anti_stuck_enabled"):
+                changed.append(("防卡死", "开" if self.config.get("anti_stuck_enabled") else "关"))
+            if old_cfg.get("anti_stuck_threshold") != self.config.get("anti_stuck_threshold"):
+                changed.append(("防卡死触发阈值", str(self.config.get("anti_stuck_threshold", 6))))
             if old_cfg.get("no_takeoff_switch_interval") != self.config.get("no_takeoff_switch_interval"):
                 changed.append(("不起飞轮切间隔", f"{self.config.get('no_takeoff_switch_interval', 15)} 秒"))
             if old_cfg.get("no_takeoff_auto_logout_interval") != self.config.get("no_takeoff_auto_logout_interval"):
@@ -2321,6 +2394,18 @@ class Application(ttkb.Window):
         else:
             print(f">>> [配置] 自动延时塔台: 已更新为 {val_str} 次")
 
+    def on_confirm_anti_stuck(self):
+        if not self._enforce_online_guard("应用防卡死配置", interactive=True):
+            return
+        try:
+            threshold = int(self.var_anti_stuck_threshold.get())
+            threshold = max(3, min(20, threshold))
+        except ValueError:
+            threshold = 6
+        self.var_anti_stuck_threshold.set(str(threshold))
+        self.sync_all_configs_to_bot()
+        print(f">>> [配置] 防卡死: {'已开启' if self.var_anti_stuck_enabled.get() else '已关闭'}，阈值 {threshold}")
+
     def sync_all_configs_to_bot(self, from_advanced_save=False):
         if not from_advanced_save and not self._enforce_online_guard("同步配置", interactive=False):
             return
@@ -2335,6 +2420,15 @@ class Application(ttkb.Window):
             cnt = self.config.get("auto_delay_count", 0)
         self.var_delay_count.set(str(cnt))
         self.config["auto_delay_count"] = cnt
+        try:
+            anti_stuck_threshold = int(self.var_anti_stuck_threshold.get())
+            anti_stuck_threshold = max(3, min(20, anti_stuck_threshold))
+        except ValueError:
+            anti_stuck_threshold = int(self.config.get("anti_stuck_threshold", 6))
+            anti_stuck_threshold = max(3, min(20, anti_stuck_threshold))
+        self.var_anti_stuck_threshold.set(str(anti_stuck_threshold))
+        self.config["anti_stuck_enabled"] = self.var_anti_stuck_enabled.get()
+        self.config["anti_stuck_threshold"] = anti_stuck_threshold
         self.save_config()
         if self.bot:
             self.bot.set_bonus_staff_feature(self.var_bonus_staff.get())
@@ -2354,6 +2448,7 @@ class Application(ttkb.Window):
             self.bot.set_standalone_logout_enabled(self.config.get("no_takeoff_logout_enabled", False))
             self.bot.set_cancel_stand_filter_when_tower_off(self.var_cancel_stand_filter.get())
             self.bot.set_filter_stand_only_when_tower_open(self.var_tower_open_stand_only.get())
+            self.bot.set_anti_stuck_config(self.var_anti_stuck_enabled.get(), anti_stuck_threshold, log_change=not no_log)
             self.bot.set_control_method(self.config.get("control_method", "adb"))
             self.bot.set_screenshot_method(self.config.get("screenshot_method", "nemu_ipc"))
             self.bot.set_mumu_path(self.config.get("mumu_path", ""))

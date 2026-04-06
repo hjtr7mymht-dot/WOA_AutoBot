@@ -25,5 +25,8 @@
     "standalone_logout_interval": 30.0,
     "initial_device_paths_detected": true,
     "adb_path": "G:/MuMuPlayer/nx_main/adb.exe",
-    "mumu_path": "G:\\MuMuPlayer"
+    "mumu_path": "G:\\MuMuPlayer",
+    "anti_stuck_enabled": true,
+    "anti_stuck_timeout": 28.0,
+    "anti_stuck_threshold": 6
 }

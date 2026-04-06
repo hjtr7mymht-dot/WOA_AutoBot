@@ -3,8 +3,8 @@
 # PyInstaller --version-file 使用，eval 在 versioninfo 模块上下文中执行
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(1, 0, 6, 0),
-    prodvers=(1, 0, 6, 0),
+    filevers=(1, 0, 7, 0),
+    prodvers=(1, 0, 7, 0),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,
@@ -19,12 +19,12 @@ VSVersionInfo(
         [
           StringStruct('CompanyName', 'WOA AutoBot'),
           StringStruct('FileDescription', 'WOA Airport Game Automation Bot'),
-          StringStruct('FileVersion', '1.0.6'),
+          StringStruct('FileVersion', '1.0.7'),
           StringStruct('InternalName', 'WOA_Debug'),
           StringStruct('LegalCopyright', 'Free Software'),
           StringStruct('OriginalFilename', 'WOA_Debug.exe'),
           StringStruct('ProductName', 'WOA AutoBot'),
-          StringStruct('ProductVersion', '1.0.6'),
+          StringStruct('ProductVersion', '1.0.7'),
         ])
     ]),
     VarFileInfo([VarStruct('Translation', [1033, 1200])])
