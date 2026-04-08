@@ -1,14 +1,14 @@
 {
-  "version": "1.0.7",
+  "version": "1.1.0",
   "package_urls": [
     {
       "name": "GitHub Release",
-      "url": "https://github.com/hjtr7mymht-dot/WOA_AutoBot/releases/download/1.0.7/WOA_AutoBot.zip"
+      "url": "https://github.com/hjtr7mymht-dot/WOA_AutoBot/releases/download/1.1.0/WOA_AutoBot.zip"
     },
     {
       "name": "ghproxy Release",
-      "url": "https://ghproxy.cn/https://github.com/hjtr7mymht-dot/WOA_AutoBot/releases/download/1.0.7/WOA_AutoBot.zip"
+      "url": "https://ghproxy.cn/https://github.com/hjtr7mymht-dot/WOA_AutoBot/releases/download/1.1.0/WOA_AutoBot.zip"
     }
   ],
-  "notes": "程序仅在启动阶段进行联网版本检测并提示，不再执行自动下载覆盖更新。"
+  "notes": "1.1.0：界面现代化改版，新增手机报错提醒、公网 ADB/云手机支持，并优化塔台与地勤购买稳定性。"
 }

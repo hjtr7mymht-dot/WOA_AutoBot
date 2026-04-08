@@ -304,6 +304,8 @@ class WoaBot:
         if self.enable_filter_stand_only_when_tower_open == enabled:
             return
         self.enable_filter_stand_only_when_tower_open = enabled
+        if not enabled and not self.enable_no_takeoff_mode:
+            self._request_switch_mode1 = True
         self.log(f">>> [配置] 塔台全开时仅停机位待处理: {'已开启' if enabled else '已关闭'}")
 
     def _color_diff(self, a, b):
@@ -594,6 +596,11 @@ class WoaBot:
             if not is_mode2:
                 self.log("📋 [筛选] 塔台全开，强制切换至模式2(仅停机位)...")
                 apply_mode(self.FILTER_CHECK_POINTS_MODE2)
+            return
+
+        if (not self.enable_filter_stand_only_when_tower_open) and all(self._tower_active_slots) and is_mode2:
+            self.log("📋 [筛选] 已关闭塔台全开仅停机位，恢复模式1(仅待处理)...")
+            apply_mode(self.FILTER_CHECK_POINTS_MODE1)
             return
 
         need_mode1_only = self._tower_off_force_mode1
@@ -1699,6 +1706,10 @@ class WoaBot:
             if self.enable_no_takeoff_mode:
                 self.log("⚠️ [塔台] 不起飞模式已开启但塔台未开启，建议打开塔台控制器4以处理推出")
             return
+        if not self._is_main_interface_ready(retries=2, interval=0.15):
+            self._tower_delay_deadline = time.time() + 12.0
+            self.log("🗼 [塔台] 当前非主界面，初始化延后 12s 再检测")
+            return
         # 第三步：塔台非灰色，打开菜单读取时间
         self.log("🗼 [塔台] 塔台图标可见且非灰色，打开菜单读取控制器状态...")
         if not self._open_tower_menu():
@@ -1761,6 +1772,10 @@ class WoaBot:
         if self._tower_delay_deadline <= 0 or self._tower_disabled:
             return False
         if time.time() < self._tower_delay_deadline:
+            return False
+        if not self._is_main_interface_ready(retries=2, interval=0.15):
+            self._tower_delay_deadline = time.time() + 8.0
+            self.log("🗼 [塔台] 当前不在主界面，延后 8s 再检查")
             return False
         self._tower_delay_deadline = 0.0
 
@@ -2021,6 +2036,36 @@ class WoaBot:
             return True
         return False
 
+    def _exit_vehicle_buy_scene(self, max_rounds=4):
+        """尝试从车辆购买界面安全退回，避免在购买页卡死。"""
+        max_rounds = max(1, int(max_rounds))
+        for _ in range(max_rounds):
+            self._check_running()
+            screen = self.adb.get_screenshot()
+            if screen is None:
+                self.sleep(0.15)
+                continue
+
+            has_buy = self._locate_on_screen('buy_vehicle.png', screen, confidence=0.78)
+            has_confirm = self._locate_on_screen('buy_vehicle_confirm.png', screen, confidence=0.78)
+            if not has_buy and not has_confirm:
+                return True
+
+            # 依次尝试返回、取消和右上角关闭，尽量兼容不同弹窗层级。
+            if self.wait_and_click('back.png', timeout=0.9, click_wait=0.3, random_offset=2):
+                continue
+            if self.wait_and_click('cancel.png', timeout=0.9, click_wait=0.3):
+                continue
+            self.close_window()
+            self.sleep(0.25)
+
+        verify_screen = self.adb.get_screenshot()
+        if verify_screen is None:
+            return False
+        still_buy = self._locate_on_screen('buy_vehicle.png', verify_screen, confidence=0.78)
+        still_confirm = self._locate_on_screen('buy_vehicle_confirm.png', verify_screen, confidence=0.78)
+        return not (still_buy or still_confirm)
+
     def handle_vehicle_check_task(self, target_pos=None):
         self.sleep(0.2)
         self.log(">>> [任务] 检查 Doing 状态...")
@@ -2047,6 +2092,10 @@ class WoaBot:
                     self.log("   -> 未找到购买按钮")
             else:
                 self.log("   -> 🚨 发现车辆不足，忽略")
+            if not self._exit_vehicle_buy_scene():
+                self.log("⚠️ [Doing] 购买界面未能正常退出，触发临时冷却避免循环卡死")
+                self.doing_task_forbidden_until = time.time() + 8.0
+                return False
             self.close_window()
             return True
         if screen is not None:

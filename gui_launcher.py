@@ -97,7 +97,7 @@ if INSTANCE_ID is None:
 CONFIG_FILE = "config.json" if INSTANCE_ID == 1 else f"config_{INSTANCE_ID}.json"
 STATS_FILE = "woa_stats.csv"
 
-LOCAL_VERSION = "1.0.7"
+LOCAL_VERSION = "1.1.0"
 OFFICIAL_REPO_URL = "https://github.com/hjtr7mymht-dot/WOA_AutoBot"
 OFFICIAL_REPO_NAME = "hjtr7mymht-dot/WOA_AutoBot"
 ONLINE_VERSION_PATH = "version.json"
@@ -364,7 +364,7 @@ class TeeToFile:
 class Application(ttkb.Window):
     def __init__(self):
         try:
-            myappid = 'woabot.launcher.v1.0.7'
+            myappid = 'woabot.launcher.v1.1.0'
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
         except:
             pass
@@ -406,6 +406,11 @@ class Application(ttkb.Window):
         self.var_tower_open_stand_only = tk.BooleanVar(value=self.config.get("tower_open_stand_only", False))
         self.var_anti_stuck_enabled = tk.BooleanVar(value=self.config.get("anti_stuck_enabled", True))
         self.var_anti_stuck_threshold = tk.StringVar(value=str(self.config.get("anti_stuck_threshold", 6)))
+        self.var_notify_enabled = tk.BooleanVar(value=bool(self.config.get("mobile_notify_enabled", False)))
+        self.var_notify_provider = tk.StringVar(value=str(self.config.get("mobile_notify_provider", "wecom")))
+        self.var_notify_webhook = tk.StringVar(value=str(self.config.get("mobile_notify_webhook", "")))
+        self.var_notify_keyword = tk.StringVar(value=str(self.config.get("mobile_notify_keyword", "")))
+        self.var_public_adb_targets = tk.StringVar(value=str(self.config.get("public_adb_targets", "")))
         for legacy_key in (
             "auto_exit_time", "auto_exit_enabled", "auto_exit_rest_time", "auto_exit_rest_enabled",
             "auto_exit_loop_count", "auto_exit_loop_infinite", "restart_game_icon_file",
@@ -434,6 +439,9 @@ class Application(ttkb.Window):
         self.bot = None
         self.log_queue = queue.Queue()
         self.queue_check_interval = 100
+        self._notify_lock = threading.Lock()
+        self._notify_last_ts = 0.0
+        self._notify_last_signature = ""
 
         self.redirector = MultiTextRedirector()
         self._log_tee = None
@@ -631,11 +639,166 @@ class Application(ttkb.Window):
             anti_stuck_threshold = 6
         self.var_anti_stuck_threshold.set(str(anti_stuck_threshold))
         self.config["anti_stuck_threshold"] = anti_stuck_threshold
+        self.config["mobile_notify_enabled"] = bool(self.var_notify_enabled.get())
+        provider = str(self.var_notify_provider.get() or "wecom").strip().lower()
+        if provider not in ("wecom", "dingtalk"):
+            provider = "wecom"
+        self.var_notify_provider.set(provider)
+        self.config["mobile_notify_provider"] = provider
+        self.config["mobile_notify_webhook"] = str(self.var_notify_webhook.get() or "").strip()
+        self.config["mobile_notify_keyword"] = str(self.var_notify_keyword.get() or "").strip()
+        self.config["public_adb_targets"] = str(self.var_public_adb_targets.get() or "").strip()
         try:
             with open(CONFIG_FILE, "w", encoding="utf-8") as f:
                 json.dump(self.config, f, indent=4)
         except Exception as e:
             print(f"配置保存失败: {e}")
+
+    def _parse_public_adb_targets(self, raw_text=None):
+        raw = str(self.var_public_adb_targets.get() if raw_text is None else raw_text or "")
+        items = []
+        for line in raw.replace(";", "\n").replace("，", "\n").splitlines():
+            target = line.strip()
+            if not target:
+                continue
+            if target.lower().startswith("adb://"):
+                target = target[6:]
+            if ":" not in target:
+                continue
+            if target not in items:
+                items.append(target)
+        return items
+
+    def _connect_public_adb_targets(self, targets=None, debug=False):
+        targets = self._parse_public_adb_targets() if targets is None else list(targets)
+        if not targets:
+            return [], []
+
+        adb_exe = adb_mod.CURRENT_ADB_PATH if adb_mod.CURRENT_ADB_PATH else "adb"
+        if adb_exe != "adb" and not os.path.isfile(adb_exe):
+            adb_exe = "adb"
+
+        connected = []
+        failed = []
+        creation_flags = 0x08000000
+        for target in targets:
+            try:
+                result = subprocess.run(
+                    [adb_exe, "connect", target],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    timeout=10,
+                    creationflags=creation_flags,
+                )
+                out = (result.stdout or b"").decode("utf-8", errors="ignore")
+                err = (result.stderr or b"").decode("utf-8", errors="ignore")
+                merged = f"{out}\n{err}".lower()
+                if any(flag in merged for flag in ("connected to", "already connected to")):
+                    connected.append(target)
+                else:
+                    failed.append((target, (out or err or "连接未成功").strip()))
+                if debug:
+                    print(f">>> [公网ADB] {target}: {(out or err).strip() or '无返回'}")
+            except Exception as exc:
+                failed.append((target, str(exc)))
+                if debug:
+                    print(f">>> [公网ADB] {target}: 连接异常 {exc}")
+        return connected, failed
+
+    def _scan_devices_with_public_targets(self, debug=False):
+        public_targets = self._parse_public_adb_targets()
+        if public_targets:
+            connected, failed = self._connect_public_adb_targets(public_targets, debug=debug)
+            if connected:
+                print(f">>> [公网ADB] 已连接 {len(connected)} 台公网设备")
+            for target, reason in failed[:5]:
+                print(f">>> [公网ADB] 连接失败 {target}: {reason}")
+        return AdbController.scan_devices(debug=debug)
+
+    def _build_mobile_notify_payload(self, provider, content):
+        # 企业微信与钉钉机器人都支持 text 消息，统一构造，减少小白配置复杂度。
+        _ = provider
+        return {
+            "msgtype": "text",
+            "text": {
+                "content": content,
+            },
+        }
+
+    def _send_mobile_notify(self, title, detail, force=False):
+        enabled = bool(self.var_notify_enabled.get())
+        if not enabled and not force:
+            return
+
+        provider = str(self.var_notify_provider.get() or "wecom").strip().lower()
+        if provider not in ("wecom", "dingtalk"):
+            provider = "wecom"
+        webhook = str(self.var_notify_webhook.get() or "").strip()
+        if not webhook:
+            return
+
+        now = time.time()
+        signature = f"{title}|{str(detail)[:120]}"
+        with self._notify_lock:
+            if not force:
+                # 25 秒内只推送一次，且 90 秒内同签名不重复推送，避免刷屏。
+                if now - self._notify_last_ts < 25:
+                    return
+                if signature == self._notify_last_signature and now - self._notify_last_ts < 90:
+                    return
+            self._notify_last_ts = now
+            self._notify_last_signature = signature
+
+        keyword = str(self.var_notify_keyword.get() or "").strip()
+        provider_name = "企业微信" if provider == "wecom" else "钉钉"
+        device = ""
+        try:
+            device = (self.combo_devices.get() or "").strip()
+        except Exception:
+            device = ""
+        if not device:
+            device = "未选择"
+
+        content = (
+            f"[WOA AutoBot] {title}\n"
+            f"时间: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+            f"设备: {device}\n"
+            f"详情: {detail}"
+        )
+        if keyword:
+            content = f"{keyword}\n{content}"
+
+        payload = self._build_mobile_notify_payload(provider, content)
+
+        def _worker():
+            try:
+                data = json.dumps(payload).encode("utf-8")
+                req = urllib.request.Request(
+                    webhook,
+                    data=data,
+                    headers={"Content-Type": "application/json; charset=utf-8"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(req, timeout=6) as resp:
+                    _ = resp.read()
+                print(f">>> [手机提醒] 已发送到{provider_name}")
+            except Exception as exc:
+                print(f">>> [手机提醒] 发送失败: {exc}")
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _check_error_and_notify(self, msg):
+        text = str(msg or "").strip()
+        if not text:
+            return
+        if "🛑 [严重错误]" in text or "脚本异常退出" in text:
+            self._send_mobile_notify("脚本严重错误", text, force=True)
+            return
+        if "❌ 运行出错:" in text:
+            self._send_mobile_notify("脚本运行报错", text)
+            return
+        if "检测到持续报错" in text:
+            self._send_mobile_notify("脚本已自动停止", text, force=True)
 
     def _set_system_status(self, message):
         text = (message or "环境待检查").strip()
@@ -850,181 +1013,190 @@ class Application(ttkb.Window):
         self.redirector.add_widget(self.txt_mini_log)
 
     def setup_main_ui(self):
-        outer = ttkb.Frame(self.container_main, padding=(18, 18, 18, 14))
+        # 整体外层容器，增加 padding 留白更现代化
+        outer = ttkb.Frame(self.container_main, padding=20)
         outer.pack(fill=BOTH, expand=True)
 
-        hero = ttkb.Frame(outer, padding=(18, 16))
-        hero.pack(fill=X)
-        hero_left = ttkb.Frame(hero)
-        hero_left.pack(side=LEFT, fill=X, expand=True)
-        ttkb.Label(hero_left, text="WOA AutoBot Control Deck", font=("Microsoft YaHei UI", 18, "bold"), bootstyle="primary").pack(anchor="w")
+        # ================== 1. Header 区域 (Logo与标题 + 状态胶囊) ==================
+        header_frame = ttkb.Frame(outer)
+        header_frame.pack(fill=X, pady=(0, 20))
+        
+        # 左侧：应用标题与版本信息
+        title_frame = ttkb.Frame(header_frame)
+        title_frame.pack(side=LEFT, fill=Y)
+        ttkb.Label(title_frame, text="WOA 控制面板", font=("Microsoft YaHei UI", 22, "bold"), bootstyle="primary").pack(anchor="w")
         ttkb.Label(
-            hero_left,
-            text=f"版本 {LOCAL_VERSION} · 免费版本 请勿售卖 · 官方源 {OFFICIAL_REPO_NAME}",
+            title_frame,
+            text=f"当前版本 v{LOCAL_VERSION} · 开源免费工具 · 官方源 {OFFICIAL_REPO_NAME}",
             font=("Microsoft YaHei UI", 10),
             bootstyle="secondary",
-        ).pack(anchor="w", pady=(4, 10))
-        status_row = ttkb.Frame(hero_left)
-        status_row.pack(fill=X)
-        ttkb.Label(status_row, text="运行状态", font=("Microsoft YaHei UI", 9, "bold"), bootstyle="secondary").pack(side=LEFT)
-        ttkb.Label(status_row, textvariable=self.var_runtime_status, padding=(10, 4), bootstyle="inverse-primary").pack(side=LEFT, padx=(8, 12))
-        ttkb.Label(status_row, text="设备状态", font=("Microsoft YaHei UI", 9, "bold"), bootstyle="secondary").pack(side=LEFT)
-        ttkb.Label(status_row, textvariable=self.var_device_status, padding=(10, 4), bootstyle="inverse-light").pack(side=LEFT, padx=(8, 0))
-        system_row = ttkb.Frame(hero_left)
-        system_row.pack(fill=X, pady=(8, 0))
-        ttkb.Label(system_row, text="环境状态", font=("Microsoft YaHei UI", 9, "bold"), bootstyle="secondary").pack(side=LEFT)
-        ttkb.Label(system_row, textvariable=self.var_system_status, padding=(10, 4), bootstyle="inverse-info").pack(side=LEFT, padx=(8, 12))
-        online_row = ttkb.Frame(hero_left)
-        online_row.pack(fill=X, pady=(8, 0))
-        ttkb.Label(online_row, text="在线验证", font=("Microsoft YaHei UI", 9, "bold"), bootstyle="secondary").pack(side=LEFT)
-        ttkb.Label(online_row, textvariable=self.var_online_status, padding=(10, 4), bootstyle="inverse-success").pack(side=LEFT, padx=(8, 12))
-        ttkb.Label(online_row, textvariable=self.var_online_detail, bootstyle="secondary", wraplength=430, justify="left").pack(side=LEFT, fill=X, expand=True)
+        ).pack(anchor="w", pady=(4, 0))
 
-        hero_right = ttkb.Frame(hero)
-        hero_right.pack(side=RIGHT, padx=(18, 0))
-        f_help_wrap = ttkb.Frame(hero_right)
-        f_help_wrap.pack(fill=X, pady=(0, 6))
-        self.btn_help = ttkb.Button(f_help_wrap, text="使用说明", bootstyle="outline-info", command=self.open_help_window, width=14)
-        self.btn_help.pack(fill=X)
-        self._help_badge = None
-        ttkb.Button(hero_right, text="高级设置", bootstyle="outline-secondary", command=self.open_settings_window, width=14).pack(fill=X, pady=6)
-        ttkb.Button(hero_right, text="在线验证", bootstyle="outline-success", command=self.run_online_validation, width=14).pack(fill=X, pady=(0, 6))
-        ttkb.Button(hero_right, text="多开模式", bootstyle="outline-primary", command=self.launch_new_instance, width=14).pack(fill=X, pady=(0, 6))
-        ttkb.Button(hero_right, text="紧凑小窗", bootstyle="outline-warning", command=self.toggle_mode, width=14).pack(fill=X)
+        # 右侧：现代化的状态指示胶囊
+        status_frame = ttkb.Frame(header_frame)
+        status_frame.pack(side=RIGHT, fill=Y, pady=5)
+        
+        def make_status_capsule(parent, label_text, var, color, margin=(5,0)):
+            f = ttkb.Frame(parent)
+            f.pack(side=LEFT, padx=margin)
+            ttkb.Label(f, text=label_text, font=("Microsoft YaHei UI", 9, "bold"), bootstyle="secondary").pack(side=LEFT, padx=(0, 5))
+            ttkb.Label(f, textvariable=var, padding=(10, 4), bootstyle=f"inverse-{color}").pack(side=LEFT)
+            
+        make_status_capsule(status_frame, "运行状态", self.var_runtime_status, "primary")
+        make_status_capsule(status_frame, "设备状态", self.var_device_status, "info", margin=(15, 0))
+        make_status_capsule(status_frame, "云端校验", self.var_online_status, "success", margin=(15, 0))
 
-        content = ttkb.Frame(outer)
-        content.pack(fill=BOTH, expand=False, pady=(16, 14))
-        content.grid_columnconfigure(0, weight=1, uniform="maincols")
-        content.grid_columnconfigure(1, weight=1, uniform="maincols")
-        content.grid_rowconfigure(0, weight=1)
-        content.grid_rowconfigure(1, weight=1)
+        # ================== 2. 内容区 (左右两栏分屏布局) ==================
+        content_pane = ttkb.Frame(outer)
+        content_pane.pack(fill=BOTH, expand=False)
+        content_pane.columnconfigure(0, weight=4, uniform="modern_layout")  # 左侧占4份
+        content_pane.columnconfigure(1, weight=5, uniform="modern_layout")  # 右侧占5份，空间更大
+        content_pane.rowconfigure(0, weight=1)
 
-        connect_card = ttkb.Labelframe(content, text="连接与执行", padding=16, bootstyle="primary")
-        connect_card.grid(row=0, column=0, sticky="nsew", padx=(0, 8), pady=(0, 10))
-        ttkb.Label(
-            connect_card,
-            text="选择设备后即可直接启动，扫描结果会自动刷新到状态区。",
-            font=("Microsoft YaHei UI", 9),
-            bootstyle="secondary",
-        ).pack(anchor="w", pady=(0, 10))
+        # ----------------- 左侧：核心控制 与 工具入口 -----------------
+        left_col = ttkb.Frame(content_pane)
+        left_col.grid(row=0, column=0, sticky="nsew", padx=(0, 15))
+
+        # 【核心控制卡片】
+        connect_card = ttkb.Labelframe(left_col, text=" 连接与控制中心 ", padding=15, bootstyle="info")
+        connect_card.pack(fill=X, pady=(0, 15))
+        
+        ttkb.Label(connect_card, text="选择目标设备后启动自动化流程", font=("Microsoft YaHei UI", 9), bootstyle="secondary").pack(anchor="w", pady=(0, 10))
+        
         device_row = ttkb.Frame(connect_card)
-        device_row.pack(fill=X)
-        self.combo_devices = ttkb.Combobox(device_row, state="readonly", width=24)
-        self.combo_devices.pack(side=LEFT, fill=X, expand=True, padx=(0, 8))
-        self.btn_scan = ttkb.Button(device_row, text="智能扫描", bootstyle="outline-primary", command=self.refresh_devices, width=12)
-        self.btn_scan.pack(side=LEFT)
-        action_row = ttkb.Frame(connect_card)
-        action_row.pack(fill=X, pady=(12, 0))
-        self.btn_main_start = ttkb.Button(action_row, text="启动脚本", bootstyle="success", command=self.start_bot)
-        self.btn_main_start.pack(side=LEFT, fill=X, expand=True, padx=(0, 6))
-        self.btn_main_stop = ttkb.Button(action_row, text="停止运行", bootstyle="danger", state="disabled", command=self.stop_bot)
-        self.btn_main_stop.pack(side=LEFT, fill=X, expand=True, padx=(6, 0))
+        device_row.pack(fill=X, pady=(0, 15))
+        self.combo_devices = ttkb.Combobox(device_row, state="readonly")
+        self.combo_devices.pack(side=LEFT, fill=X, expand=True, padx=(0, 10))
+        self.btn_scan = ttkb.Button(device_row, text="刷新设备", bootstyle="outline-info", command=self.refresh_devices, width=10)
+        self.btn_scan.pack(side=RIGHT)
 
-        quick_card = ttkb.Labelframe(content, text="快捷策略", padding=16, bootstyle="success")
-        quick_card.grid(row=0, column=1, sticky="nsew", padx=(8, 0), pady=(0, 10))
+        action_row = ttkb.Frame(connect_card)
+        action_row.pack(fill=X)
+        self.btn_main_start = ttkb.Button(action_row, text="▶ 启动脚本", bootstyle="success", command=self.start_bot)
+        self.btn_main_start.pack(side=LEFT, fill=X, expand=True, padx=(0, 5))
+        self.btn_main_stop = ttkb.Button(action_row, text="■ 停止", bootstyle="danger", state="disabled", command=self.stop_bot, width=8)
+        self.btn_main_stop.pack(side=RIGHT, padx=(5, 0))
+
+        # 【快捷工具组】
+        tools_card = ttkb.Labelframe(left_col, text=" 高级与工具 ", padding=12, bootstyle="secondary")
+        tools_card.pack(fill=BOTH, expand=True)
+        
+        def make_tool_btn(parent, text, style, cmd):
+            btn = ttkb.Button(parent, text=text, bootstyle=style, command=cmd)
+            btn.pack(fill=X, pady=4)
+            return btn
+            
+        make_tool_btn(tools_card, "⚙️ 详细高级设置", "outline-secondary", self.open_settings_window)
+        make_tool_btn(tools_card, "➕ 启动多开实例", "outline-primary", self.launch_new_instance)
+        make_tool_btn(tools_card, "🪟 切换小窗模式", "outline-warning", self.toggle_mode)
+        
+        ttkb.Separator(tools_card, bootstyle="secondary").pack(fill=X, pady=8)
+        
+        # 两个并排的小按钮
+        tool_row = ttkb.Frame(tools_card)
+        tool_row.pack(fill=X)
+        ttkb.Button(tool_row, text="在线验证", bootstyle="outline-success", command=self.run_online_validation).pack(side=LEFT, fill=X, expand=True, padx=(0,4))
+        ttkb.Button(tool_row, text="国内网络方案", bootstyle="outline-info", command=self.show_cn_network_help).pack(side=RIGHT, fill=X, expand=True, padx=(4,0))
+        
+        make_tool_btn(tools_card, "📖 官方仓库与使用说明", "outline-dark", self.open_help_window).pack_configure(pady=(8,0))
+
+
+        # ----------------- 右侧：策略配置 Notebook标签页 -----------------
+        right_col = ttkb.Frame(content_pane)
+        right_col.grid(row=0, column=1, sticky="nsew")
+        
+        notebook = ttkb.Notebook(right_col, bootstyle="primary")
+        notebook.pack(fill=BOTH, expand=True)
+
+        def toggle_cmd(t, v):
+            self.sync_all_configs_to_bot()
+            state = "开启" if v.get() else "关闭"
+            print(f">>> [功能状态] {t}: 已{state}")
 
         def add_toggle_row(parent, text, var, help_txt):
             row = ttkb.Frame(parent)
-            row.pack(fill=X, pady=4)
+            row.pack(fill=X, pady=8)
             ttkb.Checkbutton(
-                row,
-                text=text,
-                variable=var,
-                bootstyle="success-round-toggle",
-                command=self.sync_all_configs_to_bot,
+                row, text=text, variable=var, bootstyle="success-round-toggle", command=lambda t=text, v=var: toggle_cmd(t, v)
             ).pack(side=LEFT)
-            self.create_info_icon(row, help_txt).pack(side=RIGHT)
+            self.create_info_icon(row, help_txt).pack(side=LEFT, padx=10)
 
-        add_toggle_row(quick_card, "自动领取地勤", self.var_bonus_staff, "地勤不足时尝试领取免费地勤，重新开始脚本后冷却会重新计时。")
-        add_toggle_row(quick_card, "自动购买地勤车辆", self.var_vehicle_buy, "地勤车辆不足时自动购买，属于实验性功能。")
-        add_toggle_row(quick_card, "延误飞机贿赂", self.var_delay_bribe, "处理延误飞机时可自动贿赂代理，会消耗银飞机。")
-        add_toggle_row(quick_card, "塔台全开仅停机位", self.var_tower_open_stand_only, "塔台四个控制器全开时，强制筛选为仅停机位待处理。")
+        # [Tab 1] 游戏内策略
+        tab_game = ttkb.Frame(notebook, padding=15)
+        notebook.add(tab_game, text=" 游戏内策略 ")
+        
+        add_toggle_row(tab_game, "✈️ 自动领取地勤人员", self.var_bonus_staff, "地勤不足时尝试领取免费地勤，重新开始脚本后冷却重新计时。")
+        add_toggle_row(tab_game, "🚗 自动购买地勤车辆", self.var_vehicle_buy, "地勤车辆不足时自动购买（实验性功能）。")
+        add_toggle_row(tab_game, "💰 延误飞机自动贿赂", self.var_delay_bribe, "处理延误飞机时自动贿赂代理，会消耗银色飞机道具。")
+        add_toggle_row(tab_game, "🎲 任务处理顺序随机化", self.var_random_task, "随机打乱处理各项任务的顺序，降低行为固定化风险。")
+        add_toggle_row(tab_game, "🔒 塔台全开仅停机位", self.var_tower_open_stand_only, "塔台四个控制器全部开启时，强制限制只处理停机位。")
 
-        tower_card = ttkb.Labelframe(content, text="挂机节奏", padding=16, bootstyle="secondary")
-        tower_card.grid(row=1, column=0, sticky="nsew", padx=(0, 8), pady=(10, 0))
-        tower_top = ttkb.Frame(tower_card)
-        tower_top.pack(fill=X)
-        ttkb.Label(tower_top, text="自动延时塔台", font=("Microsoft YaHei UI", 10, "bold")).pack(side=LEFT)
-        ttkb.Label(tower_top, text="仅控制已手动开启的控制器", bootstyle="secondary").pack(side=LEFT, padx=(8, 0))
-        tower_row = ttkb.Frame(tower_card)
-        tower_row.pack(fill=X, pady=(10, 0))
-        ttkb.Entry(tower_row, textvariable=self.var_delay_count, width=6).pack(side=LEFT)
-        ttkb.Label(tower_row, text="次", bootstyle="secondary").pack(side=LEFT, padx=(6, 10))
-        ttkb.Button(tower_row, text="应用", bootstyle="outline-success", width=8, command=self.on_confirm_tower_delay).pack(side=LEFT)
-        self.create_info_icon(
-            tower_row,
-            "填 0 表示关闭，最大值 144。脚本只会延时你已手动开启的控制器，不会改动塔台布局。",
-        ).pack(side=LEFT, padx=8)
+        # [Tab 2] 挂机与防检测
+        tab_rhythm = ttkb.Frame(notebook, padding=15)
+        notebook.add(tab_rhythm, text=" 挂机与防检测 ")
+        
+        # 延时处理
+        ttkb.Label(tab_rhythm, text="自动延时塔台配置", font=("Microsoft YaHei UI", 10, "bold"), bootstyle="primary").pack(anchor="w", pady=(0, 10))
+        tower_row = ttkb.Frame(tab_rhythm)
+        tower_row.pack(fill=X, pady=(0, 15))
+        ttkb.Label(tower_row, text="延时控制器：").pack(side=LEFT)
+        ttkb.Entry(tower_row, textvariable=self.var_delay_count, width=6).pack(side=LEFT, padx=5)
+        ttkb.Label(tower_row, text="次").pack(side=LEFT)
+        ttkb.Button(tower_row, text="应用", bootstyle="outline-primary", command=self.on_confirm_tower_delay, padding=(10,0)).pack(side=LEFT, padx=10)
+        self.create_info_icon(tower_row, "填0关闭，最大144。仅延时手动开启的控制器，不会改变原塔台布局。").pack(side=LEFT)
 
-        ttkb.Separator(tower_card).pack(fill=X, pady=(10, 10))
-        ttkb.Label(tower_card, text="运行与防检测快速开关", font=("Microsoft YaHei UI", 10, "bold")).pack(anchor="w")
+        ttkb.Separator(tab_rhythm, bootstyle="secondary").pack(fill=X, pady=15)
 
-        quick_runtime = ttkb.Frame(tower_card)
-        quick_runtime.pack(fill=X, pady=(8, 0))
+        # 模式切换
+        ttkb.Label(tab_rhythm, text="挂机模式快速切换", font=("Microsoft YaHei UI", 10, "bold"), bootstyle="primary").pack(anchor="w", pady=(0, 10))
+        h_row = ttkb.Frame(tab_rhythm)
+        h_row.pack(fill=X)
+        col1 = ttkb.Frame(h_row)
+        col1.pack(side=LEFT, fill=X, expand=True)
+        col2 = ttkb.Frame(h_row)
+        col2.pack(side=LEFT, fill=X, expand=True)
 
-        def add_runtime_toggle(parent, text, var, tip):
-            row = ttkb.Frame(parent)
-            row.pack(side=LEFT, padx=(0, 12))
-            ttkb.Checkbutton(
-                row,
-                text=text,
-                variable=var,
-                bootstyle="success-round-toggle",
-                command=self.sync_all_configs_to_bot,
-            ).pack(side=LEFT)
-            self.create_info_icon(row, tip).pack(side=LEFT, padx=(4, 0))
+        add_toggle_row(col1, "不起飞模式", self.var_no_takeoff_mode, "停止发给离场跑道，只接机和派车。")
+        add_toggle_row(col2, "独立小退控制", self.var_no_takeoff_logout_enabled, "挂机一定时间后自动小退释放内存。")
 
-        add_runtime_toggle(quick_runtime, "不起飞模式", self.var_no_takeoff_mode, "快速启停不起飞模式；轮切和自动小退时间仍在高级设置中调整。")
-        add_runtime_toggle(quick_runtime, "独立小退", self.var_no_takeoff_logout_enabled, "快速启停独立小退；时间参数在高级设置中调整。")
-        add_runtime_toggle(quick_runtime, "随机任务", self.var_random_task, "快速启停随机任务选择，降低固定操作模式。")
+        # [Tab 3] 高级性能调优
+        tab_advanced = ttkb.Frame(notebook, padding=15)
+        notebook.add(tab_advanced, text=" 高级与性能 ")
+        
+        ttkb.Label(tab_advanced, text="识别策略级强化 (谨慎使用)", font=("Microsoft YaHei UI", 10, "bold"), bootstyle="danger").pack(anchor="w", pady=(0, 10))
+        add_toggle_row(tab_advanced, "⚡ 跳过二次校验 (温和提速)", self.var_speed_mode, "略微跳过动画二次校验，适合环境较稳定时使用。")
+        add_toggle_row(tab_advanced, "🔥 跳过地勤验证 (激进提速)", self.var_skip_staff, "速度大幅提升，但出现误判风险增加。")
+        add_toggle_row(tab_advanced, "⚙️ 塔台关闭时处理所有飞机", self.var_cancel_stand_filter, "在塔台关闭时，取消停机位过滤。")
+        
+        ttkb.Separator(tab_advanced, bootstyle="secondary").pack(fill=X, pady=15)
+        
+        ttkb.Label(tab_advanced, text="自动化守护", font=("Microsoft YaHei UI", 10, "bold"), bootstyle="primary").pack(anchor="w", pady=(0, 10))
+        add_toggle_row(tab_advanced, "🛡️ 启用防卡死自动恢复", self.var_anti_stuck_enabled, "自动侦测并尝试解除界面卡死，关闭则保留致命弹窗检测。")
+        stuck_row = ttkb.Frame(tab_advanced)
+        stuck_row.pack(fill=X, pady=(0, 5))
+        ttkb.Label(stuck_row, text="卡死容忍阈值：").pack(side=LEFT)
+        ttkb.Entry(stuck_row, textvariable=self.var_anti_stuck_threshold, width=6).pack(side=LEFT, padx=5)
+        ttkb.Button(stuck_row, text="应用", bootstyle="outline-primary", command=self.on_confirm_anti_stuck, padding=(10,0)).pack(side=LEFT, padx=10)
+        self.create_info_icon(stuck_row, "范围3-20。数值越小触发重置越频繁。").pack(side=LEFT)
 
-        quick_runtime_2 = ttkb.Frame(tower_card)
-        quick_runtime_2.pack(fill=X, pady=(6, 0))
-        add_runtime_toggle(quick_runtime_2, "跳过二次校验", self.var_speed_mode, "开启后略微提速，适合稳定场景。")
-        add_runtime_toggle(quick_runtime_2, "跳过地勤验证", self.var_skip_staff, "开启后提速明显，但有一定误判风险。")
-        add_runtime_toggle(quick_runtime_2, "塔台关闭筛选全部", self.var_cancel_stand_filter, "塔台关闭时取消停机位筛选，处理全部待处理飞机。")
 
-        quick_runtime_3 = ttkb.Frame(tower_card)
-        quick_runtime_3.pack(fill=X, pady=(6, 0))
-        add_runtime_toggle(quick_runtime_3, "防卡死", self.var_anti_stuck_enabled, "关闭后仅停用自动防卡死恢复/自动停机；错误弹窗检测仍会强制执行。")
-        ttkb.Label(quick_runtime_3, text="阈值", bootstyle="secondary").pack(side=LEFT, padx=(8, 4))
-        ttkb.Entry(quick_runtime_3, textvariable=self.var_anti_stuck_threshold, width=5).pack(side=LEFT)
-        ttkb.Button(quick_runtime_3, text="应用", bootstyle="outline-success", width=8, command=self.on_confirm_anti_stuck).pack(side=LEFT, padx=(8, 0))
-        self.create_info_icon(
-            quick_runtime_3,
-            "阈值范围 3-20。数值越小触发越频繁。关闭防卡死时，服务器错误弹窗检测依然强制启用。",
-        ).pack(side=LEFT, padx=(6, 0))
-
-        tools_card = ttkb.Labelframe(content, text="工具入口", padding=16, bootstyle="warning")
-        tools_card.grid(row=1, column=1, sticky="nsew", padx=(8, 0), pady=(10, 0))
-        ttkb.Label(
-            tools_card,
-            text="高级配置、在线验证、国内网络方案、多开模式和紧凑模式都集中到了这里。",
-            wraplength=360,
-            justify="left",
-            bootstyle="secondary",
-        ).pack(anchor="w", pady=(0, 10))
-        ttkb.Button(tools_card, text="打开高级设置", bootstyle="secondary", command=self.open_settings_window).pack(fill=X)
-        ttkb.Button(tools_card, text="立即在线验证", bootstyle="success-outline", command=self.run_online_validation).pack(fill=X, pady=8)
-        ttkb.Button(tools_card, text="启动新实例", bootstyle="primary-outline", command=self.launch_new_instance).pack(fill=X)
-        ttkb.Button(tools_card, text="官方仓库", bootstyle="primary-outline", command=self.open_official_repo).pack(fill=X)
-        ttkb.Button(tools_card, text="国内网络方案", bootstyle="warning-outline", command=self.show_cn_network_help).pack(fill=X, pady=8)
-        ttkb.Button(tools_card, text="查看使用说明", bootstyle="info-outline", command=self.open_help_window).pack(fill=X, pady=8)
-        ttkb.Button(tools_card, text="切换紧凑小窗", bootstyle="warning-outline", command=self.toggle_mode).pack(fill=X)
-
-        log_group = ttkb.Labelframe(outer, text="运行日志", padding=8, bootstyle="dark")
-        log_group.pack(fill=BOTH, expand=True)
-        self.txt_main_log = ScrolledText(log_group, state="disabled", font=("Consolas", 9), relief="flat", bg="#f7f3eb")
+        # ================== 3. 底部终端日志区 ==================
+        log_group = ttkb.Labelframe(outer, text=" 实时终端输出 ", padding=10, bootstyle="dark")
+        log_group.pack(fill=BOTH, expand=True, pady=(20, 0))
+        
+        # 终端风格日志输出
+        self.txt_main_log = ScrolledText(log_group, state="disabled", font=("Consolas", 10), bg="#1E1E1E", fg="#D4D4D4", relief="flat", insertbackground="white")
         self.txt_main_log.pack(fill=BOTH, expand=True)
         self.redirector.add_widget(self.txt_main_log)
-        # 先显示 UI，延迟执行首次扫描（避免启动卡顿）
+        
+        # 延迟执行首次扫描，避免启动卡顿
         self.after(100, self._do_initial_scan)
 
     def _do_initial_scan(self):
         """后台线程执行首次设备扫描，完成后更新 UI"""
         def _worker():
             try:
-                devs = AdbController.scan_devices(debug=True)
+                devs = self._scan_devices_with_public_targets(debug=True)
             except Exception as e:
                 print(f">>> [扫描异常] {e}")
                 devs = []
@@ -1840,21 +2012,105 @@ class Application(ttkb.Window):
         notebook.pack(fill=BOTH, expand=True, pady=(0, 12))
         tab_device = ttkb.Frame(notebook, padding=16)
         tab_runtime = ttkb.Frame(notebook, padding=16)
+        tab_notify = ttkb.Frame(notebook, padding=16)
         notebook.add(tab_device, text="设备与方案")
         notebook.add(tab_runtime, text="运行与防检测")
+        notebook.add(tab_notify, text="手机报错提醒")
 
         tab_device_left, tab_device_right = self._build_two_columns(tab_device)
         tab_runtime_left, tab_runtime_right = self._build_two_columns(tab_runtime)
+        tab_notify_left, tab_notify_right = self._build_two_columns(tab_notify)
+
+        ttkb.Label(tab_notify_left, text="一键接入手机提醒", font=("bold")).pack(anchor="w")
+        ttkb.Label(
+            tab_notify_left,
+            text="脚本出现报错时，自动把提醒推送到企业微信或钉钉机器人。",
+            bootstyle="secondary",
+        ).pack(anchor="w", pady=(4, 10))
+
+        f_notify_enable = ttkb.Frame(tab_notify_left)
+        f_notify_enable.pack(fill=X, pady=5)
+        ttkb.Checkbutton(
+            f_notify_enable,
+            text="启用手机报错提醒",
+            variable=self.var_notify_enabled,
+            bootstyle="success-round-toggle",
+        ).pack(side=LEFT)
+        self.create_info_icon(
+            f_notify_enable,
+            "开启后，当脚本出现运行报错、严重错误、自动停机时会推送提醒。",
+        ).pack(side=LEFT, padx=5)
+
+        f_notify_provider = ttkb.Frame(tab_notify_left)
+        f_notify_provider.pack(fill=X, pady=5)
+        ttkb.Label(f_notify_provider, text="提醒平台:").pack(side=LEFT)
+        provider_combo = ttkb.Combobox(
+            f_notify_provider,
+            values=("企业微信机器人", "钉钉机器人"),
+            state="readonly",
+            width=16,
+        )
+        provider_combo.pack(side=LEFT, padx=8)
+        if self.var_notify_provider.get().strip().lower() == "dingtalk":
+            provider_combo.current(1)
+        else:
+            provider_combo.current(0)
+
+        f_notify_webhook = ttkb.Frame(tab_notify_left)
+        f_notify_webhook.pack(fill=X, pady=5)
+        ttkb.Label(f_notify_webhook, text="Webhook 地址:").pack(side=LEFT)
+        e_notify_webhook = ttkb.Entry(f_notify_webhook, textvariable=self.var_notify_webhook)
+        e_notify_webhook.pack(side=LEFT, fill=X, expand=True, padx=(8, 0))
+
+        f_notify_keyword = ttkb.Frame(tab_notify_left)
+        f_notify_keyword.pack(fill=X, pady=5)
+        ttkb.Label(f_notify_keyword, text="关键词(可选):").pack(side=LEFT)
+        e_notify_keyword = ttkb.Entry(f_notify_keyword, textvariable=self.var_notify_keyword, width=24)
+        e_notify_keyword.pack(side=LEFT, padx=8)
+        self.create_info_icon(
+            f_notify_keyword,
+            "部分机器人会要求消息包含指定关键词；没有要求可留空。",
+        ).pack(side=LEFT, padx=5)
+
+        def test_mobile_notify():
+            provider = "dingtalk" if provider_combo.current() == 1 else "wecom"
+            self.var_notify_provider.set(provider)
+            self.var_notify_webhook.set(e_notify_webhook.get().strip())
+            self.var_notify_keyword.set(e_notify_keyword.get().strip())
+            if not self.var_notify_webhook.get().strip():
+                messagebox.showwarning("提示", "请先填写 Webhook 地址", parent=win)
+                return
+            self._send_mobile_notify("测试提醒", "这是一条测试消息，说明机器人接入成功。", force=True)
+
+        ttkb.Button(
+            tab_notify_left,
+            text="发送测试提醒",
+            bootstyle="info-outline",
+            width=16,
+            command=test_mobile_notify,
+        ).pack(anchor="w", pady=(10, 0))
+
+        ttkb.Label(tab_notify_right, text="小白接入指引", font=("bold")).pack(anchor="w")
+        guide_lines = [
+            "1. 在企业微信/钉钉群里添加自定义机器人，复制 Webhook 地址。",
+            "2. 选择提醒平台并粘贴 Webhook，必要时填写关键词。",
+            "3. 点击“发送测试提醒”，手机收到消息后再点保存设置。",
+            "4. 后续脚本报错会自动推送，避免人不在电脑旁时漏看。",
+        ]
+        for line in guide_lines:
+            ttkb.Label(tab_notify_right, text=line, bootstyle="secondary", justify="left", wraplength=460).pack(anchor="w", pady=2)
 
         ttkb.Label(tab_device_left, text="手动连接", font=("bold")).pack(anchor="w")
         f_manual = ttkb.Frame(tab_device_left);
         f_manual.pack(fill=X, pady=5)
         e_manual_ip = ttkb.Entry(f_manual)
         e_manual_ip.pack(side=LEFT, fill=X, expand=True, padx=(0, 5))
+        e_manual_ip.insert(0, self.config.get("last_manual_adb_target", ""))
 
         def run_manual_connect():
             ip = e_manual_ip.get().strip()
             if ip:
+                self.config["last_manual_adb_target"] = ip
                 print(f">>> 尝试手动连接: {ip}")
                 try:
                     adb_exe = adb_mod.CURRENT_ADB_PATH if adb_mod.CURRENT_ADB_PATH else "adb"
@@ -1865,6 +2121,64 @@ class Application(ttkb.Window):
 
         # 【颜色统一】手动连接按钮 -> 绿色
         ttkb.Button(f_manual, text="连接", bootstyle="success", command=run_manual_connect).pack(side=LEFT)
+        self.create_info_icon(f_manual, "支持局域网 ADB、公网云手机、云真机，格式示例：1.2.3.4:5555 或 example.com:4555").pack(side=LEFT, padx=6)
+
+        ttkb.Separator(tab_device_left).pack(fill=X, pady=10)
+        ttkb.Label(tab_device_left, text="公网 ADB / 云手机", font=("bold")).pack(anchor="w")
+        ttkb.Label(
+            tab_device_left,
+            text="参考 ALAS 云服务器方案：把公网云手机地址填在这里，扫描设备或启动脚本时会自动连接。",
+            bootstyle="secondary",
+            wraplength=520,
+            justify="left",
+        ).pack(anchor="w", pady=(4, 6))
+        public_adb_box = ScrolledText(tab_device_left, height=6, font=("Consolas", 9), relief="flat")
+        public_adb_box.pack(fill=X, pady=(0, 6))
+        public_adb_box.insert("1.0", self.var_public_adb_targets.get())
+
+        public_adb_hint = ttkb.Frame(tab_device_left)
+        public_adb_hint.pack(fill=X, pady=(0, 6))
+        ttkb.Label(public_adb_hint, text="每行一个地址，例如：47.101.10.8:5555", bootstyle="secondary").pack(side=LEFT)
+
+        f_public_adb_actions = ttkb.Frame(tab_device_left)
+        f_public_adb_actions.pack(fill=X, pady=(0, 8))
+
+        def _get_public_adb_text():
+            return public_adb_box.get("1.0", END).strip()
+
+        def test_public_adb_targets():
+            raw = _get_public_adb_text()
+            targets = self._parse_public_adb_targets(raw)
+            if not targets:
+                messagebox.showwarning("提示", "请至少填写一个 host:port 地址", parent=win)
+                return
+            self.var_public_adb_targets.set(raw)
+            self.config["public_adb_targets"] = raw
+            connected, failed = self._connect_public_adb_targets(targets, debug=True)
+            self.save_config()
+            self.refresh_devices()
+            msg = [f"成功: {len(connected)} 台", f"失败: {len(failed)} 台"]
+            if connected:
+                msg.append("\n成功列表:\n" + "\n".join(connected[:8]))
+            if failed:
+                fail_lines = [f"{target} -> {reason}" for target, reason in failed[:5]]
+                msg.append("\n失败列表:\n" + "\n".join(fail_lines))
+            messagebox.showinfo("公网 ADB 测试结果", "\n".join(msg), parent=win)
+
+        def import_manual_target_to_public():
+            target = e_manual_ip.get().strip()
+            if not target:
+                messagebox.showwarning("提示", "请先在上方输入一个公网 ADB 地址", parent=win)
+                return
+            current = _get_public_adb_text()
+            merged = current.splitlines() if current else []
+            if target not in merged:
+                merged.append(target)
+            public_adb_box.delete("1.0", END)
+            public_adb_box.insert("1.0", "\n".join([line for line in merged if str(line).strip()]))
+
+        ttkb.Button(f_public_adb_actions, text="测试并连接", bootstyle="info-outline", command=test_public_adb_targets).pack(side=LEFT)
+        ttkb.Button(f_public_adb_actions, text="加入上方地址", bootstyle="secondary-outline", command=import_manual_target_to_public).pack(side=LEFT, padx=8)
 
         ttkb.Separator(tab_device_left).pack(fill=X, pady=10)
         ttkb.Label(tab_device_left, text="ADB 路径", font=("bold")).pack(anchor="w")
@@ -2216,6 +2530,22 @@ class Application(ttkb.Window):
             self.config["cancel_stand_filter"] = self.var_cancel_stand_filter.get()
             self.config["random_task_order"] = self.var_random_task.get()
             self.config["anti_stuck_enabled"] = self.var_anti_stuck_enabled.get()
+            notify_provider = "dingtalk" if provider_combo.current() == 1 else "wecom"
+            notify_webhook = e_notify_webhook.get().strip()
+            notify_keyword = e_notify_keyword.get().strip()
+            public_adb_targets = _get_public_adb_text()
+            self.var_notify_provider.set(notify_provider)
+            self.var_notify_webhook.set(notify_webhook)
+            self.var_notify_keyword.set(notify_keyword)
+            self.var_public_adb_targets.set(public_adb_targets)
+            self.config["mobile_notify_enabled"] = bool(self.var_notify_enabled.get())
+            self.config["mobile_notify_provider"] = notify_provider
+            self.config["mobile_notify_webhook"] = notify_webhook
+            self.config["mobile_notify_keyword"] = notify_keyword
+            self.config["public_adb_targets"] = public_adb_targets
+            if self.config["mobile_notify_enabled"] and not notify_webhook:
+                messagebox.showerror("错误", "已开启手机提醒，但未填写 Webhook 地址", parent=win)
+                return
             self.config.pop("filter_switch_min", None)
             self.config.pop("filter_switch_max", None)
             try:
@@ -2267,6 +2597,12 @@ class Application(ttkb.Window):
                 changed.append(("防卡死", "开" if self.config.get("anti_stuck_enabled") else "关"))
             if old_cfg.get("anti_stuck_threshold") != self.config.get("anti_stuck_threshold"):
                 changed.append(("防卡死触发阈值", str(self.config.get("anti_stuck_threshold", 6))))
+            if old_cfg.get("mobile_notify_enabled") != self.config.get("mobile_notify_enabled"):
+                changed.append(("手机报错提醒", "开" if self.config.get("mobile_notify_enabled") else "关"))
+            if old_cfg.get("mobile_notify_provider") != self.config.get("mobile_notify_provider"):
+                changed.append(("提醒平台", "企业微信" if self.config.get("mobile_notify_provider") == "wecom" else "钉钉"))
+            if old_cfg.get("public_adb_targets") != self.config.get("public_adb_targets"):
+                changed.append(("公网 ADB 地址列表", f"{len(self._parse_public_adb_targets(public_adb_targets))} 项"))
             if old_cfg.get("no_takeoff_switch_interval") != self.config.get("no_takeoff_switch_interval"):
                 changed.append(("不起飞轮切间隔", f"{self.config.get('no_takeoff_switch_interval', 15)} 秒"))
             if old_cfg.get("no_takeoff_auto_logout_interval") != self.config.get("no_takeoff_auto_logout_interval"):
@@ -2312,7 +2648,7 @@ class Application(ttkb.Window):
             btn.configure(state="disabled")
         self.update()
         try:
-            devs = AdbController.scan_devices(debug=True)
+            devs = self._scan_devices_with_public_targets(debug=True)
         except Exception as e:
             print(f">>> [扫描异常] {e}")
             devs = []
@@ -2355,6 +2691,7 @@ class Application(ttkb.Window):
         if self.bot and self.bot.running: return
         self.var_runtime_status.set("准备启动")
         self.save_config()
+        self._connect_public_adb_targets(debug=False)
         self._try_use_mumu_adb_for_device(device)
         for btn in [self.btn_main_start, self.btn_mini_start]:
             btn.configure(state="disabled", text="运行中...")
@@ -2481,6 +2818,7 @@ class Application(ttkb.Window):
 
     def log_to_queue(self, msg):
         self.log_queue.put(msg)
+        self._check_error_and_notify(msg)
 
     def process_log_queue(self):
         self.redirector._flush_queue()
