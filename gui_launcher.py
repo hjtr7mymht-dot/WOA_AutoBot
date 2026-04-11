@@ -1488,12 +1488,28 @@ class Application(ttkb.Window):
             missing.append("official.repo_name")
         if str(ONLINE_VERSION_PATH).strip() != ONLINE_VERSION_PATH_EXPECTED:
             missing.append("online.version_path")
+        # 兼容不同打包形态（源码/onefile/onedir）下 version.json 的落盘位置，避免误报缺失。
+        version_candidates = []
         try:
-            official_ver_path = get_resource_path(ONLINE_VERSION_PATH_EXPECTED)
-            if not os.path.isfile(official_ver_path):
-                missing.append("online.version_file")
+            version_candidates.append(get_resource_path(ONLINE_VERSION_PATH_EXPECTED))
         except Exception:
-            missing.append("online.version_file")
+            pass
+        try:
+            version_candidates.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), ONLINE_VERSION_PATH_EXPECTED))
+        except Exception:
+            pass
+        try:
+            version_candidates.append(os.path.join(os.path.dirname(os.path.abspath(sys.executable)), ONLINE_VERSION_PATH_EXPECTED))
+        except Exception:
+            pass
+        try:
+            version_candidates.append(os.path.join(os.getcwd(), ONLINE_VERSION_PATH_EXPECTED))
+        except Exception:
+            pass
+        has_version_file = any(os.path.isfile(p) for p in set(version_candidates) if p)
+        if not has_version_file:
+            # 缺少本地版本清单不直接判定为篡改，交由在线验证链路继续判定可用性。
+            print(">>> [在线校验] 未在本地找到 version.json，已跳过 online.version_file 本地校验，继续使用在线源校验")
 
         self._missing_guard_modules = sorted(set(missing))
         self._guard_integrity_ok = len(self._missing_guard_modules) == 0
