@@ -5,7 +5,7 @@ a = Analysis(
     ['gui_launcher.py'],
     pathex=[],
     binaries=[],
-    datas=[('assets', 'assets'), ('icon', 'icon'), ('adb_tools', 'adb_tools'), ('platform-tools', 'platform-tools'), ('config.json', '.')],
+    datas=[('assets', 'assets'), ('icon', 'icon'), ('adb_tools', 'adb_tools'), ('platform-tools', 'platform-tools'), ('config.json', '.'), ('version.json', '.')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
