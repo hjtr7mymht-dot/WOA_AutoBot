@@ -1372,7 +1372,8 @@ class AdbController:
         self.run_cmd(["forward", "--remove", f"tcp:{self._droidcast_base_port}"], timeout=3)
 
     def _get_screenshot_droidcast_raw(self):
-        """DroidCast 截图（PNG模式）：使用 /preview 接口避免 RGB565 格式问题，请求 1600x900"""
+        """DroidCast 截图（PNG模式）：使用 /preview 接口避免 RGB565 格式问题，请求 1600x900。
+        部分云手机/不同机型会返回非 1600x900 分辨率，这里统一放宽并交由后续标准化处理。"""
         import cv2
         import numpy as np
         if not self._droidcast_init():
@@ -1401,18 +1402,11 @@ class AdbController:
                 
             # 检查分辨率并修正
             h, w = img.shape[:2]
-            
-            # 如果是 900x1600 (竖屏)，顺时针旋转 90° 变 1600x900
-            if w == 900 and h == 1600:
+
+            # 若为竖屏则旋转到横屏，剩余缩放统一由 _normalize_to_logical_resolution 处理。
+            if h > w:
                 img = cv2.rotate(img, cv2.ROTATE_90_CLOCKWISE)
-                
-            # 如果是 1600x900，直接返回
-            elif w == 1600 and h == 900:
-                pass
-            else:
-                # 其他分辨率，返回 None 回退 ADB
-                return None
-                
+
             return img
         except Exception:
             return None

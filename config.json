@@ -14,8 +14,8 @@
     "slide_max": 500,
     "thinking_mode": 1,
     "no_takeoff_mode": false,
-    "cancel_stand_filter": false,
-    "tower_open_stand_only": false,
+    "cancel_stand_filter": true,
+    "tower_open_stand_only": true,
     "no_takeoff_logout_enabled": false,
     "auto_staff_minus_one": true,
     "online_verified_once": true,
@@ -31,7 +31,9 @@
     "anti_stuck_threshold": 6,
     "mobile_notify_enabled": true,
     "mobile_notify_provider": "wecom",
-    "mobile_notify_webhook": "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=c9f1ebe0-3655-4840-8358-42f53f5619f3",
+    "mobile_notify_webhook": "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=5d28699d-9045-42d8-a724-2b901680422a",
     "mobile_notify_keyword": "",
-    "public_adb_targets": ""
+    "public_adb_targets": "",
+    "mobile_stats_report_enabled": true,
+    "mobile_stats_report_hours": 3
 }

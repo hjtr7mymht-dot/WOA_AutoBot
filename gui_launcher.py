@@ -97,7 +97,7 @@ if INSTANCE_ID is None:
 CONFIG_FILE = "config.json" if INSTANCE_ID == 1 else f"config_{INSTANCE_ID}.json"
 STATS_FILE = "woa_stats.csv"
 
-LOCAL_VERSION = "1.1.0"
+LOCAL_VERSION = "1.1.2"
 OFFICIAL_REPO_URL = "https://github.com/hjtr7mymht-dot/WOA_AutoBot"
 OFFICIAL_REPO_NAME = "hjtr7mymht-dot/WOA_AutoBot"
 ONLINE_VERSION_PATH = "version.json"
@@ -109,6 +109,9 @@ REQUIRED_GUARD_MODULES = (
     "emulator_discovery",
 )
 FEATURE_GUARD_TOKEN = "WOA_DONATE_GUARD_V1"
+OFFICIAL_REPO_URL_EXPECTED = "https://github.com/hjtr7mymht-dot/WOA_AutoBot"
+OFFICIAL_REPO_NAME_EXPECTED = "hjtr7mymht-dot/WOA_AutoBot"
+ONLINE_VERSION_PATH_EXPECTED = "version.json"
 
 DONATE_IMAGE_CANDIDATES = {
     "微信支付": (
@@ -397,8 +400,7 @@ class Application(ttkb.Window):
         if legacy_logout_interval is None:
             legacy_logout_interval = self.config.get("no_takeoff_logout_min", self.config.get("no_takeoff_logout_max", 30))
         self.var_no_takeoff_logout_enabled = tk.BooleanVar(
-            value=self.config.get("no_takeoff_logout_enabled",
-                                  bool(legacy_logout_interval)))
+            value=self.config.get("no_takeoff_logout_enabled", False))
         self.var_no_takeoff_switch_interval = tk.StringVar(value=str(self.config.get("no_takeoff_switch_interval", 15)))
         self.var_no_takeoff_auto_logout_interval = tk.StringVar(value=str(self.config.get("no_takeoff_auto_logout_interval", 30)))
         self.var_standalone_logout_interval = tk.StringVar(value=str(legacy_logout_interval or 30))
@@ -410,6 +412,8 @@ class Application(ttkb.Window):
         self.var_notify_provider = tk.StringVar(value=str(self.config.get("mobile_notify_provider", "wecom")))
         self.var_notify_webhook = tk.StringVar(value=str(self.config.get("mobile_notify_webhook", "")))
         self.var_notify_keyword = tk.StringVar(value=str(self.config.get("mobile_notify_keyword", "")))
+        self.var_stats_report_enabled = tk.BooleanVar(value=bool(self.config.get("mobile_stats_report_enabled", False)))
+        self.var_stats_report_hours = tk.StringVar(value=str(self.config.get("mobile_stats_report_hours", 6)))
         self.var_public_adb_targets = tk.StringVar(value=str(self.config.get("public_adb_targets", "")))
         for legacy_key in (
             "auto_exit_time", "auto_exit_enabled", "auto_exit_rest_time", "auto_exit_rest_enabled",
@@ -432,6 +436,7 @@ class Application(ttkb.Window):
         self._missing_guard_modules = []
         self._guard_integrity_ok = True
         self._startup_update_checked = False
+        self._startup_update_popup_shown = False
 
         if self.config.get("adb_path"):
             set_custom_adb_path(self.config["adb_path"])
@@ -442,6 +447,7 @@ class Application(ttkb.Window):
         self._notify_lock = threading.Lock()
         self._notify_last_ts = 0.0
         self._notify_last_signature = ""
+        self._stats_report_anchor_ts = 0.0
 
         self.redirector = MultiTextRedirector()
         self._log_tee = None
@@ -469,6 +475,7 @@ class Application(ttkb.Window):
 
         self.container_main.pack(fill=BOTH, expand=True)
         self.after(self.queue_check_interval, self.process_log_queue)
+        self.after(60000, self._periodic_stats_report_tick)
 
         def _emit_notice():
             m1 = "此脚本为开源免费项目，如您是从任何渠道，例如淘宝、闲鱼、拼多多购买的，请立即退款并举报！"
@@ -647,6 +654,9 @@ class Application(ttkb.Window):
         self.config["mobile_notify_provider"] = provider
         self.config["mobile_notify_webhook"] = str(self.var_notify_webhook.get() or "").strip()
         self.config["mobile_notify_keyword"] = str(self.var_notify_keyword.get() or "").strip()
+        self.config["mobile_stats_report_enabled"] = bool(self.var_stats_report_enabled.get())
+        self.config["mobile_stats_report_hours"] = self._normalize_stats_report_hours(self.var_stats_report_hours.get())
+        self.var_stats_report_hours.set(str(self.config["mobile_stats_report_hours"]))
         self.config["public_adb_targets"] = str(self.var_public_adb_targets.get() or "").strip()
         try:
             with open(CONFIG_FILE, "w", encoding="utf-8") as f:
@@ -799,6 +809,114 @@ class Application(ttkb.Window):
             return
         if "检测到持续报错" in text:
             self._send_mobile_notify("脚本已自动停止", text, force=True)
+            return
+        # 覆盖防卡死硬停、异常触发自动停机等停机路径。
+        if "[防卡死]" in text and "脚本已停止" in text:
+            self._send_mobile_notify("脚本已自动停止", text, force=True)
+            return
+        if "自动停止" in text and ("防卡死" in text or "报错" in text or "异常" in text):
+            self._send_mobile_notify("脚本已自动停止", text, force=True)
+
+    def _normalize_stats_report_hours(self, value):
+        try:
+            iv = int(str(value).strip())
+        except Exception:
+            iv = 6
+        if iv not in (3, 6, 12, 24):
+            iv = 6
+        return iv
+
+    def _get_runtime_stats_snapshot(self):
+        bot = self.bot
+        if bot and getattr(bot, "running", False):
+            a = int(getattr(bot, "_stat_session_approach", getattr(bot, "_stat_approach", 0)) or 0)
+            d = int(getattr(bot, "_stat_session_depart", getattr(bot, "_stat_depart", 0)) or 0)
+            sc = int(getattr(bot, "_stat_session_stand_count", getattr(bot, "_stat_stand_count", 0)) or 0)
+            ss = int(getattr(bot, "_stat_session_stand_staff", getattr(bot, "_stat_stand_staff", 0)) or 0)
+            run_start = getattr(bot, "_run_start_time", None)
+            dur_text = "未知"
+            if run_start:
+                dur_s = max(0, int(time.time() - float(run_start)))
+                hh, rem = divmod(dur_s, 3600)
+                mm, sec = divmod(rem, 60)
+                dur_text = f"{hh}小时{mm}分{sec}秒" if hh > 0 else f"{mm}分{sec}秒"
+            return {
+                "runtime": dur_text,
+                "approach": a,
+                "depart": d,
+                "stand_count": sc,
+                "stand_staff": ss,
+                "source": "session",
+            }
+
+        import csv
+        _base = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else os.path.dirname(os.path.abspath(__file__))
+        csv_path = os.path.join(_base, STATS_FILE)
+        today = datetime.datetime.now().strftime("%Y-%m-%d")
+        if os.path.isfile(csv_path):
+            try:
+                with open(csv_path, "r", encoding="utf-8-sig") as f:
+                    reader = csv.reader(f)
+                    for i, row in enumerate(reader):
+                        if i == 0 and row and row[0].strip().lower() == "date":
+                            continue
+                        if len(row) >= 5 and row[0] == today:
+                            return {
+                                "runtime": "当前未运行",
+                                "approach": int(row[1]),
+                                "depart": int(row[2]),
+                                "stand_count": int(row[3]),
+                                "stand_staff": int(row[4]),
+                                "source": "csv",
+                            }
+            except Exception:
+                pass
+
+        return {
+            "runtime": "当前未运行",
+            "approach": 0,
+            "depart": 0,
+            "stand_count": 0,
+            "stand_staff": 0,
+            "source": "empty",
+        }
+
+    def _send_stats_report(self, manual=False):
+        hours = self._normalize_stats_report_hours(self.var_stats_report_hours.get())
+        self.var_stats_report_hours.set(str(hours))
+        snap = self._get_runtime_stats_snapshot()
+        detail = (
+            f"周期: 每 {hours} 小时\n"
+            f"运行时长: {snap['runtime']}\n"
+            f"进场飞机: {snap['approach']} 架次\n"
+            f"离场飞机: {snap['depart']} 架次\n"
+            f"分配地勤: {snap['stand_count']} 架次 / {snap['stand_staff']} 人次\n"
+            f"数据来源: {'本次运行' if snap['source'] == 'session' else '当日CSV'}"
+        )
+        title = "统计汇报(手动)" if manual else f"{hours}小时统计汇报"
+        self._send_mobile_notify(title, detail, force=True)
+
+    def _periodic_stats_report_tick(self):
+        try:
+            if bool(self.var_notify_enabled.get()) and bool(self.var_stats_report_enabled.get()):
+                bot = self.bot
+                if bot and getattr(bot, "running", False):
+                    now = time.time()
+                    hours = self._normalize_stats_report_hours(self.var_stats_report_hours.get())
+                    interval = float(hours) * 3600.0
+                    if self._stats_report_anchor_ts <= 0:
+                        self._stats_report_anchor_ts = now
+                    elif now - self._stats_report_anchor_ts >= interval:
+                        self._send_stats_report(manual=False)
+                        self._stats_report_anchor_ts = now
+                else:
+                    self._stats_report_anchor_ts = 0.0
+            else:
+                self._stats_report_anchor_ts = 0.0
+        except Exception as exc:
+            print(f">>> [统计汇报] 定时任务异常: {exc}")
+        finally:
+            self.after(60000, self._periodic_stats_report_tick)
 
     def _set_system_status(self, message):
         text = (message or "环境待检查").strip()
@@ -1012,6 +1130,11 @@ class Application(ttkb.Window):
         self.txt_mini_log.pack(fill=BOTH, expand=True)
         self.redirector.add_widget(self.txt_mini_log)
 
+    def _toggle_functional_switch(self, t, v):
+        self.sync_all_configs_to_bot()
+        state = "开启" if v.get() else "关闭"
+        print(f">>> [功能状态] {t}: 已{state}")
+
     def setup_main_ui(self):
         # 整体外层容器，增加 padding 留白更现代化
         outer = ttkb.Frame(self.container_main, padding=20)
@@ -1108,16 +1231,11 @@ class Application(ttkb.Window):
         notebook = ttkb.Notebook(right_col, bootstyle="primary")
         notebook.pack(fill=BOTH, expand=True)
 
-        def toggle_cmd(t, v):
-            self.sync_all_configs_to_bot()
-            state = "开启" if v.get() else "关闭"
-            print(f">>> [功能状态] {t}: 已{state}")
-
         def add_toggle_row(parent, text, var, help_txt):
             row = ttkb.Frame(parent)
             row.pack(fill=X, pady=8)
             ttkb.Checkbutton(
-                row, text=text, variable=var, bootstyle="success-round-toggle", command=lambda t=text, v=var: toggle_cmd(t, v)
+                row, text=text, variable=var, bootstyle="success-round-toggle", command=lambda t=text, v=var: self._toggle_functional_switch(t, v)
             ).pack(side=LEFT)
             self.create_info_icon(row, help_txt).pack(side=LEFT, padx=10)
 
@@ -1179,6 +1297,17 @@ class Application(ttkb.Window):
         ttkb.Button(stuck_row, text="应用", bootstyle="outline-primary", command=self.on_confirm_anti_stuck, padding=(10,0)).pack(side=LEFT, padx=10)
         self.create_info_icon(stuck_row, "范围3-20。数值越小触发重置越频繁。").pack(side=LEFT)
 
+        # [Tab 4] 通知与统计
+        tab_notify = ttkb.Frame(notebook, padding=15)
+        notebook.add(tab_notify, text=" 通知与统计 ")
+
+        ttkb.Label(tab_notify, text="统计报告推送", font=("Microsoft YaHei UI", 10, "bold"), bootstyle="primary").pack(anchor="w", pady=(0, 10))
+        add_toggle_row(tab_notify, "📊 定时统计汇报", self.var_stats_report_enabled, "按周期(可在高级设置中调整)向手机推送统计报表。")
+
+        ttkb.Separator(tab_notify, bootstyle="secondary").pack(fill=X, pady=15)
+        
+        ttkb.Label(tab_notify, text="异常状态告警", font=("Microsoft YaHei UI", 10, "bold"), bootstyle="danger").pack(anchor="w", pady=(0, 10))
+        add_toggle_row(tab_notify, "📱 手机报错提醒", self.var_notify_enabled, "发生严重错误、卡死或自动停机时推送警报，需先配置 Webhook。")
 
         # ================== 3. 底部终端日志区 ==================
         log_group = ttkb.Labelframe(outer, text=" 实时终端输出 ", padding=10, bootstyle="dark")
@@ -1352,6 +1481,20 @@ class Application(ttkb.Window):
         if not os.path.isfile(donate_readme):
             missing.append("assets.donate")
 
+        # 严格模式下校验关键更新源配置，防止被改为非官方源后继续分发。
+        if str(OFFICIAL_REPO_URL).strip() != OFFICIAL_REPO_URL_EXPECTED:
+            missing.append("official.repo_url")
+        if str(OFFICIAL_REPO_NAME).strip() != OFFICIAL_REPO_NAME_EXPECTED:
+            missing.append("official.repo_name")
+        if str(ONLINE_VERSION_PATH).strip() != ONLINE_VERSION_PATH_EXPECTED:
+            missing.append("online.version_path")
+        try:
+            official_ver_path = get_resource_path(ONLINE_VERSION_PATH_EXPECTED)
+            if not os.path.isfile(official_ver_path):
+                missing.append("online.version_file")
+        except Exception:
+            missing.append("online.version_file")
+
         self._missing_guard_modules = sorted(set(missing))
         self._guard_integrity_ok = len(self._missing_guard_modules) == 0
         return self._guard_integrity_ok
@@ -1461,9 +1604,9 @@ class Application(ttkb.Window):
             self.after(1200, self._startup_online_update_check)
             return
         self._startup_update_checked = True
-        self.run_online_validation(silent=True)
+        self.run_online_validation(silent=True, show_update_popup=True)
 
-    def run_online_validation(self, silent=False):
+    def run_online_validation(self, silent=False, show_update_popup=False):
         if self._online_validation_running:
             return
         self._online_validation_running = True
@@ -1499,6 +1642,19 @@ class Application(ttkb.Window):
                 self.var_online_detail.set(result["detail"])
                 self._unlock_runtime_if_possible()
                 print(f">>> [在线验证] {result['detail']}")
+                if (
+                    show_update_popup
+                    and not self._startup_update_popup_shown
+                    and result.get("status") == "发现更新"
+                ):
+                    self._startup_update_popup_shown = True
+                    remote_v = str(result.get("remote_version") or "未知")
+                    if messagebox.askyesno(
+                        "发现新版本",
+                        f"检测到新版本可用。\n\n当前版本: {LOCAL_VERSION}\n最新版本: {remote_v}\n\n是否立即打开官方仓库下载更新？",
+                        parent=self,
+                    ):
+                        self.open_official_repo()
                 if not silent:
                     messagebox.showinfo("在线验证", result["message"], parent=self)
 
@@ -2090,6 +2246,50 @@ class Application(ttkb.Window):
             command=test_mobile_notify,
         ).pack(anchor="w", pady=(10, 0))
 
+        ttkb.Separator(tab_notify_left).pack(fill=X, pady=10)
+        ttkb.Label(tab_notify_left, text="定时统计汇报", font=("bold")).pack(anchor="w")
+        f_stats_report_enable = ttkb.Frame(tab_notify_left)
+        f_stats_report_enable.pack(fill=X, pady=5)
+        ttkb.Checkbutton(
+            f_stats_report_enable,
+            text="启用定时统计汇报",
+            variable=self.var_stats_report_enabled,
+            bootstyle="success-round-toggle",
+        ).pack(side=LEFT)
+        self.create_info_icon(
+            f_stats_report_enable,
+            "启用后会按设定周期将运行统计自动推送到机器人。",
+        ).pack(side=LEFT, padx=5)
+
+        f_stats_report_interval = ttkb.Frame(tab_notify_left)
+        f_stats_report_interval.pack(fill=X, pady=5)
+        ttkb.Label(f_stats_report_interval, text="汇报周期:").pack(side=LEFT)
+        stats_report_combo = ttkb.Combobox(
+            f_stats_report_interval,
+            values=("3", "6", "12", "24"),
+            state="readonly",
+            width=8,
+        )
+        stats_current = str(self._normalize_stats_report_hours(self.var_stats_report_hours.get()))
+        stats_report_combo.set(stats_current)
+        stats_report_combo.pack(side=LEFT, padx=8)
+        ttkb.Label(f_stats_report_interval, text="小时", bootstyle="secondary").pack(side=LEFT)
+
+        def send_stats_report_now():
+            self.var_stats_report_hours.set(stats_report_combo.get().strip() or "6")
+            if not self.var_notify_webhook.get().strip():
+                messagebox.showwarning("提示", "请先填写 Webhook 地址", parent=win)
+                return
+            self._send_stats_report(manual=True)
+
+        ttkb.Button(
+            tab_notify_left,
+            text="立即发送统计汇报",
+            bootstyle="secondary-outline",
+            width=16,
+            command=send_stats_report_now,
+        ).pack(anchor="w", pady=(6, 0))
+
         ttkb.Label(tab_notify_right, text="小白接入指引", font=("bold")).pack(anchor="w")
         guide_lines = [
             "1. 在企业微信/钉钉群里添加自定义机器人，复制 Webhook 地址。",
@@ -2321,10 +2521,12 @@ class Application(ttkb.Window):
         f_speed_row = ttkb.Frame(tab_runtime_left)
         f_speed_row.pack(fill=X, pady=5)
         ttkb.Checkbutton(f_speed_row, text="跳过二次校验", variable=self.var_speed_mode,
+                         command=lambda: self._toggle_functional_switch("跳过二次校验", self.var_speed_mode),
                          bootstyle="success-round-toggle").pack(side=LEFT)
         self.create_info_icon(f_speed_row,
                               "跳过对于飞机类型的二次校验；\n风险较低，运行速度提升轻微。").pack(side=LEFT, padx=5)
         ttkb.Checkbutton(f_speed_row, text="跳过地勤分配验证", variable=self.var_skip_staff,
+                         command=lambda: self._toggle_functional_switch("跳过地勤分配验证", self.var_skip_staff),
                          bootstyle="success-round-toggle").pack(side=LEFT, padx=(15, 0))
         self.create_info_icon(f_speed_row,
                               "地勤分配后不进行图标验证和颜色验证，直接开始；\n风险中等，可能导致飞机延误；\n仅推荐高峰期且有人在场时打开。").pack(side=LEFT, padx=5)
@@ -2337,6 +2539,7 @@ class Application(ttkb.Window):
             f_anti_stuck,
             text="启用防卡死自动恢复与自动停机",
             variable=self.var_anti_stuck_enabled,
+            command=lambda: self._toggle_functional_switch("启用防卡死", self.var_anti_stuck_enabled),
             bootstyle="success-round-toggle",
         ).pack(side=LEFT)
         self.create_info_icon(
@@ -2374,6 +2577,7 @@ class Application(ttkb.Window):
         f_no_takeoff_enable = ttkb.Frame(tab_runtime_left)
         f_no_takeoff_enable.pack(fill=X, pady=5)
         ttkb.Checkbutton(f_no_takeoff_enable, text="启用不起飞模式", variable=self.var_no_takeoff_mode,
+                         command=lambda: self._toggle_functional_switch("不起飞模式", self.var_no_takeoff_mode),
                          bootstyle="success-round-toggle").pack(side=LEFT)
         self.create_info_icon(f_no_takeoff_enable,
                               "全新不起飞模式策略：\n"
@@ -2413,6 +2617,7 @@ class Application(ttkb.Window):
         f_logout_enable = ttkb.Frame(tab_runtime_left)
         f_logout_enable.pack(fill=X, pady=5)
         ttkb.Checkbutton(f_logout_enable, text="启用独立小退", variable=self.var_no_takeoff_logout_enabled,
+                         command=lambda: self._toggle_functional_switch("启用独立小退", self.var_no_takeoff_logout_enabled),
                          bootstyle="success-round-toggle").pack(side=LEFT)
         self.create_info_icon(f_logout_enable,
                               "独立小退功能与不起飞模式自动小退分开。\n"
@@ -2422,6 +2627,7 @@ class Application(ttkb.Window):
         f_cancel_filter = ttkb.Frame(tab_runtime_left)
         f_cancel_filter.pack(fill=X, pady=5)
         ttkb.Checkbutton(f_cancel_filter, text="塔台关闭时筛选全部飞机", variable=self.var_cancel_stand_filter,
+                         command=lambda: self._toggle_functional_switch("塔台关闭时筛选全部飞机", self.var_cancel_stand_filter),
                          bootstyle="success-round-toggle").pack(side=LEFT)
         self.create_info_icon(f_cancel_filter,
                               "开启后，塔台关闭时，脚本会强制取消停机位飞机的筛选，处理全部的待处理飞机。" ).pack(side=LEFT, padx=5)
@@ -2457,6 +2663,7 @@ class Application(ttkb.Window):
         f_rnd.pack(fill=X, pady=5)
         # 【颜色统一】随机任务选择 -> 绿色开关
         ttkb.Checkbutton(f_rnd, text="随机任务选择", variable=self.var_random_task,
+                         command=lambda: self._toggle_functional_switch("随机任务选择", self.var_random_task),
                          bootstyle="success-round-toggle").pack(side=LEFT)
         self.create_info_icon(f_rnd,
                               "开启后，脚本将在列表前3个任务中随机选择（80%概率），或从下方任务中随机选择（20%概率），以模拟真实操作。").pack(
@@ -2533,15 +2740,20 @@ class Application(ttkb.Window):
             notify_provider = "dingtalk" if provider_combo.current() == 1 else "wecom"
             notify_webhook = e_notify_webhook.get().strip()
             notify_keyword = e_notify_keyword.get().strip()
+            stats_report_enabled = bool(self.var_stats_report_enabled.get())
+            stats_report_hours = self._normalize_stats_report_hours(stats_report_combo.get().strip())
             public_adb_targets = _get_public_adb_text()
             self.var_notify_provider.set(notify_provider)
             self.var_notify_webhook.set(notify_webhook)
             self.var_notify_keyword.set(notify_keyword)
+            self.var_stats_report_hours.set(str(stats_report_hours))
             self.var_public_adb_targets.set(public_adb_targets)
             self.config["mobile_notify_enabled"] = bool(self.var_notify_enabled.get())
             self.config["mobile_notify_provider"] = notify_provider
             self.config["mobile_notify_webhook"] = notify_webhook
             self.config["mobile_notify_keyword"] = notify_keyword
+            self.config["mobile_stats_report_enabled"] = stats_report_enabled
+            self.config["mobile_stats_report_hours"] = stats_report_hours
             self.config["public_adb_targets"] = public_adb_targets
             if self.config["mobile_notify_enabled"] and not notify_webhook:
                 messagebox.showerror("错误", "已开启手机提醒，但未填写 Webhook 地址", parent=win)
@@ -2601,6 +2813,10 @@ class Application(ttkb.Window):
                 changed.append(("手机报错提醒", "开" if self.config.get("mobile_notify_enabled") else "关"))
             if old_cfg.get("mobile_notify_provider") != self.config.get("mobile_notify_provider"):
                 changed.append(("提醒平台", "企业微信" if self.config.get("mobile_notify_provider") == "wecom" else "钉钉"))
+            if old_cfg.get("mobile_stats_report_enabled") != self.config.get("mobile_stats_report_enabled"):
+                changed.append(("定时统计汇报", "开" if self.config.get("mobile_stats_report_enabled") else "关"))
+            if old_cfg.get("mobile_stats_report_hours") != self.config.get("mobile_stats_report_hours"):
+                changed.append(("统计汇报周期", f"每 {self.config.get('mobile_stats_report_hours', 6)} 小时"))
             if old_cfg.get("public_adb_targets") != self.config.get("public_adb_targets"):
                 changed.append(("公网 ADB 地址列表", f"{len(self._parse_public_adb_targets(public_adb_targets))} 项"))
             if old_cfg.get("no_takeoff_switch_interval") != self.config.get("no_takeoff_switch_interval"):
@@ -2704,6 +2920,7 @@ class Application(ttkb.Window):
         self.bot.set_device(device)
         self.sync_all_configs_to_bot()
         self.bot.start()
+        self._stats_report_anchor_ts = time.time()
         self.var_runtime_status.set("运行中")
 
     def stop_bot(self):
@@ -2711,6 +2928,7 @@ class Application(ttkb.Window):
         if bot:
             bot.running = False
             bot.stop()
+        self._stats_report_anchor_ts = 0.0
         self.bot = None
         self.var_runtime_status.set("已停止")
         if not getattr(self, "_is_closing", False):
@@ -2810,6 +3028,8 @@ class Application(ttkb.Window):
                     btn.configure(state="disabled")
                 self.combo_devices.configure(state="readonly")
                 print(f">>> [自动停止] {value}")
+                # 兜底通知：即使日志关键词未命中，也保证自动停机会触发手机提醒。
+                self._send_mobile_notify("脚本已自动停止", str(value or "脚本触发了自动停止"), force=True)
 
         try:
             self.after(0, _apply_update)

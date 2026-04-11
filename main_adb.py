@@ -337,6 +337,19 @@ class WoaBot:
                 return False
         return True
 
+    def _is_tower_all_open_by_pixels(self, screen):
+        """像素兜底判断塔台四个控制器是否都处于开启状态。"""
+        tb, tg, tr = self.TOWER_OFF_COLOR
+        for (x, y) in self.TOWER_CHECK_POINTS:
+            try:
+                b, g, r = screen[y, x]
+                # 与关闭灰色差异足够大，则视为该点已开启（红/绿均可）
+                if self._color_diff((b, g, r), (tb, tg, tr)) <= 70:
+                    return False
+            except Exception:
+                return False
+        return True
+
     def _is_tower_icon_visible(self):
         """检测塔台图标是否可见（ROI 内匹配 tower.png）"""
         return self.safe_locate('tower.png', confidence=0.8, region=self.TOWER_ICON_ROI) is not None
@@ -581,6 +594,10 @@ class WoaBot:
 
         if self.enable_no_takeoff_mode:
             strategy = self._get_no_takeoff_strategy()
+            # OCR 读取偶发抖动时，用像素状态兜底：全开塔台强制按仅停机位处理。
+            if strategy == 'landing_stand_cycle' and self._is_tower_all_open_by_pixels(screen):
+                strategy = 'stand_only'
+                self._tower_active_slots = [True, True, True, True]
             if strategy == 'landing_stand_cycle':
                 current_side = self._get_mode3_side(screen) if is_mode3 else None
                 if current_side != self._no_takeoff_cycle_side:
@@ -1583,14 +1600,14 @@ class WoaBot:
             else:
                 self.log("🗼 [塔台] 塔台图标不可见，先关闭窗口...")
                 self.close_window()
-                self.sleep(0.5)
+                self.sleep(0.25)
             if not self._open_tower_menu():
                 return [None, None, None, None]
         else:
             self.log("🗼 [塔台] 菜单已打开，直接读取...")
         times = [None, None, None, None]
         raw_by_slot = [set() for _ in range(4)]
-        for _ in range(3):
+        for _ in range(2):
             screen = self.adb.get_screenshot()
             if screen is None:
                 self.log("🗼 [塔台] ⚠️ 截图失败，无法读取控制器时间")
@@ -1610,7 +1627,7 @@ class WoaBot:
                 times[i] = best_secs
             if all(v is not None for v in times):
                 break
-            self.sleep(0.2)
+            self.sleep(0.12)
 
         for i in range(4):
             if times[i] is not None:
@@ -1649,9 +1666,9 @@ class WoaBot:
         """点击(646,822)打开塔台菜单，并通过 ROI 内检测 tower_1.png 校验是否成功。
         最多重试2次（间隔2s），返回 True/False。"""
         import cv2
-        for attempt in range(3):
+        for attempt in range(2):
             self.adb.click(646, 822)
-            self.sleep(1.0)
+            self.sleep(0.45)
             screen = self.adb.get_screenshot()
             if screen is not None:
                 # ROI: (32,271) 到 (90,327)
@@ -1667,16 +1684,16 @@ class WoaBot:
                     _, max_val, _, _ = cv2.minMaxLoc(result)
                     if max_val >= 0.8:
                         return True
-            if attempt < 2:
-                self.log(f"🗼 [塔台] 菜单未打开，{attempt+1}/3 次重试...")
-                self.sleep(2.0)
-        self.log("🗼 [塔台] ⚠️ 菜单打开失败，3次尝试均未检测到 tower_1.png")
+            if attempt < 1:
+                self.log(f"🗼 [塔台] 菜单未打开，{attempt+1}/2 次重试...")
+                self.sleep(0.5)
+        self.log("🗼 [塔台] ⚠️ 菜单打开失败，2次尝试均未检测到 tower_1.png")
         return False
 
     def _close_tower_menu(self):
         """关闭塔台菜单"""
         self.log("🗼 [塔台] 关闭塔台菜单...")
-        if not self.wait_and_click('back.png', timeout=3.0, click_wait=0.5, random_offset=2):
+        if not self.wait_and_click('back.png', timeout=1.4, click_wait=0.25, random_offset=2):
             self.log("🗼 [塔台] 未找到返回按钮，使用 close_window 关闭")
             self.close_window()
 
@@ -1777,6 +1794,10 @@ class WoaBot:
             self._tower_delay_deadline = time.time() + 8.0
             self.log("🗼 [塔台] 当前不在主界面，延后 8s 再检查")
             return False
+        if not self._is_tower_icon_visible():
+            self._tower_delay_deadline = time.time() + 5.0
+            self.log("🗼 [塔台] 暂未检测到塔台图标，延后 5s 再检查")
+            return False
         self._tower_delay_deadline = 0.0
 
         if self.auto_delay_count <= 0:
@@ -1821,18 +1842,20 @@ class WoaBot:
                 self.log("🗼 [塔台] 塔台从开启变为关闭，启用强制筛选模式1")
             self._close_tower_menu()
             return True
+        # 自动延时模式下也要持续刷新活跃槽位，避免沿用旧状态导致筛选策略误判。
+        self._tower_active_slots = active
         # 判断哪些活跃控制器需要延时（< 10分钟）
         needs_delay = [False, False, False, False]
         any_need = False
         for i in range(4):
-            if self._tower_active_slots[i] and times[i] is not None and times[i] < 600:
+            if active[i] and times[i] is not None and times[i] < 600:
                 needs_delay[i] = True
                 any_need = True
                 self.log(f"🗼 [塔台] 控制器 {i+1} 剩余 {int(times[i])}s < 600s，需要延时")
         if not any_need:
             # 没有需要延时的，重新设置下次 deadline
             self.log("🗼 [塔台] 所有活跃控制器均 >= 10分钟，暂不延时")
-            valid_times = [t for t, a in zip(times, self._tower_active_slots) if a and t is not None and t > 0]
+            valid_times = [t for t, a in zip(times, active) if a and t is not None and t > 0]
             if valid_times:
                 min_time = min(valid_times)
                 trigger_in = max(0, min_time - 180)
@@ -1847,21 +1870,36 @@ class WoaBot:
 
     def _try_delay_clicks(self, needs_delay, all_active, all_need):
         """尝试点击延时按钮并确认，返回 True/False"""
+        def _confirm_delay_dialog_any():
+            # 兼容不同塔台续费弹窗：全延时/单控制器延时可能出现不同确认按钮。
+            for _ in range(4):
+                acted = False
+                if self.wait_and_click('delay.png', timeout=0.7, click_wait=0.25, random_offset=2):
+                    acted = True
+                elif self.wait_and_click('delay_1.png', timeout=0.7, click_wait=0.25, random_offset=2):
+                    acted = True
+                elif self.wait_and_click('yes.png', timeout=0.9, click_wait=0.25, random_offset=2):
+                    acted = True
+
+                screen = self.adb.get_screenshot()
+                has_delay = self._locate_on_screen('delay.png', screen, confidence=0.78)
+                has_delay_1 = self._locate_on_screen('delay_1.png', screen, confidence=0.78)
+                has_yes = self._locate_on_screen('yes.png', screen, confidence=0.78)
+                if not (has_delay or has_delay_1 or has_yes):
+                    return True
+
+                if not acted:
+                    self.sleep(0.15)
+            return False
+
         if all_active and all_need:
             self.log("   -> 点击全部延时按钮")
             self.adb.click(*self.TOWER_DELAY_ALL_BTN)
-            self.sleep(1.0)
-            for attempt in range(3):
-                res = self.adb.locate_image(self.icon_path + 'delay.png', confidence=0.8)
-                if res:
-                    self.log(f"   -> 发现确认按钮，第 {attempt+1} 次点击...")
-                    self.adb.click(res[0], res[1])
-                    self.sleep(0.5)
-                    if not self.adb.locate_image(self.icon_path + 'delay.png', confidence=0.8):
-                        return True
-                else:
-                    self.sleep(0.5)
-            return False
+            self.sleep(0.35)
+            ok = _confirm_delay_dialog_any()
+            if not ok:
+                self.log("   -> 全部延时确认失败")
+            return ok
         else:
             any_ok = False
             for i in range(4):
@@ -1869,26 +1907,18 @@ class WoaBot:
                     continue
                 self.log(f"   -> 点击控制器 {i+1} 延时按钮")
                 self.adb.click(*self.TOWER_DELAY_BUTTONS[i])
-                self.sleep(1.0)
-                res = self.adb.locate_image(self.icon_path + 'delay_1.png', confidence=0.8)
-                if res:
-                    self.adb.click(res[0], res[1])
-                    self.sleep(0.4)
-                    self.wait_and_click('yes.png', timeout=2.0, click_wait=0.5, random_offset=2)
-                    self.sleep(0.5)
-                    if not self.adb.locate_image(self.icon_path + 'yes.png', confidence=0.8):
-                        self.log(f"   -> 控制器 {i+1} 延时确认成功")
-                        any_ok = True
-                    else:
-                        self.log(f"   -> 控制器 {i+1} 延时确认失败")
+                self.sleep(0.35)
+                if _confirm_delay_dialog_any():
+                    self.log(f"   -> 控制器 {i+1} 延时确认成功")
+                    any_ok = True
                 else:
-                    self.log(f"   -> 控制器 {i+1} 未找到确认按钮")
+                    self.log(f"   -> 控制器 {i+1} 延时确认失败")
             return any_ok
 
     def _check_delay_by_ocr(self, pre_times):
         """通过 OCR 对比延时前后的时间，若任意活跃控制器时间变长则视为延时成功。
         pre_times: 延时前的 [秒数, ...] 列表。返回 True/False。"""
-        self.sleep(1.0)
+        self.sleep(0.6)
         post_times = self._read_tower_times(open_menu=False)
         for i in range(4):
             if not self._tower_active_slots[i]:
