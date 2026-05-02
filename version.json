@@ -1,14 +1,14 @@
 {
-  "version": "1.1.2",
+  "version": "1.1.4",
   "package_urls": [
     {
       "name": "GitHub Release",
-      "url": "https://github.com/hjtr7mymht-dot/WOA_AutoBot/releases/download/1.1.2/WOA_AutoBot.zip"
+      "url": "https://github.com/hjtr7mymht-dot/WOA_AutoBot/releases/download/1.1.4/WOA_AutoBot.zip"
     },
     {
       "name": "ghproxy Release",
-      "url": "https://ghproxy.cn/https://github.com/hjtr7mymht-dot/WOA_AutoBot/releases/download/1.1.2/WOA_AutoBot.zip"
+      "url": "https://ghproxy.cn/https://github.com/hjtr7mymht-dot/WOA_AutoBot/releases/download/1.1.4/WOA_AutoBot.zip"
     }
   ],
-  "notes": "1.1.2：启动自动检测新版并弹窗提醒；补齐自动停机推送链路；加强严格模式下防倒卖与防修改校验。"
+  "notes": "1.1.4：新增实时运行数据面板，显示运行时长、任务处理数、处理效率等关键指标；新增性能优化库支持(orjson/cachetools)；优化不同分辨率下的UI适配。"
 }

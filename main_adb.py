@@ -126,6 +126,8 @@ class WoaBot:
         self._tower_was_active = False
         # 塔台关闭后强制模式1（仅在塔台从开启变为关闭时触发）
         self._tower_off_force_mode1 = False
+        # 塔台监测硬预算：从触发监测到得出结果，目标压到 2s 内。
+        self.TOWER_MONITOR_MAX_SEC = 2.0
         self.COLOR_LIGHT = (203, 191, 179)
         self.COLOR_DARK = (101, 85, 70)
         self.FILTER_MENU_BTN = (1537, 37)
@@ -338,17 +340,31 @@ class WoaBot:
         return True
 
     def _is_tower_all_open_by_pixels(self, screen):
-        """像素兜底判断塔台四个控制器是否都处于开启状态。"""
+        """像素兜底判断塔台四个控制器是否都处于开启状态。
+        增加稳定性确认：连续多次检测到全开才返回True，防止偶发误判导致筛选模式跳变。"""
         tb, tg, tr = self.TOWER_OFF_COLOR
+        current_all_open = True
         for (x, y) in self.TOWER_CHECK_POINTS:
             try:
                 b, g, r = screen[y, x]
                 # 与关闭灰色差异足够大，则视为该点已开启（红/绿均可）
                 if self._color_diff((b, g, r), (tb, tg, tr)) <= 70:
-                    return False
+                    current_all_open = False
             except Exception:
                 return False
-        return True
+        # 稳定性确认：状态需要连续保持才认可
+        if current_all_open:
+            self._tower_all_open_stable_count += 1
+        else:
+            self._tower_all_open_stable_count = 0
+        # 连续多次确认才认为是稳定状态
+        if self._tower_all_open_stable_count >= self.TOWER_STABLE_CONFIRM_COUNT:
+            self._last_tower_all_open_state = True
+            return True
+        # 如果之前状态是不全开，立即恢复
+        if self._tower_all_open_stable_count == 0:
+            self._last_tower_all_open_state = False
+        return False
 
     def _is_tower_icon_visible(self):
         """检测塔台图标是否可见（ROI 内匹配 tower.png）"""
@@ -1589,32 +1605,47 @@ class WoaBot:
                 self.log(f"📊 [状态监测] 可用地勤: {self.last_checked_avail_staff} -> {val}")
             self.last_checked_avail_staff = val
 
-    def _read_tower_times(self, open_menu=True):
+    def _read_tower_times(self, open_menu=True, fast=False, budget_start=None, budget_sec=None):
         """OCR 读取四个控制器的倒计时，返回 [秒数, ...] 列表（读取失败的为 None）
         open_menu=True 时智能判断是否需要关窗再打开塔台菜单；False 时假设菜单已打开。
         注意：此方法不关闭菜单，由调用方负责。"""
+        def _budget_exhausted(guard=0.0):
+            if budget_start is None or budget_sec is None:
+                return False
+            return (time.time() - budget_start) >= max(0.0, budget_sec - guard)
+
         if open_menu:
-            # 先检测塔台图标是否可见，可见则无需关窗
-            if self._is_tower_icon_visible():
-                self.log("🗼 [塔台] 塔台图标可见，直接打开菜单...")
-            else:
-                self.log("🗼 [塔台] 塔台图标不可见，先关闭窗口...")
-                self.close_window()
-                self.sleep(0.25)
-            if not self._open_tower_menu():
+            # 快速模式下尽量避免关窗，优先直接尝试打开塔台菜单。
+            if not fast:
+                if self._is_tower_icon_visible():
+                    self.log("🗼 [塔台] 塔台图标可见，直接打开菜单...")
+                else:
+                    self.log("🗼 [塔台] 塔台图标不可见，先关闭窗口...")
+                    self.close_window()
+                    self.sleep(0.25)
+            if not self._open_tower_menu(fast=fast, budget_start=budget_start, budget_sec=budget_sec):
                 return [None, None, None, None]
         else:
-            self.log("🗼 [塔台] 菜单已打开，直接读取...")
+            if not fast:
+                self.log("🗼 [塔台] 菜单已打开，直接读取...")
         times = [None, None, None, None]
         raw_by_slot = [set() for _ in range(4)]
-        for _ in range(2):
+        passes = 1 if fast else 2
+        for _ in range(passes):
+            if _budget_exhausted(guard=0.2):
+                break
             screen = self.adb.get_screenshot()
             if screen is None:
                 self.log("🗼 [塔台] ⚠️ 截图失败，无法读取控制器时间")
                 continue
             for i, region in enumerate(self.TOWER_TIME_REGIONS):
                 best_secs = times[i]
-                for candidate in self._iter_region_fallbacks(region, pad_x=12, pad_y=4):
+                candidates = list(self._iter_region_fallbacks(region, pad_x=(8 if fast else 12), pad_y=4))
+                if fast:
+                    candidates = candidates[:2]
+                for candidate in candidates:
+                    if _budget_exhausted(guard=0.15):
+                        break
                     text = self.ocr.recognize_number(candidate, mode='task', screen_image=screen)
                     if text:
                         raw_by_slot[i].add(text)
@@ -1627,14 +1658,18 @@ class WoaBot:
                 times[i] = best_secs
             if all(v is not None for v in times):
                 break
-            self.sleep(0.12)
-
-        for i in range(4):
-            if times[i] is not None:
-                self.log(f"   塔台控制器 {i+1}: {times[i]}s")
+            if not fast:
+                self.sleep(0.12)
             else:
-                raw_preview = ", ".join(sorted(raw_by_slot[i])) if raw_by_slot[i] else "无"
-                self.log(f"   塔台控制器 {i+1}: 无有效数字 (raw={raw_preview})")
+                self.sleep(0.03)
+
+        if not fast:
+            for i in range(4):
+                if times[i] is not None:
+                    self.log(f"   塔台控制器 {i+1}: {times[i]}s")
+                else:
+                    raw_preview = ", ".join(sorted(raw_by_slot[i])) if raw_by_slot[i] else "无"
+                    self.log(f"   塔台控制器 {i+1}: 无有效数字 (raw={raw_preview})")
         return times
 
     def _handle_server_error_popup(self, force=False):
@@ -1662,13 +1697,23 @@ class WoaBot:
         self.log("⚠️ [异常弹窗] 尝试关闭失败，将在后续循环继续处理")
         return True
 
-    def _open_tower_menu(self):
+    def _open_tower_menu(self, fast=False, budget_start=None, budget_sec=None):
         """点击(646,822)打开塔台菜单，并通过 ROI 内检测 tower_1.png 校验是否成功。
         最多重试2次（间隔2s），返回 True/False。"""
         import cv2
-        for attempt in range(2):
+        def _budget_exhausted(guard=0.0):
+            if budget_start is None or budget_sec is None:
+                return False
+            return (time.time() - budget_start) >= max(0.0, budget_sec - guard)
+
+        max_attempts = 1 if fast else 2
+        click_wait = 0.18 if fast else 0.45
+        retry_wait = 0.12 if fast else 0.5
+        for attempt in range(max_attempts):
+            if _budget_exhausted(guard=0.2):
+                break
             self.adb.click(646, 822)
-            self.sleep(0.45)
+            self.sleep(click_wait)
             screen = self.adb.get_screenshot()
             if screen is not None:
                 # ROI: (32,271) 到 (90,327)
@@ -1684,16 +1729,18 @@ class WoaBot:
                     _, max_val, _, _ = cv2.minMaxLoc(result)
                     if max_val >= 0.8:
                         return True
-            if attempt < 1:
+            if attempt < max_attempts - 1:
                 self.log(f"🗼 [塔台] 菜单未打开，{attempt+1}/2 次重试...")
-                self.sleep(0.5)
+                self.sleep(retry_wait)
         self.log("🗼 [塔台] ⚠️ 菜单打开失败，2次尝试均未检测到 tower_1.png")
         return False
 
-    def _close_tower_menu(self):
+    def _close_tower_menu(self, fast=False):
         """关闭塔台菜单"""
+        timeout = 0.45 if fast else 1.4
+        click_wait = 0.08 if fast else 0.25
         self.log("🗼 [塔台] 关闭塔台菜单...")
-        if not self.wait_and_click('back.png', timeout=1.4, click_wait=0.25, random_offset=2):
+        if not self.wait_and_click('back.png', timeout=timeout, click_wait=click_wait, random_offset=2):
             self.log("🗼 [塔台] 未找到返回按钮，使用 close_window 关闭")
             self.close_window()
 
@@ -1786,11 +1833,14 @@ class WoaBot:
         """检查塔台倒计时是否到期。
         - 自动延时开启时：到期则打开菜单重新读取，延时 <10min 的控制器
         - 自动延时未开启时：到期则打开菜单确认塔台状态（监控模式）"""
+        monitor_start = time.time()
+        monitor_budget = self.TOWER_MONITOR_MAX_SEC
+
         if self._tower_delay_deadline <= 0 or self._tower_disabled:
             return False
         if time.time() < self._tower_delay_deadline:
             return False
-        if not self._is_main_interface_ready(retries=2, interval=0.15):
+        if not self._is_main_interface_ready(retries=1, interval=0.08):
             self._tower_delay_deadline = time.time() + 8.0
             self.log("🗼 [塔台] 当前不在主界面，延后 8s 再检查")
             return False
@@ -1803,7 +1853,7 @@ class WoaBot:
         if self.auto_delay_count <= 0:
             # 监控模式：自动延时未开启，只是确认塔台状态
             self.log("🗼 [塔台] 监控到期，打开菜单确认塔台状态...")
-            times = self._read_tower_times(open_menu=True)
+            times = self._read_tower_times(open_menu=True, fast=True, budget_start=monitor_start, budget_sec=monitor_budget)
             active = [t is not None and t > 0 for t in times]
             active_count = sum(active)
             self.log(f"🗼 [塔台] OCR 结果: {times}，活跃数: {active_count}/4")
@@ -1824,12 +1874,15 @@ class WoaBot:
                 slots_str = ",".join([str(i+1) for i, a in enumerate(active) if a])
                 self.log(f"🗼 [塔台] 活跃控制器: [{slots_str}]，最长剩余 {mins}m{secs}s")
                 self.log(f"🗼 [塔台] 将在 {int(trigger_in)}s 后再次确认塔台状态")
-            self._close_tower_menu()
+            self._close_tower_menu(fast=True)
+            elapsed = time.time() - monitor_start
+            if elapsed > monitor_budget:
+                self.log(f"🗼 [塔台] ⚠️ 监测预算超时: {elapsed:.2f}s > {monitor_budget:.2f}s")
             return True
 
         # 延时模式：自动延时已开启
         self.log("🗼 [塔台] 延时倒计时到期，打开菜单检查剩余时间...")
-        times = self._read_tower_times(open_menu=True)
+        times = self._read_tower_times(open_menu=True, fast=True, budget_start=monitor_start, budget_sec=monitor_budget)
         self.log(f"🗼 [塔台] OCR 结果: {times}")
         # 先检查是否全部关闭（全 None）
         active = [t is not None and t > 0 for t in times]
@@ -1840,7 +1893,10 @@ class WoaBot:
             if self._tower_was_active and self.enable_cancel_stand_filter:
                 self._tower_off_force_mode1 = True
                 self.log("🗼 [塔台] 塔台从开启变为关闭，启用强制筛选模式1")
-            self._close_tower_menu()
+            self._close_tower_menu(fast=True)
+            elapsed = time.time() - monitor_start
+            if elapsed > monitor_budget:
+                self.log(f"🗼 [塔台] ⚠️ 监测预算超时: {elapsed:.2f}s > {monitor_budget:.2f}s")
             return True
         # 自动延时模式下也要持续刷新活跃槽位，避免沿用旧状态导致筛选策略误判。
         self._tower_active_slots = active
@@ -1861,11 +1917,23 @@ class WoaBot:
                 trigger_in = max(0, min_time - 180)
                 self._tower_delay_deadline = time.time() + trigger_in
                 self.log(f"🗼 [塔台] 将在 {int(trigger_in)}s 后再次检查")
-            self._close_tower_menu()
+            self._close_tower_menu(fast=True)
+            elapsed = time.time() - monitor_start
+            if elapsed > monitor_budget:
+                self.log(f"🗼 [塔台] ⚠️ 监测预算超时: {elapsed:.2f}s > {monitor_budget:.2f}s")
             return True
         # 菜单已打开，直接执行延时（不关菜单）
+        if time.time() - monitor_start >= monitor_budget - 0.25:
+            # 监测预算即将耗尽：优先在 2s 内返回结果，延时动作延后到下一轮。
+            self._tower_delay_deadline = time.time() + 0.4
+            self.log("🗼 [塔台] 监测预算即将耗尽，延时动作顺延至下一轮")
+            self._close_tower_menu(fast=True)
+            return True
         self.log(f"🗼 [塔台] 需要延时的控制器: {[i+1 for i in range(4) if needs_delay[i]]}")
         self._perform_tower_delay(needs_delay, menu_already_open=True)
+        elapsed = time.time() - monitor_start
+        if elapsed > monitor_budget:
+            self.log(f"🗼 [塔台] ⚠️ 监测预算超时: {elapsed:.2f}s > {monitor_budget:.2f}s")
         return True
 
     def _try_delay_clicks(self, needs_delay, all_active, all_need):

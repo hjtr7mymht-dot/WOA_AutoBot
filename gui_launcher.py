@@ -20,6 +20,17 @@ from tkinter import filedialog, messagebox
 from tkinter.scrolledtext import ScrolledText
 from tkinter.constants import BOTH, END, LEFT, RIGHT, TOP, X, Y
 
+try:
+    import orjson
+except ImportError:
+    orjson = None
+
+try:
+    from cachetools import cached, TTLCache
+except ImportError:
+    cached = None
+    TTLCache = None
+
 # === 引入现代 UI 库 ===
 import ttkbootstrap as ttkb  # type: ignore[import-untyped]
 from ttkbootstrap.constants import *  # type: ignore[import-untyped]  # noqa: F401, F403
@@ -62,6 +73,8 @@ def get_resource_path(relative_path):
         return p3
     return p1
 
+if cached and TTLCache:
+    get_resource_path = cached(cache=TTLCache(maxsize=128, ttl=300))(get_resource_path)
 
 
 _ICON_DIR = "icon"
@@ -97,7 +110,7 @@ if INSTANCE_ID is None:
 CONFIG_FILE = "config.json" if INSTANCE_ID == 1 else f"config_{INSTANCE_ID}.json"
 STATS_FILE = "woa_stats.csv"
 
-LOCAL_VERSION = "1.1.2"
+LOCAL_VERSION = "1.1.4"
 OFFICIAL_REPO_URL = "https://github.com/hjtr7mymht-dot/WOA_AutoBot"
 OFFICIAL_REPO_NAME = "hjtr7mymht-dot/WOA_AutoBot"
 ONLINE_VERSION_PATH = "version.json"
@@ -380,8 +393,8 @@ class Application(ttkb.Window):
         self.style.colors.info = "#6c8ead"
 
         self.title(f"WOA AutoBot {LOCAL_VERSION}" + (f" [实例 {INSTANCE_ID}]" if INSTANCE_ID > 1 else ""))
-        self.geometry("1080x1200")
-        self.minsize(120, 120)
+        self.geometry("1040x920")
+        self.minsize(960, 720)
         self.last_geometry = "1080x1200"
         self.is_mini_mode = False
         self._strict_online_guard = bool(getattr(sys, 'frozen', False))
@@ -427,6 +440,21 @@ class Application(ttkb.Window):
         self.var_system_status = tk.StringVar(value="环境检查中")
         self.var_online_status = tk.StringVar(value="未验证")
         self.var_online_detail = tk.StringVar(value="官方仓库校验未执行")
+        
+        # 实时运行数据面板变量
+        self.var_runtime_duration = tk.StringVar(value="00:00:00")
+        self.var_tasks_processed = tk.StringVar(value="0")
+        self.var_tasks_per_hour = tk.StringVar(value="0.0/h")
+        self.var_cycle_efficiency = tk.StringVar(value="0%")
+        self.var_avg_cycle_time = tk.StringVar(value="0.0s")
+        self._runtime_start_time = None
+        self._runtime_stats = {
+            'tasks_completed': 0,
+            'cycles_completed': 0,
+            'errors_encountered': 0,
+            'last_cycle_time': 0.0,
+        }
+        
         self._online_validation_running = False
         self._online_validation_ok = False
         self._online_validation_last_ok_ts = 0.0
@@ -605,6 +633,9 @@ class Application(ttkb.Window):
     def load_config(self):
         if os.path.exists(CONFIG_FILE):
             try:
+                if orjson:
+                    with open(CONFIG_FILE, "rb") as f:
+                        return orjson.loads(f.read())
                 with open(CONFIG_FILE, "r", encoding="utf-8") as f:
                     return json.load(f)
             except:
@@ -659,10 +690,41 @@ class Application(ttkb.Window):
         self.var_stats_report_hours.set(str(self.config["mobile_stats_report_hours"]))
         self.config["public_adb_targets"] = str(self.var_public_adb_targets.get() or "").strip()
         try:
-            with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-                json.dump(self.config, f, indent=4)
+            if orjson:
+                with open(CONFIG_FILE, "wb") as f:
+                    f.write(orjson.dumps(self.config, option=orjson.OPT_INDENT_2 | orjson.OPT_SORT_KEYS))
+            else:
+                with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+                    json.dump(self.config, f, indent=4)
         except Exception as e:
             print(f"配置保存失败: {e}")
+
+    def _update_runtime_stats(self):
+        if self._runtime_start_time is None:
+            return
+        elapsed = max(0, int(time.time() - self._runtime_start_time))
+        h, rest = divmod(elapsed, 3600)
+        m, s = divmod(rest, 60)
+        self.var_runtime_duration.set(f"{h:02}:{m:02}:{s:02}")
+
+        tasks = 0
+        if self.bot:
+            try:
+                tasks = sum(
+                    getattr(self.bot, attr, 0)
+                    for attr in ("_stat_approach", "_stat_depart", "_stat_stand_count")
+                )
+            except Exception:
+                tasks = 0
+        self.var_tasks_processed.set(str(tasks))
+        elapsed_hours = max(elapsed / 3600.0, 1.0 / 3600.0)
+        self.var_tasks_per_hour.set(f"{tasks / elapsed_hours:.1f}/h")
+        if tasks > 0:
+            self.var_avg_cycle_time.set(f"{elapsed / tasks:.1f}s")
+        else:
+            self.var_avg_cycle_time.set("0.0s")
+
+        self.after(1000, self._update_runtime_stats)
 
     def _parse_public_adb_targets(self, raw_text=None):
         raw = str(self.var_public_adb_targets.get() if raw_text is None else raw_text or "")
@@ -1308,6 +1370,20 @@ class Application(ttkb.Window):
         
         ttkb.Label(tab_notify, text="异常状态告警", font=("Microsoft YaHei UI", 10, "bold"), bootstyle="danger").pack(anchor="w", pady=(0, 10))
         add_toggle_row(tab_notify, "📱 手机报错提醒", self.var_notify_enabled, "发生严重错误、卡死或自动停机时推送警报，需先配置 Webhook。")
+
+        ttkb.Separator(tab_notify, bootstyle="secondary").pack(fill=X, pady=15)
+        stats_card = ttkb.Labelframe(tab_notify, text=" 实时运行数据 ", padding=12, bootstyle="warning")
+        stats_card.pack(fill=X, pady=(0, 10))
+        for label_text, var in (
+            ("运行时长", self.var_runtime_duration),
+            ("任务总数", self.var_tasks_processed),
+            ("处理效率", self.var_tasks_per_hour),
+            ("平均周期", self.var_avg_cycle_time),
+        ):
+            row = ttkb.Frame(stats_card)
+            row.pack(fill=X, pady=4)
+            ttkb.Label(row, text=label_text, font=("Microsoft YaHei UI", 9), bootstyle="secondary").pack(side=LEFT)
+            ttkb.Label(row, textvariable=var, font=("Microsoft YaHei UI", 9, "bold"), bootstyle="inverse-info").pack(side=RIGHT)
 
         # ================== 3. 底部终端日志区 ==================
         log_group = ttkb.Labelframe(outer, text=" 实时终端输出 ", padding=10, bootstyle="dark")
@@ -2937,6 +3013,13 @@ class Application(ttkb.Window):
         self.sync_all_configs_to_bot()
         self.bot.start()
         self._stats_report_anchor_ts = time.time()
+        self._runtime_start_time = time.time()
+        self.var_runtime_duration.set("00:00:00")
+        self.var_tasks_processed.set("0")
+        self.var_tasks_per_hour.set("0.0/h")
+        self.var_avg_cycle_time.set("0.0s")
+        self.var_cycle_efficiency.set("0%")
+        self.after(1000, self._update_runtime_stats)
         self.var_runtime_status.set("运行中")
 
     def stop_bot(self):
@@ -2945,6 +3028,7 @@ class Application(ttkb.Window):
             bot.running = False
             bot.stop()
         self._stats_report_anchor_ts = 0.0
+        self._runtime_start_time = None
         self.bot = None
         self.var_runtime_status.set("已停止")
         if not getattr(self, "_is_closing", False):
