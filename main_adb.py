@@ -854,7 +854,16 @@ class WoaBot:
 
     def set_auto_delay(self, count):
         count = int(count)
+        old_count = self.auto_delay_count
         self.auto_delay_count = count
+        # 如果从禁用变为启用，重新初始化塔台状态
+        if old_count <= 0 and count > 0:
+            self.log(f">>> [配置] 自动延时塔台已启用 ({count} 次)，重新初始化塔台状态")
+            self._tower_disabled = False
+            self._tower_delay_deadline = 0.0  # 触发重新检查
+        elif old_count > 0 and count <= 0:
+            self.log(f">>> [配置] 自动延时塔台已关闭")
+            self._tower_delay_deadline = 0.0
 
     def set_delay_bribe(self, enabled):
         if self.enable_delay_bribe == enabled: return
@@ -1836,9 +1845,22 @@ class WoaBot:
         monitor_start = time.time()
         monitor_budget = self.TOWER_MONITOR_MAX_SEC
 
+        # 添加调试日志
+        self.log(f"🗼 [调试] 检查塔台倒计时: deadline={self._tower_delay_deadline:.1f}, disabled={self._tower_disabled}, auto_delay_count={self.auto_delay_count}")
+
         if self._tower_delay_deadline <= 0 or self._tower_disabled:
-            return False
+            # 如果延时功能已启用但deadline为0，尝试重新初始化
+            if self.auto_delay_count > 0 and self._tower_delay_deadline <= 0 and not self._tower_disabled:
+                self.log("🗼 [调试] 延时功能已启用但deadline为0，尝试重新初始化塔台状态")
+                try:
+                    self._init_tower_countdown()
+                except Exception as e:
+                    self.log(f"🗼 [调试] 重新初始化失败: {e}")
+            if self._tower_delay_deadline <= 0 or self._tower_disabled:
+                self.log(f"🗼 [调试] 塔台检查跳过: deadline<={self._tower_delay_deadline:.1f}, disabled={self._tower_disabled}")
+                return False
         if time.time() < self._tower_delay_deadline:
+            self.log(f"🗼 [调试] 还未到触发时间，剩余 {self._tower_delay_deadline - time.time():.1f}s")
             return False
         if not self._is_main_interface_ready(retries=1, interval=0.08):
             self._tower_delay_deadline = time.time() + 8.0
@@ -1908,6 +1930,7 @@ class WoaBot:
                 needs_delay[i] = True
                 any_need = True
                 self.log(f"🗼 [塔台] 控制器 {i+1} 剩余 {int(times[i])}s < 600s，需要延时")
+        self.log(f"🗼 [调试] 活跃控制器: {active}, 需要延时: {needs_delay}, any_need: {any_need}")
         if not any_need:
             # 没有需要延时的，重新设置下次 deadline
             self.log("🗼 [塔台] 所有活跃控制器均 >= 10分钟，暂不延时")
@@ -1953,6 +1976,7 @@ class WoaBot:
                 has_delay = self._locate_on_screen('delay.png', screen, confidence=0.78)
                 has_delay_1 = self._locate_on_screen('delay_1.png', screen, confidence=0.78)
                 has_yes = self._locate_on_screen('yes.png', screen, confidence=0.78)
+                self.log(f"   -> [调试] 确认对话框检测: acted={acted}, has_delay={has_delay}, has_delay_1={has_delay_1}, has_yes={has_yes}")
                 if not (has_delay or has_delay_1 or has_yes):
                     return True
 
@@ -1969,6 +1993,7 @@ class WoaBot:
                 self.log("   -> 全部延时确认失败")
             return ok
         else:
+            self.log(f"   -> [调试] 逐个延时: all_active={all_active}, all_need={all_need}")
             any_ok = False
             for i in range(4):
                 if not needs_delay[i]:
@@ -2005,6 +2030,7 @@ class WoaBot:
         每次尝试后通过 OCR 对比时间变化，防止误判导致重复延时。"""
         delay_slots = [i+1 for i in range(4) if needs_delay[i]]
         self.log(f"🗼 [塔台] 开始延时操作，目标控制器: {delay_slots}，菜单已打开: {menu_already_open}")
+        self.log(f"🗼 [调试] auto_delay_count: {self.auto_delay_count}, _tower_active_slots: {self._tower_active_slots}")
         if not menu_already_open:
             self.close_window()
             self.sleep(0.3)

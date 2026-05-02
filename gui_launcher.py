@@ -110,7 +110,7 @@ if INSTANCE_ID is None:
 CONFIG_FILE = "config.json" if INSTANCE_ID == 1 else f"config_{INSTANCE_ID}.json"
 STATS_FILE = "woa_stats.csv"
 
-LOCAL_VERSION = "1.1.4"
+LOCAL_VERSION = "1.1.5"
 OFFICIAL_REPO_URL = "https://github.com/hjtr7mymht-dot/WOA_AutoBot"
 OFFICIAL_REPO_NAME = "hjtr7mymht-dot/WOA_AutoBot"
 ONLINE_VERSION_PATH = "version.json"
@@ -394,7 +394,7 @@ class Application(ttkb.Window):
 
         self.title(f"WOA AutoBot {LOCAL_VERSION}" + (f" [实例 {INSTANCE_ID}]" if INSTANCE_ID > 1 else ""))
         self.geometry("1040x920")
-        self.minsize(960, 720)
+        self.minsize(144, 144)
         self.last_geometry = "1080x1200"
         self.is_mini_mode = False
         self._strict_online_guard = bool(getattr(sys, 'frozen', False))
