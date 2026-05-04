@@ -445,8 +445,12 @@ class Application(ttkb.Window):
         self.var_runtime_duration = tk.StringVar(value="00:00:00")
         self.var_tasks_processed = tk.StringVar(value="0")
         self.var_tasks_per_hour = tk.StringVar(value="0.0/h")
-        self.var_cycle_efficiency = tk.StringVar(value="0%")
+        self.var_cycle_efficiency = tk.StringVar(value="0.0/h")
         self.var_avg_cycle_time = tk.StringVar(value="0.0s")
+        self.var_approach = tk.StringVar(value="0")
+        self.var_depart = tk.StringVar(value="0")
+        self.var_stand_summary = tk.StringVar(value="0 / 0")
+        self.var_stats_source = tk.StringVar(value="当前未运行")
         self._runtime_start_time = None
         self._runtime_stats = {
             'tasks_completed': 0,
@@ -707,20 +711,22 @@ class Application(ttkb.Window):
         m, s = divmod(rest, 60)
         self.var_runtime_duration.set(f"{h:02}:{m:02}:{s:02}")
 
-        tasks = 0
-        if self.bot:
-            try:
-                tasks = sum(
-                    getattr(self.bot, attr, 0)
-                    for attr in ("_stat_approach", "_stat_depart", "_stat_stand_count")
-                )
-            except Exception:
-                tasks = 0
-        self.var_tasks_processed.set(str(tasks))
+        snap = self._get_runtime_stats_snapshot()
+        self.var_approach.set(str(snap.get("approach", 0)))
+        self.var_depart.set(str(snap.get("depart", 0)))
+        self.var_stand_summary.set(f"{snap.get('stand_count', 0)} / {snap.get('stand_staff', 0)}")
+        source_label = {
+            'session': '本次运行',
+            'csv': '当日CSV',
+            'empty': '当前未运行'
+        }.get(snap.get('source'), '当前未运行')
+        self.var_stats_source.set(source_label)
+
+        total_ops = snap.get("approach", 0) + snap.get("depart", 0) + snap.get("stand_count", 0)
         elapsed_hours = max(elapsed / 3600.0, 1.0 / 3600.0)
-        self.var_tasks_per_hour.set(f"{tasks / elapsed_hours:.1f}/h")
-        if tasks > 0:
-            self.var_avg_cycle_time.set(f"{elapsed / tasks:.1f}s")
+        self.var_cycle_efficiency.set(f"{total_ops / elapsed_hours:.1f}/h")
+        if total_ops > 0:
+            self.var_avg_cycle_time.set(f"{elapsed / total_ops:.1f}s")
         else:
             self.var_avg_cycle_time.set("0.0s")
 
@@ -1376,9 +1382,11 @@ class Application(ttkb.Window):
         stats_card.pack(fill=X, pady=(0, 10))
         for label_text, var in (
             ("运行时长", self.var_runtime_duration),
-            ("任务总数", self.var_tasks_processed),
-            ("处理效率", self.var_tasks_per_hour),
-            ("平均周期", self.var_avg_cycle_time),
+            ("进场飞机", self.var_approach),
+            ("离场飞机", self.var_depart),
+            ("分配地勤", self.var_stand_summary),
+            ("当前效率", self.var_cycle_efficiency),
+            ("数据来源", self.var_stats_source),
         ):
             row = ttkb.Frame(stats_card)
             row.pack(fill=X, pady=4)
@@ -3015,10 +3023,12 @@ class Application(ttkb.Window):
         self._stats_report_anchor_ts = time.time()
         self._runtime_start_time = time.time()
         self.var_runtime_duration.set("00:00:00")
-        self.var_tasks_processed.set("0")
-        self.var_tasks_per_hour.set("0.0/h")
+        self.var_approach.set("0")
+        self.var_depart.set("0")
+        self.var_stand_summary.set("0 / 0")
+        self.var_cycle_efficiency.set("0.0/h")
+        self.var_stats_source.set("本次运行")
         self.var_avg_cycle_time.set("0.0s")
-        self.var_cycle_efficiency.set("0%")
         self.after(1000, self._update_runtime_stats)
         self.var_runtime_status.set("运行中")
 
@@ -3031,6 +3041,12 @@ class Application(ttkb.Window):
         self._runtime_start_time = None
         self.bot = None
         self.var_runtime_status.set("已停止")
+        self.var_approach.set("0")
+        self.var_depart.set("0")
+        self.var_stand_summary.set("0 / 0")
+        self.var_cycle_efficiency.set("0.0/h")
+        self.var_stats_source.set("当前未运行")
+        self.var_avg_cycle_time.set("0.0s")
         if not getattr(self, "_is_closing", False):
             for btn in [self.btn_main_start, self.btn_mini_start]:
                 btn.configure(state="normal", text="▶ 启动脚本")
