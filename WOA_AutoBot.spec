@@ -1,12 +1,19 @@
 # -*- mode: python ; coding: utf-8 -*-
+from PyInstaller.utils.hooks import collect_all
+
+datas = [('assets', 'assets'), ('icon', 'icon'), ('adb_tools', 'adb_tools'), ('platform-tools', 'platform-tools'), ('config.json', '.'), ('version.json', '.')]
+binaries = []
+hiddenimports = ['tkinter', 'PIL._tkinter_finder', 'certifi', 'ssl']
+tmp_ret = collect_all('certifi')
+datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
 
 a = Analysis(
     ['gui_launcher.py'],
     pathex=[],
-    binaries=[],
-    datas=[('assets', 'assets'), ('icon', 'icon'), ('adb_tools', 'adb_tools'), ('platform-tools', 'platform-tools'), ('config.json', '.'), ('version.json', '.')],
-    hiddenimports=['tkinter', 'PIL._tkinter_finder', 'pystray'],
+    binaries=binaries,
+    datas=datas,
+    hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

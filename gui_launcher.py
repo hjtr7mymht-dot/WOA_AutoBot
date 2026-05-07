@@ -18,7 +18,7 @@ from tkinter import filedialog, messagebox
 from tkinter.scrolledtext import ScrolledText
 from tkinter.constants import BOTH, END, LEFT, RIGHT, TOP, X, Y
 
-from platform_utils import IS_WINDOWS, CREATE_NO_WINDOW, try_lock_file, lock_file, unlock_file, ADB_EXE_NAME, IS_MAC
+from platform_utils import IS_WINDOWS, CREATE_NO_WINDOW, try_lock_file, lock_file, unlock_file, ADB_EXE_NAME, IS_MAC, safe_subprocess_run, get_app_data_dir
 
 try:
     import orjson
@@ -92,11 +92,14 @@ _ICON_DIR = "icon"
 
 MAX_INSTANCES = 3
 
+# 数据存储路径（开发模式：当前目录；打包后：系统 Application Support）
+_DATA_BASE = get_app_data_dir()
+
 # === 多实例支持 ===
 def _acquire_instance():
     """自动获取可用的实例槽位 (1~MAX_INSTANCES)，通过文件锁防止冲突。"""
     for i in range(1, MAX_INSTANCES + 1):
-        lock_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), f"instance_{i}.lock")
+        lock_path = os.path.join(_DATA_BASE, f"instance_{i}.lock")
         try:
             fh = open(lock_path, "w")
             fh.write(str(i))
@@ -122,8 +125,8 @@ if INSTANCE_ID is None:
     sys.exit(1)
 
 # 按实例隔离配置和统计文件
-CONFIG_FILE = "config.json" if INSTANCE_ID == 1 else f"config_{INSTANCE_ID}.json"
-STATS_FILE = "woa_stats.csv"
+CONFIG_FILE = os.path.join(_DATA_BASE, "config.json" if INSTANCE_ID == 1 else f"config_{INSTANCE_ID}.json")
+STATS_FILE = os.path.join(_DATA_BASE, "woa_stats.csv")
 
 LOCAL_VERSION = "1.2.0"
 OFFICIAL_REPO_URL = "https://github.com/hjtr7mymht-dot/WOA_AutoBot"
@@ -426,7 +429,7 @@ class Application(ttkb.Window):
         self.minsize(120, 140)
         self.last_geometry = "1080x1200"
         self.is_mini_mode = False
-        self._strict_online_guard = bool(getattr(sys, 'frozen', False))
+        self._strict_online_guard = False  # 离线模式，不强制在线验证
 
         self._config_file_exists = os.path.exists(CONFIG_FILE)
         self.config = self.load_config()
@@ -554,9 +557,8 @@ class Application(ttkb.Window):
         self.after(100, _emit_notice)
 
         self.after(500, self.setup_window_icon)
-        self.after(1200, self._bootstrap_online_guard)
+        # 在线验证（后台静默执行，不影响使用）
         self.after(2200, self._startup_online_update_check)
-        self.after(4500, self._online_guard_tick)
         self.bind("<Map>", self._on_window_map)
         self._icon_loaded = False
 
@@ -589,7 +591,7 @@ class Application(ttkb.Window):
         for i in range(1, MAX_INSTANCES + 1):
             if i == INSTANCE_ID:
                 continue
-            lock_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), f"instance_{i}.lock")
+            lock_path = os.path.join(_DATA_BASE, f"instance_{i}.lock")
             try:
                 fh = open(lock_path, "w")
                 if try_lock_file(fh):
@@ -612,7 +614,7 @@ class Application(ttkb.Window):
         try:
             if _INSTANCE_LOCK_FH:
                 _INSTANCE_LOCK_FH.close()
-                lock_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), f"instance_{INSTANCE_ID}.lock")
+                lock_path = os.path.join(_DATA_BASE, f"instance_{INSTANCE_ID}.lock")
                 if os.path.exists(lock_path):
                     os.remove(lock_path)
         except Exception:
@@ -791,7 +793,7 @@ class Application(ttkb.Window):
         failed = []
         for target in targets:
             try:
-                result = subprocess.run(
+                result = safe_subprocess_run(
                     [adb_exe, "connect", target],
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
@@ -880,6 +882,13 @@ class Application(ttkb.Window):
 
         def _worker():
             try:
+                ctx_kwargs = {}
+                if getattr(sys, 'frozen', False):
+                    try:
+                        import certifi, ssl
+                        ctx_kwargs['context'] = ssl.create_default_context(cafile=certifi.where())
+                    except Exception:
+                        pass
                 data = json.dumps(payload).encode("utf-8")
                 req = urllib.request.Request(
                     webhook,
@@ -887,7 +896,7 @@ class Application(ttkb.Window):
                     headers={"Content-Type": "application/json; charset=utf-8"},
                     method="POST",
                 )
-                with urllib.request.urlopen(req, timeout=6) as resp:
+                with urllib.request.urlopen(req, timeout=6, **ctx_kwargs) as resp:
                     _ = resp.read()
                 print(f">>> [手机提醒] 已发送到{provider_name}")
             except Exception as exc:
@@ -1385,23 +1394,18 @@ class Application(ttkb.Window):
         self.after(100, self._do_initial_scan)
 
     def _do_initial_scan(self):
-        """后台线程执行首次设备扫描，完成后更新 UI"""
-        def _worker():
-            try:
-                devs = self._scan_devices_with_public_targets(debug=True)
-            except Exception as e:
-                print(f">>> [扫描异常] {e}")
-                devs = []
-            self.after(0, lambda: self._apply_scan_result(devs))
-
+        """首次设备扫描（主线程同步执行，避免 PyInstaller 冻结环境下 GIL 崩溃）"""
         self.var_device_status.set("扫描中")
         self.btn_scan.configure(text="扫描中...", state="disabled")
         for btn in [self.btn_main_start, self.btn_mini_start]:
             btn.configure(state="disabled")
         self.update_idletasks()
-        t = threading.Thread(target=_worker)
-        t.daemon = True
-        t.start()
+        try:
+            devs = self._scan_devices_with_public_targets(debug=True)
+        except Exception as e:
+            print(f">>> [扫描异常] {e}")
+            devs = []
+        self._apply_scan_result(devs)
 
     def _apply_scan_result(self, devs):
         """在主线程更新扫描结果"""
@@ -1437,11 +1441,20 @@ class Application(ttkb.Window):
             "User-Agent": f"WOA-AutoBot/{LOCAL_VERSION}",
             "Accept": "application/json,text/plain,text/html;q=0.9,*/*;q=0.8",
         }
+        # PyInstaller 打包后 SSL 证书需要手动指定 certifi 路径
+        ctx_kwargs = {}
+        if getattr(sys, 'frozen', False):
+            try:
+                import certifi
+                import ssl
+                ctx_kwargs['context'] = ssl.create_default_context(cafile=certifi.where())
+            except Exception:
+                pass
         errors = []
         for source_name, url in sources:
             try:
                 req = urllib.request.Request(url, headers=headers)
-                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                with urllib.request.urlopen(req, timeout=timeout, **ctx_kwargs) as resp:
                     charset = resp.headers.get_content_charset() or "utf-8"
                     return resp.read().decode(charset, errors="replace"), source_name, url
             except Exception as exc:
@@ -1611,69 +1624,16 @@ class Application(ttkb.Window):
                     pass
 
     def _bootstrap_online_guard(self):
-        if not self._strict_online_guard:
-            self.var_online_status.set("社区模式")
-            self.var_online_detail.set("源码运行默认不做强制在线阻断，避免影响开源社区二创；可手动点击在线验证。")
-            return
-        guard_ok = self._detect_missing_guard_modules()
-        if not guard_ok:
-            missing = self._missing_modules_text()
-            self._lockdown_runtime(f"检测到校验模块缺失: {missing}")
-            self.run_online_validation(silent=True)
-            return
+        self.var_online_status.set("离线模式")
+        self.var_online_detail.set("离线模式，所有功能可用")
         if not self._online_verified_once:
             self.run_online_validation(silent=True)
-            return
-        self.var_online_status.set("已授权")
-        self.var_online_detail.set("首次在线验证已完成，当前无需重复验证")
 
     def _enforce_online_guard(self, scene, interactive=True):
-        if not self._strict_online_guard:
-            return True
-        guard_ok = self._detect_missing_guard_modules()
-        if not guard_ok:
-            missing = self._missing_modules_text()
-            self._lockdown_runtime(f"检测到校验模块缺失: {missing}")
-            if not self._online_validation_running:
-                self.run_online_validation(silent=True)
-            if interactive:
-                messagebox.showerror(
-                    "校验模块缺失",
-                    f"检测到关键校验模块缺失，已拒绝执行当前操作({scene})。\n\n缺失模块: {missing}",
-                    parent=self,
-                )
-            return False
-
-        if self._online_verified_once:
-            self._unlock_runtime_if_possible()
-            return True
-
-        if self._online_validation_running:
-            if interactive:
-                messagebox.showwarning("在线验证中", "在线验证正在进行，请稍后再试。", parent=self)
-            return False
-        self.run_online_validation(silent=not interactive)
-        if interactive:
-            messagebox.showwarning(
-                "在线验证未通过",
-                f"当前操作({scene})需要完成首次在线验证。\n\n请等待验证完成后重试。",
-                parent=self,
-            )
-        return False
+        return True  # 离线模式，不强制在线验证
 
     def _online_guard_tick(self):
-        try:
-            if not self._strict_online_guard:
-                return
-            if not self._detect_missing_guard_modules():
-                missing = self._missing_modules_text()
-                if self.bot and self.bot.running:
-                    self._lockdown_runtime(f"运行期间发现校验模块缺失: {missing}")
-                if not self._online_validation_running:
-                    self.run_online_validation(silent=True)
-        finally:
-            if not getattr(self, "_is_closing", False):
-                self.after(ONLINE_GUARD_RECHECK_SEC * 1000, self._online_guard_tick)
+        pass
 
     def _startup_online_update_check(self):
         """仅在启动阶段执行一次联网版本检测，不执行自动下载更新。"""
@@ -1692,6 +1652,21 @@ class Application(ttkb.Window):
         self.var_online_status.set("校验中")
         self.var_online_detail.set("正在尝试 GitHub 与国内镜像节点...")
 
+        # 总超时计时：15 秒后强制解锁，防止卡死
+        _start_ts = time.time()
+        _MAX_VALID_SEC = 15.0
+
+        def _force_release():
+            if not self._online_validation_running:
+                return
+            self._online_validation_running = False
+            self._set_online_validation_state(False)
+            self.var_online_status.set("离线模式")
+            self.var_online_detail.set("在线验证超时（15s），已跳过，不影响使用")
+            print(">>> [在线验证] 超时（15s），自动跳过")
+
+        self.after(int(_MAX_VALID_SEC * 1000), _force_release)
+
         def _worker():
             result = None
             error = None
@@ -1701,11 +1676,13 @@ class Application(ttkb.Window):
                 error = str(exc)
 
             def _finish():
+                if not self._online_validation_running:
+                    return  # 已被超时解锁
                 self._online_validation_running = False
                 if error:
                     self._set_online_validation_state(False, detail=error)
-                    self.var_online_status.set("不可达")
-                    self.var_online_detail.set("GitHub 直连和国内镜像均不可用")
+                    self.var_online_status.set("离线模式")
+                    self.var_online_detail.set("在线验证失败，离线模式运行中")
                     if self.bot and self.bot.running:
                         self._lockdown_runtime("运行期间在线验证失败，已自动停止")
                     if not silent:

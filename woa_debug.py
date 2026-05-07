@@ -24,9 +24,14 @@ def _woa_debug_log(msg):
     print(f">>> [WOA_DEBUG] {msg}")
 
 def get_woa_debug_dir():
-    """返回 woa_debug 目录路径（兼容开发与打包）"""
+    """返回 woa_debug 目录路径（开发模式：项目目录；打包后：Application Support）"""
     if getattr(sys, 'frozen', False):
-        base = os.path.dirname(sys.executable)
+        if sys.platform == 'darwin':
+            base = os.path.join(os.path.expanduser("~"), "Library", "Application Support", "WOA_AutoBot")
+        elif sys.platform == 'win32':
+            base = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "WOA_AutoBot")
+        else:
+            base = os.path.join(os.path.expanduser("~"), ".woa_autobot")
     else:
         base = os.path.dirname(os.path.abspath(__file__))
     return os.path.join(base, "woa_debug")

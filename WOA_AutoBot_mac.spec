@@ -32,6 +32,7 @@ a = Analysis(
         'uiautomator2', 'adbutils',
         'lxml', 'lxml.etree',
         'requests', 'pystray',
+        'certifi', 'ssl',
         'PIL.Image', 'PIL.ImageTk', 'PIL.ImageDraw',
     ],
     hookspath=[],
@@ -90,7 +91,15 @@ app = BUNDLE(
         'CFBundleDisplayName': 'WOA AutoBot',
         'CFBundleVersion': '1.2.0',
         'CFBundleShortVersionString': '1.2.0',
+        'CFBundlePackageType': 'APPL',
+        'CFBundleInfoDictionaryVersion': '6.0',
+        'LSMinimumSystemVersion': '11.0',
         'NSHighResolutionCapable': True,
         'NSRequiresAquaSystemAppearance': False,
+        'NSPrincipalClass': 'NSApplication',
+        'NSAppTransportSecurity': {
+            'NSAllowsArbitraryLoads': True,
+        },
+        'LSApplicationCategoryType': 'public.app-category.utilities',
     },
 )

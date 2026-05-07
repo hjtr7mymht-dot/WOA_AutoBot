@@ -1,32 +1,27 @@
 WOA AutoBot v1.2.0 打包指南
 ===========================
 
-macOS 打包 (在当前 Mac 上已完成)
----------------------------------
+macOS DMG 打包 (在当前 Mac 上已完成)
+------------------------------------
 打包结果位于 dist/ 目录:
-  - WOA_AutoBot.app      (可直接双击运行, 217 MB)
-  - WOA_AutoBot_macOS.zip (压缩后用于分享, 93 MB)
+  - WOA_AutoBot_macOS.dmg (双击即可安装，推荐分发格式)
 
-如需从源码重新打包:
+⭐ 推荐使用 DMG 构建脚本一键完成:
+  bash build_dmg.sh
+
+如需手动从源码重新打包:
   cd WOA_AutoBot
   uv run pyinstaller -y --clean WOA_AutoBot_mac.spec
+  # 清理资源分叉（否则 codesign 失败）
+  find dist/WOA_AutoBot.app -name "._*" -delete
+  ditto --norsrc dist/WOA_AutoBot.app /tmp/WOA_clean.app
+  rm -rf dist/WOA_AutoBot.app
+  mv /tmp/WOA_clean.app dist/WOA_AutoBot.app
   xattr -rc dist/WOA_AutoBot.app
-  codesign --remove-signature dist/WOA_AutoBot.app
+  codesign --remove-signature dist/WOA_AutoBot.app 2>/dev/null
   codesign --deep --force --sign - dist/WOA_AutoBot.app
+  # 制作 DMG
   ditto -c -k --sequesterRsrc --keepParent dist/WOA_AutoBot.app dist/WOA_AutoBot_macOS.zip
-
-注意: 打包需使用 uv 管理的虚拟环境 (Python 3.14)。
-系统自带 Python 可能缺少依赖。
-
-
-Windows 打包 (需在 Windows 上执行)
------------------------------------
-1. 安装 Python 3.10+
-2. 安装依赖: pip install -r requirements.txt
-3. 安装 PyInstaller: pip install pyinstaller
-4. 执行打包: pyinstaller -y --clean WOA_AutoBot.spec
-5. 输出: dist/WOA_AutoBot/WOA_AutoBot.exe
-6. 可用 ZIP 压缩后分享给其他用户
 
 注意: Windows 版需要有 adb.exe 在 adb_tools/ 和 platform-tools/ 目录中。
 
