@@ -88,8 +88,8 @@ app = BUNDLE(
     info_plist={
         'CFBundleName': 'WOA AutoBot',
         'CFBundleDisplayName': 'WOA AutoBot',
-        'CFBundleVersion': '1.1.6',
-        'CFBundleShortVersionString': '1.1.6',
+        'CFBundleVersion': '1.2.0',
+        'CFBundleShortVersionString': '1.2.0',
         'NSHighResolutionCapable': True,
         'NSRequiresAquaSystemAppearance': False,
     },

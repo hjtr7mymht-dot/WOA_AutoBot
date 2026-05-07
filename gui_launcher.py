@@ -125,7 +125,7 @@ if INSTANCE_ID is None:
 CONFIG_FILE = "config.json" if INSTANCE_ID == 1 else f"config_{INSTANCE_ID}.json"
 STATS_FILE = "woa_stats.csv"
 
-LOCAL_VERSION = "1.1.6"
+LOCAL_VERSION = "1.2.0"
 OFFICIAL_REPO_URL = "https://github.com/hjtr7mymht-dot/WOA_AutoBot"
 OFFICIAL_REPO_NAME = "hjtr7mymht-dot/WOA_AutoBot"
 ONLINE_VERSION_PATH = "version.json"
@@ -398,7 +398,7 @@ class Application(ttkb.Window):
         if IS_WINDOWS:
             try:
                 import ctypes
-                myappid = 'woabot.launcher.v1.1.6'
+                myappid = 'woabot.launcher.v1.2.0'
                 ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
             except Exception:
                 pass

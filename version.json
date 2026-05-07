@@ -1,14 +1,14 @@
 {
-  "version": "1.1.6",
+  "version": "1.2.0",
   "package_urls": [
     {
       "name": "GitHub Release",
-      "url": "https://github.com/hjtr7mymht-dot/WOA_AutoBot/releases/download/1.1.6/WOA_AutoBot.zip"
+      "url": "https://github.com/hjtr7mymht-dot/WOA_AutoBot/releases/download/1.2.0/WOA_AutoBot.zip"
     },
     {
       "name": "ghproxy Release",
-      "url": "https://ghproxy.cn/https://github.com/hjtr7mymht-dot/WOA_AutoBot/releases/download/1.1.6/WOA_AutoBot.zip"
+      "url": "https://ghproxy.cn/https://github.com/hjtr7mymht-dot/WOA_AutoBot/releases/download/1.2.0/WOA_AutoBot.zip"
     }
   ],
-  "notes": "1.1.6：全面优化UI视觉设计，采用现代配色方案与统一字体规范；修复塔台像素误判导致频繁判定关闭的问题，增加复检机制与30秒自动重检；全局性能优化大幅减少主循环等待时间；实现跨平台(Mac/Linux)基础兼容；OCR识别速度提升约40%。"
+  "notes": "1.2.0：macOS 完整兼容，支持原生 .app 打包分发；UI 重构消灭大面积空白，所有开关集中在四个功能标签页；修复车辆不足时任务卡死问题；修复塔台关闭后仍错误锁定停机坪筛选的问题；小退后自动重检塔台状态。"
 }

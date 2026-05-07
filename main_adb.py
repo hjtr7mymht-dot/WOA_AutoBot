@@ -459,6 +459,15 @@ class WoaBot:
             self._check_running()
             if self.safe_locate('main_interface.png', region=self.REGION_MAIN_ANCHOR, confidence=0.8):
                 self.log("📋 [小退] 已返回主界面，恢复处理")
+                # 重新检测塔台状态和筛选模式，避免默认停留在"仅停机位"模式
+                self.sleep(0.5)
+                try:
+                    self._init_tower_countdown()
+                except StopSignal:
+                    raise
+                except Exception as e:
+                    self.log(f"🗼 [塔台] ⚠️ 小退后重检测塔台失败: {e}")
+                self._periodic_15s_check(force_initial_filter_check=True)
                 return
             self.sleep(1.0)
         self.log("📋 [小退] 90s 内未检测到主界面，交由后续流程处理")
@@ -634,6 +643,14 @@ class WoaBot:
         if (not self.enable_filter_stand_only_when_tower_open) and all(self._tower_active_slots) and is_mode2:
             self.log("📋 [筛选] 已关闭塔台全开仅停机位，恢复模式1(仅待处理)...")
             apply_mode(self.FILTER_CHECK_POINTS_MODE1)
+            return
+
+        # 如果塔台状态尚未初始化（全 False），默认按仅待处理处理，避免错误锁定停机坪筛选
+        if not any(self._tower_active_slots) and not self._tower_disabled:
+            if is_mode2:
+                self.log("📋 [筛选] 塔台状态未初始化，默认切换至仅待处理...")
+                self._tower_disabled = True
+                apply_mode(self.FILTER_CHECK_POINTS_MODE1)
             return
 
         need_mode1_only = self._tower_off_force_mode1
@@ -2220,7 +2237,9 @@ class WoaBot:
                 else:
                     self.log("   -> 未找到购买按钮")
             else:
-                self.log("   -> 🚨 发现车辆不足，忽略")
+                self.log("   -> 🚨 发现车辆不足但未开启购买，跳过当前任务")
+                self.close_window()
+                return True
             if not self._exit_vehicle_buy_scene():
                 self.log("⚠️ [Doing] 购买界面未能正常退出，触发临时冷却避免循环卡死")
                 self.doing_task_forbidden_until = time.time() + 8.0
