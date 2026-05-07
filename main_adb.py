@@ -47,11 +47,11 @@ class WoaBot:
         self.stand_skip_index = 0
         self.in_staff_shortage_mode = False
         self._next_staff_recovery_probe_time = 0.0
-        self._staff_recovery_probe_interval = 8.0
+        self._staff_recovery_probe_interval = 4.0
         self.enable_bonus_staff = False
         self.last_bonus_staff_time = 0
         self.BONUS_COOLDOWN = 2 * 60 * 60
-        self.REGION_GLOBAL_STAFF = (573, 92, 640 - 573, 112 - 92)
+        self.REGION_GLOBAL_STAFF = (565, 87, 80, 30)
         self.REGION_TASK_COST = (270, 670, 330 - 270, 695 - 670)
         self.REGION_GREEN_DOT = (405, 517, 201, 109)
         self.next_bonus_retry_time = 0
@@ -507,7 +507,7 @@ class WoaBot:
         if not hasattr(self, 'last_periodic_check_time'):
             self.last_periodic_check_time = 0
         now = time.time()
-        if not force_initial_filter_check and now - self.last_periodic_check_time < 15.0:
+        if not force_initial_filter_check and now - self.last_periodic_check_time < 12.0:
             return
         self.last_periodic_check_time = now
 
@@ -644,8 +644,8 @@ class WoaBot:
 
         if is_mode1 or is_mode2:
             return
-        self.log("📋 [筛选] 状态异常，默认切换至仅待处理...")
-        apply_mode(self.FILTER_CHECK_POINTS_MODE1)
+        self.log("📋 [筛选] 状态异常，默认切换至仅停机位待处理...")
+        apply_mode(self.FILTER_CHECK_POINTS_MODE2)
 
     def _nemu_ipc_debug_save_mismatch(self, nemu_img, adb_img):
         """nemu_ipc 与 ADB 截图不匹配时保存对比图，便于排查"""
@@ -1259,16 +1259,16 @@ class WoaBot:
         if a + d + sc == 0:
             return
         try:
+            from platform_utils import lock_file, unlock_file
             base_dir = os.path.dirname(os.path.abspath(__file__)) if not getattr(sys, "frozen", False) else os.path.dirname(sys.executable)
             csv_path = os.path.join(base_dir, "woa_stats.csv")
             lock_path = csv_path + ".lock"
             header = ["date", "approach", "depart", "stand_count", "stand_staff"]
             # 使用文件锁保证多实例安全
-            import msvcrt
             with open(lock_path, "w") as lf:
                 lf.write("1")
                 lf.flush()
-                msvcrt.locking(lf.fileno(), msvcrt.LK_LOCK, 1)
+                lock_file(lf)
                 try:
                     rows = []
                     if os.path.isfile(csv_path):
@@ -1295,7 +1295,7 @@ class WoaBot:
                         writer.writerow(header)
                         writer.writerows(rows)
                 finally:
-                    msvcrt.locking(lf.fileno(), msvcrt.LK_UNLCK, 1)
+                    unlock_file(lf)
         except Exception as e:
             self.log(f"⚠️ 保存统计数据失败: {e}")
 
@@ -1337,7 +1337,7 @@ class WoaBot:
         self._run_start_time = time.time()
         self._stat_date = time.strftime("%Y-%m-%d")
         self.log("[DEBUG] 主循环线程已启动")
-        self.sleep(1.0)
+        self.sleep(0.3)
         self.last_periodic_check_time = 0
         if self.enable_no_takeoff_mode:
             self._no_takeoff_cycle_side = 'landing'
@@ -1395,19 +1395,19 @@ class WoaBot:
                         continue
                 did_work = self.scan_and_process() if self._is_module_enabled('scanner') else False
                 if did_work:
-                    self.sleep(0.05)
+                    self.sleep(0.03)
                     idle_count = 0
                 else:
                     if self._is_module_enabled('idle_recovery'):
-                        self.sleep(0.5)
+                        self.sleep(0.25)
                         idle_count += 1
-                        if idle_count == 10:
+                        if idle_count == 15:
                             self.close_window()
                     else:
-                        self.sleep(0.2)
+                        self.sleep(0.08)
                         idle_count = 0
                 gc_counter += 1
-                if gc_counter > 50:
+                if gc_counter > 80:
                     gc.collect()
                     gc_counter = 0
             except StopSignal:
@@ -1433,7 +1433,7 @@ class WoaBot:
                     break
                 
                 try:
-                    self.sleep(3.0)
+                    self.sleep(1.5)
                 except (StopSignal, KeyboardInterrupt, SystemExit):
                     break
                 except Exception:
@@ -1520,7 +1520,7 @@ class WoaBot:
         return unique
 
     def check_global_staff(self, screen_image=None):
-        for region in self._iter_region_fallbacks(self.REGION_GLOBAL_STAFF, pad_x=14, pad_y=6):
+        for region in self._iter_region_fallbacks(self.REGION_GLOBAL_STAFF, pad_x=18, pad_y=10):
             text = self.ocr.recognize_number(region, mode='global', screen_image=screen_image)
             if not text:
                 continue
@@ -2481,15 +2481,19 @@ class WoaBot:
                     self.close_window()
                     return False
 
-            self.log(f"🛑 人力不足 (缺 {required_cost + 1 - avail_staff})")
+            self.log(f"🛑 人力不足 (缺 {required_cost + 1 - avail_staff})，跳过本架尝试下一架")
             self.close_window()
             if self._try_get_bonus_staff():
                 self.log("   -> 领取成功，重试")
                 self.stand_skip_index = 0
                 return True
+            # 逐架跳过而非全局阻断：仅跳过当前不能满足的飞机
             self.stand_skip_index += 1
-            self.in_staff_shortage_mode = True
-            self._next_staff_recovery_probe_time = time.time() + self._staff_recovery_probe_interval
+            # 连续3架以上都失败才进入全局短缺模式
+            if self.stand_skip_index >= 3:
+                self.in_staff_shortage_mode = True
+                self._next_staff_recovery_probe_time = time.time() + self._staff_recovery_probe_interval
+                self.log(f"🛑 连续 {self.stand_skip_index} 架均人力不足，进入短缺模式，{self._staff_recovery_probe_interval}s 后探测恢复")
             self.last_known_available_staff = avail_staff
             return False
 
@@ -2621,9 +2625,11 @@ class WoaBot:
             if not (is_green and is_success_icon):
                 self.log("🛑 验证失败：颜色或图标未通过")
                 if self.safe_locate('insufficient_ground_staff.png', confidence=0.7):
-                    self.log("   -> 原因：发现了人员不足警告")
-                    self.in_staff_shortage_mode = True
-                    self.last_known_available_staff = 0
+                    self.log("   -> 原因：发现了人员不足警告，跳过本架")
+                    self.stand_skip_index += 1
+                    if self.stand_skip_index >= 3:
+                        self.in_staff_shortage_mode = True
+                        self._next_staff_recovery_probe_time = time.time() + self._staff_recovery_probe_interval
                 self.close_window()
                 return False
 
@@ -2639,9 +2645,11 @@ class WoaBot:
             return True
         else:
             if self.safe_locate('insufficient_ground_staff.png', confidence=0.7):
-                self.log("🛑 警告：人员不足 (寻找开始按钮时)")
-                self.in_staff_shortage_mode = True
-                self.last_known_available_staff = 0
+                self.log("🛑 警告：人员不足 (寻找开始按钮时)，跳过本架")
+                self.stand_skip_index += 1
+                if self.stand_skip_index >= 3:
+                    self.in_staff_shortage_mode = True
+                    self._next_staff_recovery_probe_time = time.time() + self._staff_recovery_probe_interval
             self.close_window()
             return False
 
@@ -2762,7 +2770,7 @@ class WoaBot:
         now = time.time()
         prev_staff = self.last_checked_avail_staff
         staff_this_round = None
-        staff_check_interval = 1.0 if (self.in_staff_shortage_mode or self.stand_skip_index > 0) else 3.0
+        staff_check_interval = 1.0 if (self.in_staff_shortage_mode or self.stand_skip_index > 0) else 1.5
         if now - self.last_staff_check_time > staff_check_interval:
             staff_this_round = self.check_global_staff(screen_image=current_screen)
             self._update_staff_tracker(staff_this_round)
@@ -2812,11 +2820,14 @@ class WoaBot:
                 continue
             if t['type'] == 'stand':
                 if self.in_staff_shortage_mode:
+                    # 全局短缺模式：定期探测一次
                     if time.time() < self._next_staff_recovery_probe_time:
                         continue
-                    self.log("📋 [调度] 地勤短缺恢复探测：尝试执行一个停机位任务")
+                    self.log("📋 [调度] 地勤短缺恢复探测：尝试执行停机位任务")
                     self._next_staff_recovery_probe_time = time.time() + self._staff_recovery_probe_interval
-                if skips_left > 0:
+                    # 探测时不跳过，但每轮只探一个（由 shortage 模式 continue 保证后续 stand 不进候选）
+                elif skips_left > 0:
+                    # 逐架跳过：跳过前 N 架已尝试失败的，尝试后续
                     skips_left -= 1
                     continue
             if self._is_task_on_cooldown(t):

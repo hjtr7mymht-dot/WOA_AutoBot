@@ -8,9 +8,7 @@ import collections
 import traceback
 import importlib.util
 import tkinter as tk
-import ctypes
 import subprocess
-import msvcrt
 import time
 import webbrowser
 import urllib.error
@@ -19,6 +17,8 @@ import adb_controller as adb_mod
 from tkinter import filedialog, messagebox
 from tkinter.scrolledtext import ScrolledText
 from tkinter.constants import BOTH, END, LEFT, RIGHT, TOP, X, Y
+
+from platform_utils import IS_WINDOWS, CREATE_NO_WINDOW, try_lock_file, lock_file, unlock_file, ADB_EXE_NAME
 
 try:
     import orjson
@@ -91,8 +91,12 @@ def _acquire_instance():
             fh.write(str(i))
             fh.flush()
             fh.seek(0)
-            msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
-            return i, fh
+            if try_lock_file(fh):
+                return i, fh
+            try:
+                fh.close()
+            except Exception:
+                pass
         except (OSError, IOError):
             try:
                 fh.close()
@@ -103,14 +107,14 @@ def _acquire_instance():
 
 INSTANCE_ID, _INSTANCE_LOCK_FH = _acquire_instance()
 if INSTANCE_ID is None:
-    ctypes.windll.user32.MessageBoxW(0, f"已达到最大实例数 ({MAX_INSTANCES})，无法再开启新窗口。", "WOA AutoBot", 0x30)
+    messagebox.showerror("WOA AutoBot", f"已达到最大实例数 ({MAX_INSTANCES})，无法再开启新窗口。")
     sys.exit(1)
 
 # 按实例隔离配置和统计文件
 CONFIG_FILE = "config.json" if INSTANCE_ID == 1 else f"config_{INSTANCE_ID}.json"
 STATS_FILE = "woa_stats.csv"
 
-LOCAL_VERSION = "1.1.5"
+LOCAL_VERSION = "1.1.6"
 OFFICIAL_REPO_URL = "https://github.com/hjtr7mymht-dot/WOA_AutoBot"
 OFFICIAL_REPO_NAME = "hjtr7mymht-dot/WOA_AutoBot"
 ONLINE_VERSION_PATH = "version.json"
@@ -379,22 +383,36 @@ class TeeToFile:
 
 class Application(ttkb.Window):
     def __init__(self):
-        try:
-            myappid = 'woabot.launcher.v1.1.0'
-            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
-        except:
-            pass
+        # Windows 任务栏图标 ID（跨平台安全）
+        if IS_WINDOWS:
+            try:
+                import ctypes
+                myappid = 'woabot.launcher.v1.1.6'
+                ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
+            except Exception:
+                pass
 
         super().__init__(themename="sandstone")
 
-        self.style.colors.success = "#4f6f52"
-        self.style.colors.danger = "#b85c38"
-        self.style.colors.primary = "#355c7d"
-        self.style.colors.info = "#6c8ead"
+        # === 现代化配色方案 ===
+        self.style.colors.success = "#3a7d44"
+        self.style.colors.danger = "#c0392b"
+        self.style.colors.primary = "#2c5f8a"
+        self.style.colors.info = "#5b8cac"
+        self.style.colors.warning = "#d4860b"
+        self.style.colors.dark = "#2d3436"
+        self.style.colors.light = "#f5f0e8"
+        # 自定义字体配置
+        self.style.configure(".", font=("Microsoft YaHei UI", 10))
+        self.style.configure("TLabel", font=("Microsoft YaHei UI", 10))
+        self.style.configure("TLabelframe.Label", font=("Microsoft YaHei UI", 11, "bold"))
+        self.style.configure("TNotebook.Tab", font=("Microsoft YaHei UI", 11), padding=(16, 8))
+        self.style.configure("TButton", font=("Microsoft YaHei UI", 10))
+        self.style.configure("success.TButton", font=("Microsoft YaHei UI", 10, "bold"))
 
-        self.title(f"WOA AutoBot {LOCAL_VERSION}" + (f" [实例 {INSTANCE_ID}]" if INSTANCE_ID > 1 else ""))
-        self.geometry("1040x920")
-        self.minsize(144, 144)
+        self.title(f"WOA AutoBot v{LOCAL_VERSION}" + (f" — 实例 {INSTANCE_ID}" if INSTANCE_ID > 1 else ""))
+        self.geometry("1060x940")
+        self.minsize(800, 640)
         self.last_geometry = "1080x1200"
         self.is_mini_mode = False
         self._strict_online_guard = bool(getattr(sys, 'frozen', False))
@@ -563,9 +581,11 @@ class Application(ttkb.Window):
             lock_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), f"instance_{i}.lock")
             try:
                 fh = open(lock_path, "w")
-                msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
-                msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
-                fh.close()
+                if try_lock_file(fh):
+                    unlock_file(fh)
+                    fh.close()
+                else:
+                    fh.close()
             except (OSError, IOError):
                 other_alive = True
                 break
@@ -758,7 +778,6 @@ class Application(ttkb.Window):
 
         connected = []
         failed = []
-        creation_flags = 0x08000000
         for target in targets:
             try:
                 result = subprocess.run(
@@ -766,7 +785,7 @@ class Application(ttkb.Window):
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     timeout=10,
-                    creationflags=creation_flags,
+                    creationflags=CREATE_NO_WINDOW,
                 )
                 out = (result.stdout or b"").decode("utf-8", errors="ignore")
                 err = (result.stderr or b"").decode("utf-8", errors="ignore")
@@ -1042,7 +1061,7 @@ class Application(ttkb.Window):
         return ""
 
     def _detect_preferred_adb_path(self, mumu_root=""):
-        local_adb = adb_mod.get_bundled_resource_path(os.path.join("adb_tools", "adb.exe"))
+        local_adb = adb_mod.get_bundled_resource_path(os.path.join("adb_tools", ADB_EXE_NAME))
         if os.path.isfile(local_adb):
             return local_adb
         if get_mumu_adb_paths:
@@ -1060,7 +1079,7 @@ class Application(ttkb.Window):
             return bundled
         if mumu_root:
             for sub in ("nx_main", "MuMu", os.path.join("emulator", "nemu")):
-                candidate = os.path.join(mumu_root, sub, "adb.exe")
+                candidate = os.path.join(mumu_root, sub, ADB_EXE_NAME)
                 if os.path.isfile(candidate):
                     return candidate
         return ""
@@ -2414,7 +2433,7 @@ class Application(ttkb.Window):
                 print(f">>> 尝试手动连接: {ip}")
                 try:
                     adb_exe = adb_mod.CURRENT_ADB_PATH if adb_mod.CURRENT_ADB_PATH else "adb"
-                    subprocess.run([adb_exe, "connect", ip], timeout=5, creationflags=0x08000000)
+                    subprocess.run([adb_exe, "connect", ip], timeout=5, creationflags=CREATE_NO_WINDOW)
                     self.refresh_devices()
                 except Exception as e:
                     print(f"❌ 连接失败: {e}")

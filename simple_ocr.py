@@ -40,7 +40,7 @@ class SimpleOCR:
             gray = self._to_gray(scaled_img)
             if gray is None:
                 return None
-            _, binary = cv2.threshold(gray, 170, 255, cv2.THRESH_BINARY)
+            _, binary = cv2.threshold(gray, 160, 255, cv2.THRESH_BINARY)
             return binary
         except Exception:
             return None
@@ -57,13 +57,13 @@ class SimpleOCR:
         seen = set()
         for scale in scale_candidates:
             try:
-                scaled = cv2.resize(gray, (w * scale, h * scale), interpolation=cv2.INTER_CUBIC)
+                scaled = cv2.resize(gray, (w * scale, h * scale), interpolation=cv2.INTER_LINEAR)
             except Exception:
                 continue
             normalized = cv2.normalize(scaled, None, 0, 255, cv2.NORM_MINMAX)
             blurred = cv2.GaussianBlur(normalized, (3, 3), 0)
             threshold_variants = []
-            for threshold in (145, 160, 175, 190):
+            for threshold in (148, 168, 188):
                 _, binary = cv2.threshold(blurred, threshold, 255, cv2.THRESH_BINARY)
                 threshold_variants.append(binary)
             _, otsu = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
@@ -110,7 +110,9 @@ class SimpleOCR:
         if processed_crop is None or processed_crop.size == 0:
             return None, 0.0
         matches = []
-        threshold = 0.7
+        # 对小尺寸区域使用更低的匹配阈值，避免丢失地勤数字等小字符
+        h, w = processed_crop.shape[:2]
+        threshold = 0.65 if (h < 120 or w < 400) else 0.70
         for char, template in templates.items():
             if template.shape[0] > processed_crop.shape[0] or template.shape[1] > processed_crop.shape[1]:
                 continue
