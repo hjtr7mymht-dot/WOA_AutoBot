@@ -18,7 +18,7 @@ from tkinter import filedialog, messagebox
 from tkinter.scrolledtext import ScrolledText
 from tkinter.constants import BOTH, END, LEFT, RIGHT, TOP, X, Y
 
-from platform_utils import IS_WINDOWS, CREATE_NO_WINDOW, try_lock_file, lock_file, unlock_file, ADB_EXE_NAME
+from platform_utils import IS_WINDOWS, CREATE_NO_WINDOW, try_lock_file, lock_file, unlock_file, ADB_EXE_NAME, IS_MAC
 
 try:
     import orjson
@@ -49,6 +49,17 @@ except ImportError:
 
 # MuMu 常用 ADB 端口（部分机型如 MuMu12+Vulkan 需用 MuMu 自带 adb 才能正常点击）
 _MUMU_PORTS = {16384, 16385, 16416, 16448, 7555, 5555}
+
+# 跨平台默认字体
+if IS_MAC:
+    DEFAULT_FONT = "SF Pro"
+    MONO_FONT = "Menlo"
+elif IS_WINDOWS:
+    DEFAULT_FONT = "Microsoft YaHei UI"
+    MONO_FONT = "Consolas"
+else:
+    DEFAULT_FONT = "Sans"
+    MONO_FONT = "Monospace"
 
 
 # 资源路径获取（兼容 PyInstaller 与 Nuitka）
@@ -270,14 +281,14 @@ class MultiTextRedirector(object):
             self._setup_tags(widget)
 
     def _setup_tags(self, widget):
-        widget.tag_config("time", foreground="#999999", font=("Consolas", 8))
+        widget.tag_config("time", foreground="#999999", font=(MONO_FONT, 8))
         widget.tag_config("normal", foreground="#333333")
         widget.tag_config("success", foreground="#75b798")
         widget.tag_config("error", foreground="#ea868f")
         widget.tag_config("highlight", foreground="#fd7e14")
         widget.tag_config("method", foreground="#c9a227")
-        widget.tag_config("update", foreground="#e63946", font=("Microsoft YaHei UI", 10, "bold"))
-        widget.tag_config("stats", foreground="#2196F3", font=("Microsoft YaHei UI", 9, "bold"))
+        widget.tag_config("update", foreground="#e63946", font=(DEFAULT_FONT, 10, "bold"))
+        widget.tag_config("stats", foreground="#2196F3", font=(DEFAULT_FONT, 9, "bold"))
 
     def write(self, str_val):
         if self.closing:
@@ -402,17 +413,17 @@ class Application(ttkb.Window):
         self.style.colors.warning = "#d4860b"
         self.style.colors.dark = "#2d3436"
         self.style.colors.light = "#f5f0e8"
-        # 自定义字体配置
-        self.style.configure(".", font=("Microsoft YaHei UI", 10))
-        self.style.configure("TLabel", font=("Microsoft YaHei UI", 10))
-        self.style.configure("TLabelframe.Label", font=("Microsoft YaHei UI", 11, "bold"))
-        self.style.configure("TNotebook.Tab", font=("Microsoft YaHei UI", 11), padding=(16, 8))
-        self.style.configure("TButton", font=("Microsoft YaHei UI", 10))
-        self.style.configure("success.TButton", font=("Microsoft YaHei UI", 10, "bold"))
+        # 自定义字体配置（跨平台）
+        self.style.configure(".", font=(DEFAULT_FONT, 10))
+        self.style.configure("TLabel", font=(DEFAULT_FONT, 10))
+        self.style.configure("TLabelframe.Label", font=(DEFAULT_FONT, 11, "bold"))
+        self.style.configure("TNotebook.Tab", font=(DEFAULT_FONT, 11), padding=(16, 8))
+        self.style.configure("TButton", font=(DEFAULT_FONT, 10))
+        self.style.configure("success.TButton", font=(DEFAULT_FONT, 10, "bold"))
 
         self.title(f"WOA AutoBot v{LOCAL_VERSION}" + (f" — 实例 {INSTANCE_ID}" if INSTANCE_ID > 1 else ""))
-        self.geometry("1060x940")
-        self.minsize(800, 640)
+        self.geometry("1020x420")
+        self.minsize(120, 140)
         self.last_geometry = "1080x1200"
         self.is_mini_mode = False
         self._strict_online_guard = bool(getattr(sys, 'frozen', False))
@@ -1142,7 +1153,7 @@ class Application(ttkb.Window):
         return changed or force
 
     def create_info_icon(self, parent, text):
-        lbl = ttkb.Label(parent, text="ⓘ", font=("Segoe UI Symbol", 10), bootstyle="secondary", cursor="hand2")
+        lbl = ttkb.Label(parent, text="ⓘ", font=(DEFAULT_FONT, 10), bootstyle="secondary", cursor="hand2")
         ToolTip(lbl, text=text, bootstyle="secondary-inverse")
         return lbl
 
@@ -1169,7 +1180,7 @@ class Application(ttkb.Window):
         else:
             self.last_geometry = self.geometry()
             self.container_main.pack_forget()
-            self.geometry("320x180")
+            self.geometry("240x240")
             self.attributes('-topmost', self.var_mini_top.get())
             self.container_mini.pack(fill=BOTH, expand=True)
             self.is_mini_mode = True
@@ -1182,7 +1193,7 @@ class Application(ttkb.Window):
         if self.bot and self.bot.running:
             messagebox.showwarning("多开模式", "建议先确认当前实例已稳定运行，再开启新实例。", parent=self)
         try:
-            creation_flags = 0x08000000
+            creation_flags = CREATE_NO_WINDOW
             if getattr(sys, 'frozen', False):
                 cmd = [sys.executable]
             else:
@@ -1196,7 +1207,7 @@ class Application(ttkb.Window):
         pad = 5
         top_row = ttkb.Frame(self.container_mini)
         top_row.pack(fill=X, padx=pad, pady=(pad, 0))
-        ttkb.Label(top_row, text=f"WOA Mini {LOCAL_VERSION}", font=("Microsoft YaHei UI", 9, "bold"), bootstyle="secondary").pack(side=LEFT)
+        ttkb.Label(top_row, text=f"WOA Mini {LOCAL_VERSION}", font=(DEFAULT_FONT, 9, "bold"), bootstyle="secondary").pack(side=LEFT)
         ttkb.Button(top_row, text="还原", bootstyle="outline-warning", command=self.toggle_mode, padding=(5, 0)).pack(
             side=RIGHT)
         cb_top = ttkb.Checkbutton(top_row, text="置顶", variable=self.var_mini_top, bootstyle="toolbutton-secondary",
@@ -1212,7 +1223,7 @@ class Application(ttkb.Window):
         log_frame = ttkb.Frame(self.container_mini)
         log_frame.pack(fill=BOTH, expand=True, padx=pad, pady=pad)
         ttkb.Label(log_frame, textvariable=self.var_online_status, anchor="w", bootstyle="secondary").pack(fill=X, pady=(0, 4))
-        self.txt_mini_log = tk.Text(log_frame, state="disabled", font=("Consolas", 8), bg="#f8f9fa", relief="flat",
+        self.txt_mini_log = tk.Text(log_frame, state="disabled", font=(MONO_FONT, 8), bg="#f8f9fa", relief="flat",
                                     height=4)
         self.txt_mini_log.pack(fill=BOTH, expand=True)
         self.redirector.add_widget(self.txt_mini_log)
@@ -1223,205 +1234,154 @@ class Application(ttkb.Window):
         print(f">>> [功能状态] {t}: 已{state}")
 
     def setup_main_ui(self):
-        # 整体外层容器，增加 padding 留白更现代化
-        outer = ttkb.Frame(self.container_main, padding=20)
+        outer = ttkb.Frame(self.container_main, padding=12)
         outer.pack(fill=BOTH, expand=True)
 
-        # ================== 1. Header 区域 (Logo与标题 + 状态胶囊) ==================
-        header_frame = ttkb.Frame(outer)
-        header_frame.pack(fill=X, pady=(0, 20))
-        
-        # 左侧：应用标题与版本信息
-        title_frame = ttkb.Frame(header_frame)
-        title_frame.pack(side=LEFT, fill=Y)
-        ttkb.Label(title_frame, text="WOA 控制面板", font=("Microsoft YaHei UI", 22, "bold"), bootstyle="primary").pack(anchor="w")
-        ttkb.Label(
-            title_frame,
-            text=f"当前版本 v{LOCAL_VERSION} · 开源免费工具 · 官方源 {OFFICIAL_REPO_NAME}",
-            font=("Microsoft YaHei UI", 10),
-            bootstyle="secondary",
-        ).pack(anchor="w", pady=(4, 0))
+        # ================== 1. 紧凑标题栏 ==================
+        header = ttkb.Frame(outer)
+        header.pack(fill=X, pady=(0, 8))
+        ttkb.Label(header, text="WOA AutoBot", font=(DEFAULT_FONT, 16, "bold"), bootstyle="primary").pack(side=LEFT)
+        ttkb.Label(header, text=f"v{LOCAL_VERSION}", font=(DEFAULT_FONT, 9), bootstyle="secondary").pack(side=LEFT, padx=(6, 0))
+        if INSTANCE_ID > 1:
+            ttkb.Label(header, text=f"实例{INSTANCE_ID}", font=(DEFAULT_FONT, 9, "bold"), bootstyle="warning").pack(side=LEFT, padx=6)
 
-        # 右侧：现代化的状态指示胶囊
-        status_frame = ttkb.Frame(header_frame)
-        status_frame.pack(side=RIGHT, fill=Y, pady=5)
-        
-        def make_status_capsule(parent, label_text, var, color, margin=(5,0)):
-            f = ttkb.Frame(parent)
-            f.pack(side=LEFT, padx=margin)
-            ttkb.Label(f, text=label_text, font=("Microsoft YaHei UI", 9, "bold"), bootstyle="secondary").pack(side=LEFT, padx=(0, 5))
-            ttkb.Label(f, textvariable=var, padding=(10, 4), bootstyle=f"inverse-{color}").pack(side=LEFT)
-            
-        make_status_capsule(status_frame, "运行状态", self.var_runtime_status, "primary")
-        make_status_capsule(status_frame, "设备状态", self.var_device_status, "info", margin=(15, 0))
-        make_status_capsule(status_frame, "云端校验", self.var_online_status, "success", margin=(15, 0))
+        # 状态胶囊组
+        cap_frame = ttkb.Frame(header)
+        cap_frame.pack(side=RIGHT)
+        for label, var, color in (
+            ("状态", self.var_runtime_status, "info"),
+            ("设备", self.var_device_status, "info"),
+            ("云端", self.var_online_status, "success"),
+        ):
+            f = ttkb.Frame(cap_frame)
+            f.pack(side=LEFT, padx=(8, 0))
+            ttkb.Label(f, text=label, font=(DEFAULT_FONT, 8, "bold"), bootstyle="secondary").pack(side=LEFT, padx=(0, 4))
+            ttkb.Label(f, textvariable=var, padding=(6, 2), font=(DEFAULT_FONT, 8), bootstyle=f"inverse-{color}").pack(side=LEFT)
 
-        # ================== 2. 内容区 (左右两栏分屏布局) ==================
-        content_pane = ttkb.Frame(outer)
-        content_pane.pack(fill=BOTH, expand=False)
-        content_pane.columnconfigure(0, weight=4, uniform="modern_layout")  # 左侧占4份
-        content_pane.columnconfigure(1, weight=5, uniform="modern_layout")  # 右侧占5份，空间更大
-        content_pane.rowconfigure(0, weight=1)
+        # ================== 2. 控制栏（设备选择 + 核心按钮）==================
+        ctrl_bar = ttkb.Frame(outer)
+        ctrl_bar.pack(fill=X, pady=(0, 8))
 
-        # ----------------- 左侧：核心控制 与 工具入口 -----------------
-        left_col = ttkb.Frame(content_pane)
-        left_col.grid(row=0, column=0, sticky="nsew", padx=(0, 15))
+        ctrl_left = ttkb.Frame(ctrl_bar)
+        ctrl_left.pack(side=LEFT, fill=X, expand=True)
+        ttkb.Label(ctrl_left, text="目标设备", font=(DEFAULT_FONT, 9, "bold"), bootstyle="secondary").pack(side=LEFT, padx=(0, 6))
+        self.combo_devices = ttkb.Combobox(ctrl_left, state="readonly", width=28)
+        self.combo_devices.pack(side=LEFT, padx=(0, 6))
+        self.btn_scan = ttkb.Button(ctrl_left, text="🔄 刷新", bootstyle="outline-info", command=self.refresh_devices, width=8)
+        self.btn_scan.pack(side=LEFT, padx=(0, 10))
 
-        # 【核心控制卡片】
-        connect_card = ttkb.Labelframe(left_col, text=" 连接与控制中心 ", padding=15, bootstyle="info")
-        connect_card.pack(fill=X, pady=(0, 15))
-        
-        ttkb.Label(connect_card, text="选择目标设备后启动自动化流程", font=("Microsoft YaHei UI", 9), bootstyle="secondary").pack(anchor="w", pady=(0, 10))
-        
-        device_row = ttkb.Frame(connect_card)
-        device_row.pack(fill=X, pady=(0, 15))
-        self.combo_devices = ttkb.Combobox(device_row, state="readonly")
-        self.combo_devices.pack(side=LEFT, fill=X, expand=True, padx=(0, 10))
-        self.btn_scan = ttkb.Button(device_row, text="刷新设备", bootstyle="outline-info", command=self.refresh_devices, width=10)
-        self.btn_scan.pack(side=RIGHT)
+        ctrl_right = ttkb.Frame(ctrl_bar)
+        ctrl_right.pack(side=RIGHT)
+        self.btn_main_start = ttkb.Button(ctrl_right, text="▶ 启动", bootstyle="success", command=self.start_bot, width=10)
+        self.btn_main_start.pack(side=LEFT, padx=2)
+        self.btn_main_stop = ttkb.Button(ctrl_right, text="■ 停止", bootstyle="danger", state="disabled", command=self.stop_bot, width=8)
+        self.btn_main_stop.pack(side=LEFT, padx=2)
+        ttkb.Button(ctrl_right, text="⚙ 设置", bootstyle="outline-secondary", command=self.open_settings_window, width=8).pack(side=LEFT, padx=2)
+        ttkb.Button(ctrl_right, text="🪟 小窗", bootstyle="outline-warning", command=self.toggle_mode, width=6).pack(side=LEFT, padx=2)
+        ttkb.Button(ctrl_right, text="➕", bootstyle="outline-primary", command=self.launch_new_instance, width=3).pack(side=LEFT, padx=2)
 
-        action_row = ttkb.Frame(connect_card)
-        action_row.pack(fill=X)
-        self.btn_main_start = ttkb.Button(action_row, text="▶ 启动脚本", bootstyle="success", command=self.start_bot)
-        self.btn_main_start.pack(side=LEFT, fill=X, expand=True, padx=(0, 5))
-        self.btn_main_stop = ttkb.Button(action_row, text="■ 停止", bootstyle="danger", state="disabled", command=self.stop_bot, width=8)
-        self.btn_main_stop.pack(side=RIGHT, padx=(5, 0))
+        # ================== 3. 主内容区（tab 标签页占主体）==================
+        mid_pane = ttkb.Frame(outer)
+        mid_pane.pack(fill=BOTH, expand=True, pady=(0, 6))
+        mid_pane.columnconfigure(0, weight=3, uniform="mid")
+        mid_pane.columnconfigure(1, weight=7, uniform="mid")
+        mid_pane.rowconfigure(0, weight=1)
 
-        # 【快捷工具组】
-        tools_card = ttkb.Labelframe(left_col, text=" 高级与工具 ", padding=12, bootstyle="secondary")
-        tools_card.pack(fill=BOTH, expand=True)
-        
-        def make_tool_btn(parent, text, style, cmd):
-            btn = ttkb.Button(parent, text=text, bootstyle=style, command=cmd)
-            btn.pack(fill=X, pady=4)
-            return btn
-            
-        make_tool_btn(tools_card, "⚙️ 详细高级设置", "outline-secondary", self.open_settings_window)
-        make_tool_btn(tools_card, "➕ 启动多开实例", "outline-primary", self.launch_new_instance)
-        make_tool_btn(tools_card, "🪟 切换小窗模式", "outline-warning", self.toggle_mode)
-        
-        ttkb.Separator(tools_card, bootstyle="secondary").pack(fill=X, pady=8)
-        
-        # 两个并排的小按钮
-        tool_row = ttkb.Frame(tools_card)
-        tool_row.pack(fill=X)
-        ttkb.Button(tool_row, text="在线验证", bootstyle="outline-success", command=self.run_online_validation).pack(side=LEFT, fill=X, expand=True, padx=(0,4))
-        ttkb.Button(tool_row, text="国内网络方案", bootstyle="outline-info", command=self.show_cn_network_help).pack(side=RIGHT, fill=X, expand=True, padx=(4,0))
-        
-        make_tool_btn(tools_card, "📖 官方仓库与使用说明", "outline-dark", self.open_help_window).pack_configure(pady=(8,0))
+        # ---- 左侧：实时数据 + 采集环境信息 ----
+        left_col = ttkb.Frame(mid_pane)
+        left_col.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
 
+        stats_card = ttkb.Labelframe(left_col, text=" 实时数据 ", padding=10, bootstyle="dark")
+        stats_card.pack(fill=BOTH, expand=True)
 
-        # ----------------- 右侧：策略配置 Notebook标签页 -----------------
-        right_col = ttkb.Frame(content_pane)
+        for label, var in (
+            ("⏱ 运行时长", self.var_runtime_duration),
+            ("🛬 进场", self.var_approach),
+            ("🛫 离场", self.var_depart),
+            ("🅿️ 地勤(架次/人次)", self.var_stand_summary),
+            ("⚡ 效率", self.var_cycle_efficiency),
+            ("📊 数据来源", self.var_stats_source),
+        ):
+            r = ttkb.Frame(stats_card)
+            r.pack(fill=X, pady=3)
+            ttkb.Label(r, text=label, font=(DEFAULT_FONT, 9), bootstyle="secondary").pack(side=LEFT)
+            ttkb.Label(r, textvariable=var, font=(DEFAULT_FONT, 9, "bold"), bootstyle="inverse-info").pack(side=RIGHT)
+
+        # ---- 右侧：四个功能分类标签页（所有开关集中在此）----
+        right_col = ttkb.Frame(mid_pane)
         right_col.grid(row=0, column=1, sticky="nsew")
-        
+
         notebook = ttkb.Notebook(right_col, bootstyle="primary")
         notebook.pack(fill=BOTH, expand=True)
 
-        def add_toggle_row(parent, text, var, help_txt):
-            row = ttkb.Frame(parent)
-            row.pack(fill=X, pady=8)
-            ttkb.Checkbutton(
-                row, text=text, variable=var, bootstyle="success-round-toggle", command=lambda t=text, v=var: self._toggle_functional_switch(t, v)
-            ).pack(side=LEFT)
-            self.create_info_icon(row, help_txt).pack(side=LEFT, padx=10)
+        def _add_toggle(parent, text, var, tip):
+            r = ttkb.Frame(parent)
+            r.pack(fill=X, pady=4)
+            ttkb.Checkbutton(r, text=text, variable=var, bootstyle="success-round-toggle",
+                             command=lambda t=text, v=var: self._toggle_functional_switch(t, v)).pack(side=LEFT)
+            self.create_info_icon(r, tip).pack(side=LEFT, padx=8)
 
-        # [Tab 1] 游戏内策略
-        tab_game = ttkb.Frame(notebook, padding=15)
-        notebook.add(tab_game, text=" 游戏内策略 ")
-        
-        add_toggle_row(tab_game, "✈️ 自动领取地勤人员", self.var_bonus_staff, "地勤不足时尝试领取免费地勤，重新开始脚本后冷却重新计时。")
-        add_toggle_row(tab_game, "🚗 自动购买地勤车辆", self.var_vehicle_buy, "地勤车辆不足时自动购买（实验性功能）。")
-        add_toggle_row(tab_game, "💰 延误飞机自动贿赂", self.var_delay_bribe, "处理延误飞机时自动贿赂代理，会消耗银色飞机道具。")
-        add_toggle_row(tab_game, "🎲 任务处理顺序随机化", self.var_random_task, "随机打乱处理各项任务的顺序，降低行为固定化风险。")
-        add_toggle_row(tab_game, "🔒 塔台全开仅停机位", self.var_tower_open_stand_only, "塔台四个控制器全部开启时，强制限制只处理停机位。")
+        def _add_entry_row(parent, label_text, var, btn_text, btn_cmd, tip, width=6):
+            r = ttkb.Frame(parent)
+            r.pack(fill=X, pady=4)
+            ttkb.Label(r, text=label_text, font=(DEFAULT_FONT, 9)).pack(side=LEFT)
+            ttkb.Entry(r, textvariable=var, width=width).pack(side=LEFT, padx=5)
+            ttkb.Button(r, text=btn_text, bootstyle="outline-primary", command=btn_cmd, padding=(8, 0)).pack(side=LEFT, padx=5)
+            self.create_info_icon(r, tip).pack(side=LEFT, padx=5)
+
+        # [Tab 1] 游戏策略
+        tab1 = ttkb.Frame(notebook, padding=12)
+        notebook.add(tab1, text=" 🎮 游戏策略 ")
+        _add_toggle(tab1, "✈️ 自动领取地勤人员", self.var_bonus_staff, "地勤不足时尝试领取免费地勤")
+        _add_toggle(tab1, "🚗 自动购买地勤车辆", self.var_vehicle_buy, "地勤车辆不足时自动购买")
+        _add_toggle(tab1, "💰 延误飞机自动贿赂", self.var_delay_bribe, "处理延误飞机时自动贿赂代理")
+        _add_toggle(tab1, "🎲 任务处理顺序随机化", self.var_random_task, "随机打乱任务顺序")
+        _add_toggle(tab1, "🔒 塔台全开仅停机位", self.var_tower_open_stand_only, "塔台全部开启时只处理停机位")
+        _add_toggle(tab1, "⚙️ 塔台关闭时处理全部任务", self.var_cancel_stand_filter, "塔台关闭时取消停机位过滤")
 
         # [Tab 2] 挂机与防检测
-        tab_rhythm = ttkb.Frame(notebook, padding=15)
-        notebook.add(tab_rhythm, text=" 挂机与防检测 ")
-        
-        # 延时处理
-        ttkb.Label(tab_rhythm, text="自动延时塔台配置", font=("Microsoft YaHei UI", 10, "bold"), bootstyle="primary").pack(anchor="w", pady=(0, 10))
-        tower_row = ttkb.Frame(tab_rhythm)
-        tower_row.pack(fill=X, pady=(0, 15))
-        ttkb.Label(tower_row, text="延时控制器：").pack(side=LEFT)
-        ttkb.Entry(tower_row, textvariable=self.var_delay_count, width=6).pack(side=LEFT, padx=5)
-        ttkb.Label(tower_row, text="次").pack(side=LEFT)
-        ttkb.Button(tower_row, text="应用", bootstyle="outline-primary", command=self.on_confirm_tower_delay, padding=(10,0)).pack(side=LEFT, padx=10)
-        self.create_info_icon(tower_row, "填0关闭，最大144。仅延时手动开启的控制器，不会改变原塔台布局。").pack(side=LEFT)
+        tab2 = ttkb.Frame(notebook, padding=12)
+        notebook.add(tab2, text=" 💤 挂机与防检测 ")
+        ttkb.Label(tab2, text="塔台自动延时", font=(DEFAULT_FONT, 10, "bold"), bootstyle="primary").pack(anchor="w", pady=(0, 6))
+        _add_entry_row(tab2, "延时控制器：", self.var_delay_count, "应用", self.on_confirm_tower_delay,
+                       "0=关闭，最大144", 6)
+        ttkb.Separator(tab2, bootstyle="secondary").pack(fill=X, pady=10)
+        ttkb.Label(tab2, text="挂机模式", font=(DEFAULT_FONT, 10, "bold"), bootstyle="primary").pack(anchor="w", pady=(0, 6))
+        _add_toggle(tab2, "🛩️ 不起飞模式", self.var_no_takeoff_mode, "只接机和派车，不处理起飞")
+        _add_toggle(tab2, "🔄 独立小退控制", self.var_no_takeoff_logout_enabled, "挂机一定时间后自动重进释放内存")
 
-        ttkb.Separator(tab_rhythm, bootstyle="secondary").pack(fill=X, pady=15)
-
-        # 模式切换
-        ttkb.Label(tab_rhythm, text="挂机模式快速切换", font=("Microsoft YaHei UI", 10, "bold"), bootstyle="primary").pack(anchor="w", pady=(0, 10))
-        h_row = ttkb.Frame(tab_rhythm)
-        h_row.pack(fill=X)
-        col1 = ttkb.Frame(h_row)
-        col1.pack(side=LEFT, fill=X, expand=True)
-        col2 = ttkb.Frame(h_row)
-        col2.pack(side=LEFT, fill=X, expand=True)
-
-        add_toggle_row(col1, "不起飞模式", self.var_no_takeoff_mode, "停止发给离场跑道，只接机和派车。")
-        add_toggle_row(col2, "独立小退控制", self.var_no_takeoff_logout_enabled, "挂机一定时间后自动小退释放内存。")
-
-        # [Tab 3] 高级性能调优
-        tab_advanced = ttkb.Frame(notebook, padding=15)
-        notebook.add(tab_advanced, text=" 高级与性能 ")
-        
-        ttkb.Label(tab_advanced, text="识别策略级强化 (谨慎使用)", font=("Microsoft YaHei UI", 10, "bold"), bootstyle="danger").pack(anchor="w", pady=(0, 10))
-        add_toggle_row(tab_advanced, "⚡ 跳过二次校验 (温和提速)", self.var_speed_mode, "略微跳过动画二次校验，适合环境较稳定时使用。")
-        add_toggle_row(tab_advanced, "🔥 跳过地勤验证 (激进提速)", self.var_skip_staff, "速度大幅提升，但出现误判风险增加。")
-        add_toggle_row(tab_advanced, "⚙️ 塔台关闭时处理所有飞机", self.var_cancel_stand_filter, "在塔台关闭时，取消停机位过滤。")
-        
-        ttkb.Separator(tab_advanced, bootstyle="secondary").pack(fill=X, pady=15)
-        
-        ttkb.Label(tab_advanced, text="自动化守护", font=("Microsoft YaHei UI", 10, "bold"), bootstyle="primary").pack(anchor="w", pady=(0, 10))
-        add_toggle_row(tab_advanced, "🛡️ 启用防卡死自动恢复", self.var_anti_stuck_enabled, "自动侦测并尝试解除界面卡死，关闭则保留致命弹窗检测。")
-        stuck_row = ttkb.Frame(tab_advanced)
-        stuck_row.pack(fill=X, pady=(0, 5))
-        ttkb.Label(stuck_row, text="卡死容忍阈值：").pack(side=LEFT)
-        ttkb.Entry(stuck_row, textvariable=self.var_anti_stuck_threshold, width=6).pack(side=LEFT, padx=5)
-        ttkb.Button(stuck_row, text="应用", bootstyle="outline-primary", command=self.on_confirm_anti_stuck, padding=(10,0)).pack(side=LEFT, padx=10)
-        self.create_info_icon(stuck_row, "范围3-20。数值越小触发重置越频繁。").pack(side=LEFT)
+        # [Tab 3] 高级与性能
+        tab3 = ttkb.Frame(notebook, padding=12)
+        notebook.add(tab3, text=" ⚡ 高级与性能 ")
+        ttkb.Label(tab3, text="识别策略 (谨慎使用)", font=(DEFAULT_FONT, 10, "bold"), bootstyle="danger").pack(anchor="w", pady=(0, 6))
+        _add_toggle(tab3, "⚡ 跳过二次校验 (温和提速)", self.var_speed_mode, "跳过动画二次校验")
+        _add_toggle(tab3, "🔥 跳过地勤验证 (激进提速)", self.var_skip_staff, "大幅提升速度但增加误判风险")
+        ttkb.Separator(tab3, bootstyle="secondary").pack(fill=X, pady=10)
+        ttkb.Label(tab3, text="自动化守护", font=(DEFAULT_FONT, 10, "bold"), bootstyle="primary").pack(anchor="w", pady=(0, 6))
+        _add_toggle(tab3, "🛡️ 启用防卡死自动恢复", self.var_anti_stuck_enabled, "自动侦测并尝试解除界面卡死")
+        _add_entry_row(tab3, "卡死容忍阈值：", self.var_anti_stuck_threshold, "应用", self.on_confirm_anti_stuck,
+                       "3-20，越小触发越频繁", 6)
 
         # [Tab 4] 通知与统计
-        tab_notify = ttkb.Frame(notebook, padding=15)
-        notebook.add(tab_notify, text=" 通知与统计 ")
+        tab4 = ttkb.Frame(notebook, padding=12)
+        notebook.add(tab4, text=" 🔔 通知与统计 ")
+        ttkb.Label(tab4, text="手机推送", font=(DEFAULT_FONT, 10, "bold"), bootstyle="primary").pack(anchor="w", pady=(0, 6))
+        _add_toggle(tab4, "📱 手机报错提醒", self.var_notify_enabled, "严重错误时推送通知")
+        _add_toggle(tab4, "📊 定时统计汇报", self.var_stats_report_enabled, "按周期推送统计报表")
+        ttkb.Separator(tab4, bootstyle="secondary").pack(fill=X, pady=10)
+        ttkb.Label(tab4, text="公网 ADB 连接", font=(DEFAULT_FONT, 10, "bold"), bootstyle="primary").pack(anchor="w", pady=(0, 6))
+        adb_frame = ttkb.Frame(tab4)
+        adb_frame.pack(fill=X)
+        ttkb.Label(adb_frame, text="地址：", font=(DEFAULT_FONT, 9)).pack(side=LEFT)
+        ttkb.Entry(adb_frame, textvariable=self.var_public_adb_targets, width=40).pack(side=LEFT, padx=5, fill=X, expand=True)
 
-        ttkb.Label(tab_notify, text="统计报告推送", font=("Microsoft YaHei UI", 10, "bold"), bootstyle="primary").pack(anchor="w", pady=(0, 10))
-        add_toggle_row(tab_notify, "📊 定时统计汇报", self.var_stats_report_enabled, "按周期(可在高级设置中调整)向手机推送统计报表。")
-
-        ttkb.Separator(tab_notify, bootstyle="secondary").pack(fill=X, pady=15)
-        
-        ttkb.Label(tab_notify, text="异常状态告警", font=("Microsoft YaHei UI", 10, "bold"), bootstyle="danger").pack(anchor="w", pady=(0, 10))
-        add_toggle_row(tab_notify, "📱 手机报错提醒", self.var_notify_enabled, "发生严重错误、卡死或自动停机时推送警报，需先配置 Webhook。")
-
-        ttkb.Separator(tab_notify, bootstyle="secondary").pack(fill=X, pady=15)
-        stats_card = ttkb.Labelframe(tab_notify, text=" 实时运行数据 ", padding=12, bootstyle="warning")
-        stats_card.pack(fill=X, pady=(0, 10))
-        for label_text, var in (
-            ("运行时长", self.var_runtime_duration),
-            ("进场飞机", self.var_approach),
-            ("离场飞机", self.var_depart),
-            ("分配地勤", self.var_stand_summary),
-            ("当前效率", self.var_cycle_efficiency),
-            ("数据来源", self.var_stats_source),
-        ):
-            row = ttkb.Frame(stats_card)
-            row.pack(fill=X, pady=4)
-            ttkb.Label(row, text=label_text, font=("Microsoft YaHei UI", 9), bootstyle="secondary").pack(side=LEFT)
-            ttkb.Label(row, textvariable=var, font=("Microsoft YaHei UI", 9, "bold"), bootstyle="inverse-info").pack(side=RIGHT)
-
-        # ================== 3. 底部终端日志区 ==================
-        log_group = ttkb.Labelframe(outer, text=" 实时终端输出 ", padding=10, bootstyle="dark")
-        log_group.pack(fill=BOTH, expand=True, pady=(20, 0))
-        
-        # 终端风格日志输出
-        self.txt_main_log = ScrolledText(log_group, state="disabled", font=("Consolas", 10), bg="#1E1E1E", fg="#D4D4D4", relief="flat", insertbackground="white")
+        # ================== 4. 底部终端日志区 ==================
+        log_group = ttkb.Labelframe(outer, text=" 实时终端输出 ", padding=6, bootstyle="dark")
+        log_group.pack(fill=BOTH, expand=True, pady=(0, 0))
+        self.txt_main_log = ScrolledText(log_group, state="disabled", font=(MONO_FONT, 9), bg="#1E1E1E", fg="#D4D4D4", relief="flat", insertbackground="white")
         self.txt_main_log.pack(fill=BOTH, expand=True)
         self.redirector.add_widget(self.txt_main_log)
-        
-        # 延迟执行首次扫描，避免启动卡顿
+
         self.after(100, self._do_initial_scan)
 
     def _do_initial_scan(self):
@@ -1842,7 +1802,7 @@ class Application(ttkb.Window):
 
         outer = ttkb.Frame(win, padding=16)
         outer.pack(fill=BOTH, expand=True)
-        ttkb.Label(outer, text="自愿资助作者买杯咖啡", font=("Microsoft YaHei UI", 16, "bold"), bootstyle="primary").pack(anchor="w")
+        ttkb.Label(outer, text="自愿资助作者买杯咖啡", font=(DEFAULT_FONT, 16, "bold"), bootstyle="primary").pack(anchor="w")
         ttkb.Label(
             outer,
             text="完全自愿，无任何功能限制；感谢支持项目持续维护。",
@@ -1988,11 +1948,11 @@ class Application(ttkb.Window):
         shell.pack(fill=BOTH, expand=True)
         header = ttkb.Frame(shell, padding=(18, 16))
         header.pack(fill=X)
-        ttkb.Label(header, text="使用说明与网络方案", font=("Microsoft YaHei UI", 16, "bold"), bootstyle="primary").pack(anchor="w")
+        ttkb.Label(header, text="使用说明与网络方案", font=(DEFAULT_FONT, 16, "bold"), bootstyle="primary").pack(anchor="w")
         ttkb.Label(header, text=f"版本 {LOCAL_VERSION} · 官方源 {OFFICIAL_REPO_NAME}", bootstyle="secondary").pack(anchor="w", pady=(4, 0))
         container = ttkb.Labelframe(shell, text="离线帮助", padding=12, bootstyle="info")
         container.pack(fill=BOTH, expand=True, pady=(14, 0))
-        text_area = tk.Text(container, font=("Microsoft YaHei UI", 10), wrap="word", bg="#fcfbf7", fg="#333333",
+        text_area = tk.Text(container, font=(DEFAULT_FONT, 10), wrap="word", bg="#fcfbf7", fg="#333333",
                             relief="flat")
         text_area.pack(side=LEFT, fill=BOTH, expand=True)
         scroll = ttkb.Scrollbar(container, command=text_area.yview)
@@ -2141,7 +2101,7 @@ class Application(ttkb.Window):
             yv = int(step * i)
             yp = ch - margin_b - (yv / v_max) * plot_h
             canvas.create_line(margin_l - 3, yp, cw - margin_r, yp, fill="#eeeeee", dash=(2, 4))
-            canvas.create_text(margin_l - 6, yp, text=str(yv), anchor="e", font=("Consolas", 7), fill="#888888")
+            canvas.create_text(margin_l - 6, yp, text=str(yv), anchor="e", font=(MONO_FONT, 7), fill="#888888")
 
         if n == 1:
             spacing = plot_w
@@ -2175,7 +2135,7 @@ class Application(ttkb.Window):
                 xp = margin_l + si * sp
                 if si % max(1, seg_n // 8) == 0 or si == seg_n - 1:
                     canvas.create_text(xp, ch - margin_b + 12, text=labels[gi],
-                                       font=("Consolas", 7), fill="#888888", tags="plotdata")
+                                       font=(MONO_FONT, 7), fill="#888888", tags="plotdata")
 
             points = []
             for si, gi in enumerate(seg):
@@ -2198,7 +2158,7 @@ class Application(ttkb.Window):
                                    width=1, tags="plotdata")
                 if v > 0:
                     canvas.create_text(xp, yp - 10, text=str(v),
-                                       font=("Consolas", 7), fill=color, tags="plotdata")
+                                       font=(MONO_FONT, 7), fill=color, tags="plotdata")
 
         _draw(state["offset"])
 
@@ -2259,8 +2219,8 @@ class Application(ttkb.Window):
         win = ttkb.Toplevel(self)
         self.settings_win = win
         win.title("高级设置")
-        win.geometry("1280x860")
-        win.minsize(1220, 820)
+        win.geometry("1280x720")
+        win.minsize(120, 140)
         win.transient(self)
         win.grab_set()
         body = ttkb.Frame(win, padding=20)
@@ -2268,7 +2228,7 @@ class Application(ttkb.Window):
 
         header = ttkb.Frame(body, padding=(16, 14))
         header.pack(fill=X, pady=(0, 12))
-        ttkb.Label(header, text="高级设置中心", font=("Microsoft YaHei UI", 15, "bold"), bootstyle="primary").pack(anchor="w")
+        ttkb.Label(header, text="高级设置中心", font=(DEFAULT_FONT, 15, "bold"), bootstyle="primary").pack(anchor="w")
         ttkb.Label(header, text="统一新版风格，保留设备、触控、防检测和在线校验相关配置。", bootstyle="secondary").pack(anchor="w", pady=(4, 0))
 
         top_action_row = ttkb.Frame(body)
@@ -2451,7 +2411,7 @@ class Application(ttkb.Window):
             wraplength=520,
             justify="left",
         ).pack(anchor="w", pady=(4, 6))
-        public_adb_box = ScrolledText(tab_device_left, height=6, font=("Consolas", 9), relief="flat")
+        public_adb_box = ScrolledText(tab_device_left, height=6, font=(MONO_FONT, 9), relief="flat")
         public_adb_box.pack(fill=X, pady=(0, 6))
         public_adb_box.insert("1.0", self.var_public_adb_targets.get())
 

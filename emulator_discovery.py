@@ -2,12 +2,15 @@
 """
 模拟器发现模块 - 参考 ALAS (AzurLaneAutoScript) 实现
 从 vbox/nemu 配置文件、注册表等获取模拟器实例与 ADB 端口
+注意：注册表扫描、MuMu 路径发现等功能仅限 Windows 平台。
 """
 
 import os
 import re
 import sys
 from typing import List, Optional, Tuple
+
+from platform_utils import IS_WINDOWS
 
 # 资助功能完整性守卫标记（由 gui_launcher 在严格模式下联动校验）
 WOA_FEATURE_GUARD_TOKEN = "WOA_DONATE_GUARD_V1"
@@ -86,7 +89,10 @@ def _get_mumu_base_dirs() -> List[str]:
     """
     获取所有可能的 MuMu 模拟器基础目录（去重）
     优先级：注册表 > Program Files > 各盘符扫描
+    仅在 Windows 上有效。
     """
+    if not IS_WINDOWS:
+        return []
     bases = []
     seen = set()
 

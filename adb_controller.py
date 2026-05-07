@@ -13,6 +13,8 @@ import random
 import threading
 import shutil
 
+from platform_utils import ADB_EXE_NAME, CREATE_NO_WINDOW, IS_WINDOWS, safe_subprocess_run
+
 from woa_debug import (
     _woa_debug_enabled, woa_debug_set_runtime_started, _woa_debug_log,
     get_woa_debug_dir, read_image_safe, save_image_safe,
@@ -32,16 +34,15 @@ def kill_adb_server():
     """终止 adb server，释放对 adb_tools 目录的占用，避免无法删除打包文件夹"""
     adb_path = CURRENT_ADB_PATH if CURRENT_ADB_PATH and os.path.isfile(CURRENT_ADB_PATH) else None
     if not adb_path or adb_path == "adb":
-        adb_path = get_bundled_resource_path(os.path.join("adb_tools", "adb.exe"))
+        adb_path = get_bundled_resource_path(os.path.join("adb_tools", ADB_EXE_NAME))
     if not os.path.isfile(adb_path):
         return
     try:
-        subprocess.run(
+        safe_subprocess_run(
             [adb_path, "kill-server"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             timeout=3,
-            creationflags=0x08000000,
         )
     except Exception:
         pass
@@ -125,7 +126,7 @@ def ensure_local_platform_tools():
     else:
         errors.append("未找到内置 platform-tools 目录")
 
-    adb_path = os.path.join(target_dir, "adb.exe")
+    adb_path = os.path.join(target_dir, ADB_EXE_NAME)
     ready = os.path.isfile(adb_path)
     return {
         "source_dir": source_dir,
@@ -192,13 +193,13 @@ if getattr(sys, "frozen", False):
 
 
 def find_adb_executable():
-    """自动搜索 adb.exe"""
-    internal_adb = get_bundled_resource_path(os.path.join("adb_tools", "adb.exe"))
+    """自动搜索 adb 可执行文件（跨平台）"""
+    internal_adb = get_bundled_resource_path(os.path.join("adb_tools", ADB_EXE_NAME))
     if os.path.exists(internal_adb):
         return internal_adb
     if getattr(sys, 'frozen', False):
         exe_dir = os.path.dirname(sys.executable)
-        external_adb = os.path.join(exe_dir, "adb_tools", "adb.exe")
+        external_adb = os.path.join(exe_dir, "adb_tools", ADB_EXE_NAME)
         if os.path.exists(external_adb):
             return external_adb
     resolved = shutil.which("adb")
@@ -544,7 +545,7 @@ class AdbController:
                     stdin=subprocess.PIPE,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
-                    creationflags=0x08000000
+                    creationflags=CREATE_NO_WINDOW,
                 )
                 print(f">>> [底层] ADB Shell 长连接已建立: {self.device_serial}")
         except Exception as e:
@@ -618,7 +619,7 @@ class AdbController:
 
         is_net = "127.0.0.1" not in (self.device_serial or "")
         port = self._minitouch_base_port
-        adb_path = get_bundled_resource_path(os.path.join("adb_tools", "adb.exe"))
+        adb_path = get_bundled_resource_path(os.path.join("adb_tools", ADB_EXE_NAME))
         if not os.path.isfile(adb_path):
             adb_path = "adb"
 
@@ -645,7 +646,7 @@ class AdbController:
                     stdin=subprocess.DEVNULL,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
-                    creationflags=0x08000000 if sys.platform == "win32" else 0,
+                    creationflags=CREATE_NO_WINDOW,
                 )
                 time.sleep(2.0 if is_net else 1.0)
                 if proc.poll() is not None:
@@ -962,7 +963,7 @@ class AdbController:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 timeout=timeout,
-                creationflags=0x08000000
+                creationflags=CREATE_NO_WINDOW,
             )
             return result
         except subprocess.TimeoutExpired:
@@ -974,7 +975,9 @@ class AdbController:
 
     @staticmethod
     def _find_mumu_adb():
-        """尝试从常见路径及 ALAS 风格发现找到 MuMu 自带的 adb"""
+        """尝试从常见路径及 ALAS 风格发现找到 MuMu 自带的 adb（仅 Windows）"""
+        if not IS_WINDOWS:
+            return None
         if _discover_mumu_adb:
             for p in _discover_mumu_adb():
                 if p and os.path.isfile(p):
@@ -1006,7 +1009,9 @@ class AdbController:
 
     @staticmethod
     def _get_mumu_ports_from_vms():
-        """从 MuMu vms 及注册表获取 ADB 端口（ALAS 风格 + 原有逻辑）"""
+        """从 MuMu vms 及注册表获取 ADB 端口（ALAS 风格 + 原有逻辑，仅 Windows）"""
+        if not IS_WINDOWS:
+            return []
         if discover_all_serials_and_ports:
             _, ports = discover_all_serials_and_ports()
             if ports:
@@ -1052,10 +1057,10 @@ class AdbController:
     def scan_devices(debug=False):
         """扫描所有可用模拟器（MuMu/雷电/BlueStacks 等），列出供用户选择"""
         debug = debug or _woa_debug_enabled()
-        creationflags = 0x08000000
+        creationflags = CREATE_NO_WINDOW
         _woa_debug_log("scan_devices 开始")
         # 优先使用自带 adb_tools，以便同时连接 MuMu、雷电等不同模拟器
-        bundled = get_bundled_resource_path(os.path.join("adb_tools", "adb.exe"))
+        bundled = get_bundled_resource_path(os.path.join("adb_tools", ADB_EXE_NAME))
         adb_path = CURRENT_ADB_PATH or "adb"
         if os.path.isfile(bundled):
             scan_adb = bundled
@@ -1320,7 +1325,7 @@ class AdbController:
                 return False
             adb_path = self.adb_path if self.adb_path and os.path.isfile(self.adb_path) else None
             if not adb_path:
-                adb_path = get_bundled_resource_path(os.path.join("adb_tools", "adb.exe"))
+                adb_path = get_bundled_resource_path(os.path.join("adb_tools", ADB_EXE_NAME))
             adb_path = adb_path if adb_path and os.path.isfile(adb_path) else "adb"
             try:
                 self._droidcast_proc = subprocess.Popen(
@@ -1329,7 +1334,7 @@ class AdbController:
                     stdin=subprocess.DEVNULL,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
-                    creationflags=0x08000000 if sys.platform == "win32" else 0,
+                    creationflags=CREATE_NO_WINDOW,
                 )
             except Exception as e:
                 if not self._droidcast_fallback_logged:
@@ -1588,7 +1593,7 @@ class AdbController:
             cmd = [adb, "-s", self.device_serial, "exec-out", "screencap", "-p"]
             try:
                 result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=8,
-                                        creationflags=0x08000000, cwd=os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else None)
+                                        creationflags=CREATE_NO_WINDOW, cwd=os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else None)
                 if result.stdout and len(result.stdout) > 100:
                     image_array = np.frombuffer(result.stdout, np.uint8)
                     img = cv2.imdecode(image_array, cv2.IMREAD_COLOR)
