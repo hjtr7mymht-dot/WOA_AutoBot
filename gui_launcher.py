@@ -128,7 +128,7 @@ if INSTANCE_ID is None:
 CONFIG_FILE = os.path.join(_DATA_BASE, "config.json" if INSTANCE_ID == 1 else f"config_{INSTANCE_ID}.json")
 STATS_FILE = os.path.join(_DATA_BASE, "woa_stats.csv")
 
-LOCAL_VERSION = "1.2.0"
+LOCAL_VERSION = "1.2.1"
 OFFICIAL_REPO_URL = "https://github.com/hjtr7mymht-dot/WOA_AutoBot"
 OFFICIAL_REPO_NAME = "hjtr7mymht-dot/WOA_AutoBot"
 ONLINE_VERSION_PATH = "version.json"
@@ -401,7 +401,7 @@ class Application(ttkb.Window):
         if IS_WINDOWS:
             try:
                 import ctypes
-                myappid = 'woabot.launcher.v1.2.0'
+                myappid = 'woabot.launcher.v1.2.1'
                 ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
             except Exception:
                 pass
@@ -557,6 +557,8 @@ class Application(ttkb.Window):
         self.after(100, _emit_notice)
 
         self.after(500, self.setup_window_icon)
+        # 首次启动自动弹出使用说明
+        self.after(800, self._auto_show_help_on_first_launch)
         # 在线验证（后台静默执行，不影响使用）
         self.after(2200, self._startup_online_update_check)
         self.bind("<Map>", self._on_window_map)
@@ -1401,7 +1403,7 @@ class Application(ttkb.Window):
             btn.configure(state="disabled")
         self.update_idletasks()
         try:
-            devs = self._scan_devices_with_public_targets(debug=True)
+            devs = self._scan_devices_with_public_targets(debug=False)
         except Exception as e:
             print(f">>> [扫描异常] {e}")
             devs = []
@@ -1865,10 +1867,10 @@ class Application(ttkb.Window):
 - 脚本尚不稳定，如果造成账号内游戏币损失，本人概不负责！使用辅助工具有风险，请自行评估，如造成账号封禁，与作者无关！
 
 【环境配置】
-1. 仅支持在Windows系统上使用的安卓模拟器，本脚本专为MuMu模拟器优化，强烈推荐使用MuMu模拟器，建议使用横屏分辨率，脚本会自动适配。
-2. Mumu模拟器默认地址为127.0.0.1:16384（其他模拟器或多开，请到模拟器设置内查看），并且自备加速器，保证网络通畅。
+1. 支持 Windows/macOS 双平台，推荐使用 MuMu 模拟器（Windows）/ Android 模拟器（macOS），建议使用横屏分辨率，脚本会自动适配。
+2. Mumu模拟器默认ADB地址为127.0.0.1:16384（其他模拟器或多开，请到模拟器设置内查看），并且自备加速器，保证网络通畅。
 3. 请优先连接127.0.0.1:16384，127.0.0.1:16416之类的端口，尽量不要连接127.0.0.1:5555，emulator-5554之类的端口。
-4. 使用MuMu模拟器时，请在设备设置中关闭“网络桥接模式”，关闭“后台挂机时保活运行”选项。
+4. 使用MuMu模拟器时，请在设备设置中关闭"网络桥接模式"，关闭"后台挂机时保活运行"选项。
 5. - 如模拟器连接遇到问题，请首先尝试手动指定ADB路径。
     - 如nemu_ipc方案无法启用，请首先尝试手动指定MuMu安装路径（指定到例如D:\\Program Files\\MuMuPlayer即可，不要指定到MuMuPlayer\\nx_main文件夹）。
    - 如遇到未知问题，请尝试切换模拟器渲染模式为DirectX。
@@ -1880,17 +1882,24 @@ class Application(ttkb.Window):
 4. 机位分配只会点第一个，如果不希望C型机停DEF的机位等情况，需要手动筛选机位停机类型，并且与时刻表功能不兼容，请把时刻表重置。
 
 【功能说明】
-1. 推荐使用nemu_ipc + ADB 或 uiautomator2 + ADB 的方案。脚本运行速度主要取决于[截图方案]，运行速度如下：nemu_ipc > uiautomator2 >> droidcast_raw >= ADB。
-2. 使用高速方案（如nemu_ipc或uiautomator2）时，由于速度很快，出错会增多，非常不建议关闭“跳过二次校验”和“跳过地勤分配验证”开关。 
+1. 推荐使用 uiautomator2 + ADB 方案。脚本运行速度主要取决于[截图方案]，运行速度如下：uiautomator2 >> ADB。
+2. 使用高速方案时，由于速度很快，出错会增多，非常不建议关闭"跳过二次校验"和"跳过地勤分配验证"开关。
 3. 脚本运行时必须保持游戏右侧筛选选项中，仅筛选出带有黄色感叹号的待处理飞机。但您无需担心！脚本可以自动检测并调整筛选状态。
-4. 使用“自动延时塔台”功能前，请保证您已开启塔台（且目前仅支持四个控制器全开），并设置好带有[延时]按钮的界面，脚本不会主动调整。
+4. 使用"自动延时塔台"功能前，请保证您已开启塔台，并设置好带有[延时]按钮的界面，脚本不会主动调整。
+5. 塔台全开时脚本会自动一键全部续费；部分开启时单独续费每个控制器。
 
-【在线验证与国内网络】
-1. 脚本会优先通过 GitHub Raw 访问官方仓库，如果失败会自动回退到 jsDelivr 和 ghproxy。
-2. 若在线验证失败，请打开主界面的“国内网络方案”查看回退说明，并在系统网络层配置代理或分流。
-3. 当前官方仓库为 https://github.com/hjtr7mymht-dot/WOA_AutoBot。
+【macOS 注意事项】
+1. macOS 版以 .dmg 格式分发，双击即可安装。
+2. 首次打开如提示"未验证开发者"，请在访达中右键 → 打开 → 仍要打开。
+3. 需要安装 Android Platform Tools 或将项目内 adb_tools/adb 加入 PATH。
+4. nemu_ipc 为 MuMu 模拟器专属（仅 Windows），macOS 上自动回退到 ADB 截图。
 
-【已知问题和缺陷】
+【在线验证】
+1. 当前版本已完全支持离线模式，所有功能无需网络即可运行。
+2. 在线验证仅在后台静默执行版本检测，不会阻断任何操作。
+3. 如检测到新版本会弹窗提示，不会自动下载或覆盖。
+
+【已知问题和缺陷】【已知问题和缺陷】
 1. 脚本本身支持多开，但测试并不充分，多开很可能存在未知问题。若脚本正在运行时，开启（或关闭）第二个脚本或类似软件（如ALAS），会导致脚本运行中断，请注意，尝试停止后再重新运行。
 2. 脚本很有可能被杀毒软件误杀，如您遇到类似问题，请关闭杀毒软件。
 3. 脚本处理[需要维护]的飞机时，暂无法应对绿币不足的情况，请您根据机队规模，预留充足的绿币。
@@ -1916,6 +1925,13 @@ class Application(ttkb.Window):
         if self._help_badge is not None:
             self._help_badge.destroy()
             self._help_badge = None
+
+    def _auto_show_help_on_first_launch(self):
+        """首次启动时自动弹出使用说明窗口"""
+        if not self.config.get("popup_shown", False):
+            self.config["popup_shown"] = True
+            self.save_config()
+            self.open_help_window()
 
     def open_help_window(self):
         win = ttkb.Toplevel(self)

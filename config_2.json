@@ -2,6 +2,7 @@
   "adb_path": "c:\\Users\\wsnbb\\Desktop\\WOA_AutoBot_By.RAY_\\adb_tools\\adb.exe",
   "anti_stuck_enabled": true,
   "anti_stuck_threshold": 6,
+  "approach_depart_ratio": "0",
   "auto_delay_count": 0,
   "bonus_staff": false,
   "delay_bribe": false,

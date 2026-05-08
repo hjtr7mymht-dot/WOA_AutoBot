@@ -1,14 +1,14 @@
 {
-  "version": "1.2.0",
+  "version": "1.2.1",
   "package_urls": [
     {
       "name": "GitHub Release",
-      "url": "https://github.com/hjtr7mymht-dot/WOA_AutoBot/releases/download/1.2.0/WOA_AutoBot.zip"
+      "url": "https://github.com/hjtr7mymht-dot/WOA_AutoBot/releases/download/1.2.1/WOA_AutoBot.zip"
     },
     {
       "name": "ghproxy Release",
-      "url": "https://ghproxy.cn/https://github.com/hjtr7mymht-dot/WOA_AutoBot/releases/download/1.2.0/WOA_AutoBot.zip"
+      "url": "https://ghproxy.cn/https://github.com/hjtr7mymht-dot/WOA_AutoBot/releases/download/1.2.1/WOA_AutoBot.zip"
     }
   ],
-  "notes": "1.2.0：macOS 完整兼容，支持原生 .app 打包分发；UI 重构消灭大面积空白，所有开关集中在四个功能标签页；修复车辆不足时任务卡死问题；修复塔台关闭后仍错误锁定停机坪筛选的问题；小退后自动重检塔台状态。"
+  "notes": "1.2.1：塔台延时全面优化，全开时一键全部续费，部分开启时逐控制器精准续费；修复延时确认点击失败问题；离线模式完整可用；默认筛选模式改为全部勾选。"
 }

@@ -1,4 +1,4 @@
-WOA AutoBot v1.2.0 打包指南
+WOA AutoBot v1.2.1 打包指南
 ===========================
 
 macOS DMG 打包 (在当前 Mac 上已完成)

@@ -1185,7 +1185,7 @@ class AdbController:
                 _scan_procs.append(p)
             except Exception:
                 pass
-        time.sleep(1.5)
+        time.sleep(0.8)
         for p in _scan_procs:
             try:
                 safe_popen_wait(p, timeout=0.5)

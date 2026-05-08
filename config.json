@@ -2,6 +2,7 @@
   "anti_stuck_enabled": true,
   "anti_stuck_threshold": 3,
   "anti_stuck_timeout": 28.0,
+  "approach_depart_ratio": "1:2",
   "auto_delay_count": 0,
   "auto_staff_minus_one": true,
   "bonus_staff": false,
