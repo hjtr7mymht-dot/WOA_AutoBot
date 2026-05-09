@@ -5,24 +5,36 @@ build/
 *.dist/
 *.build/
 *.exe
-*.spec
+!WOA_AutoBot.spec
+!WOA_AutoBot_mac.spec
 
 # 排除参考项目
 AzurLaneAutoScript-master/
 
 # 排除本地配置与日志
 config.json
+config_*.json
 *.log
 woa_stats.csv
+woa_stats.csv.lock
+instance_*.lock
 nemu_ipc_debug/
 droidcast_raw_debug/
 list_detect_debug/
 woa_debug/
 
+# 排除 macOS 系统文件
+.DS_Store
+**/.DS_Store
+
+# 排除 electron 相关（实验性）
+electron-app/
+
 # 排除 Python 缓存与环境
 __pycache__/
 *.py[cod]
 .venv/
+.venv-312/
 venv/
 .vscode/
 .idea/

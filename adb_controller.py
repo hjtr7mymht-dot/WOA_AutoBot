@@ -13,7 +13,7 @@ import random
 import threading
 import shutil
 
-from platform_utils import ADB_EXE_NAME, CREATE_NO_WINDOW, IS_WINDOWS, safe_subprocess_run
+from platform_utils import ADB_EXE_NAME, CREATE_NO_WINDOW, IS_WINDOWS, safe_subprocess_run, safe_popen_wait
 
 from woa_debug import (
     _woa_debug_enabled, woa_debug_set_runtime_started, _woa_debug_log,
@@ -23,8 +23,8 @@ from woa_debug import (
 )
 from nemu_ipc import NemuIpcHelper, _load_dll_safe, NEMU_IPC_DEBUG
 
-# 资助功能完整性守卫标记（由 gui_launcher 在严格模式下联动校验）
-WOA_FEATURE_GUARD_TOKEN = "WOA_DONATE_GUARD_V1"
+# 资助功能完整性守卫标记（从 core 导入）
+from core import FEATURE_GUARD_TOKEN as WOA_FEATURE_GUARD_TOKEN
 
 # 用于进程退出时清理残留（含非正常关闭）
 _adb_instances = []
@@ -957,13 +957,12 @@ class AdbController:
             cmd_list.extend(args.split())
 
         try:
-            result = subprocess.run(
+            result = safe_subprocess_run(
                 cmd_list,
                 shell=False,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 timeout=timeout,
-                creationflags=CREATE_NO_WINDOW,
             )
             return result
         except subprocess.TimeoutExpired:
@@ -1103,7 +1102,7 @@ class AdbController:
 
         def _devices_list():
             try:
-                r = subprocess.run([scan_adb, "devices"], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                r = safe_subprocess_run([scan_adb, "devices"], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                    timeout=8, creationflags=creationflags)
                 out = (r.stdout or b"").decode('utf-8', errors='ignore')
                 err = (r.stderr or b"").decode('utf-8', errors='ignore')
@@ -1131,13 +1130,13 @@ class AdbController:
         # 仅在没有任何已连接设备时才重启 server
         if not pre_devices:
             try:
-                subprocess.run([scan_adb, "kill-server"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                safe_subprocess_run([scan_adb, "kill-server"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                timeout=3, creationflags=creationflags)
             except Exception:
                 pass
             time.sleep(0.25)
             try:
-                subprocess.run([scan_adb, "start-server"], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                safe_subprocess_run([scan_adb, "start-server"], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                timeout=5, creationflags=creationflags)
             except Exception as e:
                 if debug:
@@ -1186,14 +1185,14 @@ class AdbController:
                 _scan_procs.append(p)
             except Exception:
                 pass
-        time.sleep(1.5)
+        time.sleep(0.8)
         for p in _scan_procs:
             try:
-                p.wait(timeout=0.5)
+                safe_popen_wait(p, timeout=0.5)
             except subprocess.TimeoutExpired:
                 try:
                     p.terminate()
-                    p.wait(timeout=0.3)
+                    safe_popen_wait(p, timeout=0.3)
                 except Exception:
                     try:
                         p.kill()
@@ -1592,7 +1591,7 @@ class AdbController:
             adb = self.adb_path
             cmd = [adb, "-s", self.device_serial, "exec-out", "screencap", "-p"]
             try:
-                result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=8,
+                result = safe_subprocess_run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=8,
                                         creationflags=CREATE_NO_WINDOW, cwd=os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else None)
                 if result.stdout and len(result.stdout) > 100:
                     image_array = np.frombuffer(result.stdout, np.uint8)

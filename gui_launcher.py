@@ -18,7 +18,18 @@ from tkinter import filedialog, messagebox
 from tkinter.scrolledtext import ScrolledText
 from tkinter.constants import BOTH, END, LEFT, RIGHT, TOP, X, Y
 
-from platform_utils import IS_WINDOWS, CREATE_NO_WINDOW, try_lock_file, lock_file, unlock_file, ADB_EXE_NAME, IS_MAC
+# ─── 核心共享模块 ───────────────────────────────────────
+from core import (
+    IS_WINDOWS, IS_MAC, ADB_EXE_NAME, CREATE_NO_WINDOW,
+    try_lock_file, lock_file, unlock_file,
+    safe_subprocess_run, get_app_data_dir,
+    get_resource_path, get_bundled_resource_path, ICON_DIR,
+    get_woa_debug_dir,
+    FEATURE_GUARD_TOKEN, LOCAL_VERSION, MAX_INSTANCES,
+    OFFICIAL_REPO_URL, OFFICIAL_REPO_NAME, ONLINE_VERSION_PATH,
+    REQUIRED_GUARD_MODULES,
+    DEFAULT_FONT, MONO_FONT, MUMU_PORTS,
+)
 
 try:
     import orjson
@@ -48,55 +59,24 @@ except ImportError:
     get_mumu_adb_paths = None
 
 # MuMu 常用 ADB 端口（部分机型如 MuMu12+Vulkan 需用 MuMu 自带 adb 才能正常点击）
-_MUMU_PORTS = {16384, 16385, 16416, 16448, 7555, 5555}
+# 从 core.constants 导入
+_MUMU_PORTS = MUMU_PORTS  # 向后兼容别名
 
-# 跨平台默认字体
-if IS_MAC:
-    DEFAULT_FONT = "SF Pro"
-    MONO_FONT = "Menlo"
-elif IS_WINDOWS:
-    DEFAULT_FONT = "Microsoft YaHei UI"
-    MONO_FONT = "Consolas"
-else:
-    DEFAULT_FONT = "Sans"
-    MONO_FONT = "Monospace"
+# 跨平台默认字体 - 从 core.constants 已导入
+# DEFAULT_FONT / MONO_FONT 已在上方 import 中定义
 
+# get_resource_path / get_bundled_resource_path 已从 core.resources 导入
+# _ICON_DIR → ICON_DIR 已从 core.resources 导入
+# MAX_INSTANCES 已从 core.constants 导入
 
-# 资源路径获取（兼容 PyInstaller 与 Nuitka）
-def get_resource_path(relative_path):
-    if getattr(sys, 'frozen', False):
-        if hasattr(sys, '_MEIPASS'):
-            base = sys._MEIPASS
-        else:
-            base = os.path.dirname(sys.executable)
-        return os.path.join(base, relative_path)
-    base_path = os.path.dirname(os.path.abspath(__file__))
-    p1 = os.path.join(base_path, relative_path)
-    if os.path.exists(p1):
-        return p1
-    if hasattr(sys, 'executable'):
-        exe_path = os.path.dirname(sys.executable)
-        p2 = os.path.join(exe_path, relative_path)
-        if os.path.exists(p2):
-            return p2
-    p3 = os.path.join(os.getcwd(), relative_path)
-    if os.path.exists(p3):
-        return p3
-    return p1
-
-if cached and TTLCache:
-    get_resource_path = cached(cache=TTLCache(maxsize=128, ttl=300))(get_resource_path)
-
-
-_ICON_DIR = "icon"
-
-MAX_INSTANCES = 3
+# 数据存储路径（开发模式：当前目录；打包后：系统 Application Support）
+_DATA_BASE = get_app_data_dir()
 
 # === 多实例支持 ===
 def _acquire_instance():
     """自动获取可用的实例槽位 (1~MAX_INSTANCES)，通过文件锁防止冲突。"""
     for i in range(1, MAX_INSTANCES + 1):
-        lock_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), f"instance_{i}.lock")
+        lock_path = os.path.join(_DATA_BASE, f"instance_{i}.lock")
         try:
             fh = open(lock_path, "w")
             fh.write(str(i))
@@ -122,22 +102,14 @@ if INSTANCE_ID is None:
     sys.exit(1)
 
 # 按实例隔离配置和统计文件
-CONFIG_FILE = "config.json" if INSTANCE_ID == 1 else f"config_{INSTANCE_ID}.json"
-STATS_FILE = "woa_stats.csv"
+CONFIG_FILE = os.path.join(_DATA_BASE, "config.json" if INSTANCE_ID == 1 else f"config_{INSTANCE_ID}.json")
+STATS_FILE = os.path.join(_DATA_BASE, "woa_stats.csv")
 
-LOCAL_VERSION = "1.1.6"
-OFFICIAL_REPO_URL = "https://github.com/hjtr7mymht-dot/WOA_AutoBot"
-OFFICIAL_REPO_NAME = "hjtr7mymht-dot/WOA_AutoBot"
-ONLINE_VERSION_PATH = "version.json"
+# 以下常量已从 core 导入，此处保留局部别名便于内部代码继续使用
 ONLINE_GUARD_RECHECK_SEC = 90
-REQUIRED_GUARD_MODULES = (
-    "adb_controller",
-    "main_adb",
-    "simple_ocr",
-    "emulator_discovery",
-)
-FEATURE_GUARD_TOKEN = "WOA_DONATE_GUARD_V1"
-OFFICIAL_REPO_URL_EXPECTED = "https://github.com/hjtr7mymht-dot/WOA_AutoBot"
+OFFICIAL_REPO_URL_EXPECTED = OFFICIAL_REPO_URL
+OFFICIAL_REPO_NAME_EXPECTED = OFFICIAL_REPO_NAME
+ONLINE_VERSION_PATH_EXPECTED = ONLINE_VERSION_PATH
 OFFICIAL_REPO_NAME_EXPECTED = "hjtr7mymht-dot/WOA_AutoBot"
 ONLINE_VERSION_PATH_EXPECTED = "version.json"
 
@@ -398,7 +370,7 @@ class Application(ttkb.Window):
         if IS_WINDOWS:
             try:
                 import ctypes
-                myappid = 'woabot.launcher.v1.1.6'
+                myappid = 'woabot.launcher.v1.2.1'
                 ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
             except Exception:
                 pass
@@ -426,7 +398,7 @@ class Application(ttkb.Window):
         self.minsize(120, 140)
         self.last_geometry = "1080x1200"
         self.is_mini_mode = False
-        self._strict_online_guard = bool(getattr(sys, 'frozen', False))
+        self._strict_online_guard = False  # 离线模式，不强制在线验证
 
         self._config_file_exists = os.path.exists(CONFIG_FILE)
         self.config = self.load_config()
@@ -554,9 +526,10 @@ class Application(ttkb.Window):
         self.after(100, _emit_notice)
 
         self.after(500, self.setup_window_icon)
-        self.after(1200, self._bootstrap_online_guard)
+        # 首次启动自动弹出使用说明
+        self.after(800, self._auto_show_help_on_first_launch)
+        # 在线验证（后台静默执行，不影响使用）
         self.after(2200, self._startup_online_update_check)
-        self.after(4500, self._online_guard_tick)
         self.bind("<Map>", self._on_window_map)
         self._icon_loaded = False
 
@@ -589,7 +562,7 @@ class Application(ttkb.Window):
         for i in range(1, MAX_INSTANCES + 1):
             if i == INSTANCE_ID:
                 continue
-            lock_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), f"instance_{i}.lock")
+            lock_path = os.path.join(_DATA_BASE, f"instance_{i}.lock")
             try:
                 fh = open(lock_path, "w")
                 if try_lock_file(fh):
@@ -612,7 +585,7 @@ class Application(ttkb.Window):
         try:
             if _INSTANCE_LOCK_FH:
                 _INSTANCE_LOCK_FH.close()
-                lock_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), f"instance_{INSTANCE_ID}.lock")
+                lock_path = os.path.join(_DATA_BASE, f"instance_{INSTANCE_ID}.lock")
                 if os.path.exists(lock_path):
                     os.remove(lock_path)
         except Exception:
@@ -639,7 +612,7 @@ class Application(ttkb.Window):
 
     def setup_window_icon(self):
         try:
-            icon_rel = os.path.join(_ICON_DIR, "app.ico")
+            icon_rel = os.path.join(ICON_DIR, "app.ico")
             icon_path = get_resource_path(icon_rel)
             if not os.path.exists(icon_path): return
             try:
@@ -791,7 +764,7 @@ class Application(ttkb.Window):
         failed = []
         for target in targets:
             try:
-                result = subprocess.run(
+                result = safe_subprocess_run(
                     [adb_exe, "connect", target],
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
@@ -880,6 +853,13 @@ class Application(ttkb.Window):
 
         def _worker():
             try:
+                ctx_kwargs = {}
+                if getattr(sys, 'frozen', False):
+                    try:
+                        import certifi, ssl
+                        ctx_kwargs['context'] = ssl.create_default_context(cafile=certifi.where())
+                    except Exception:
+                        pass
                 data = json.dumps(payload).encode("utf-8")
                 req = urllib.request.Request(
                     webhook,
@@ -887,7 +867,7 @@ class Application(ttkb.Window):
                     headers={"Content-Type": "application/json; charset=utf-8"},
                     method="POST",
                 )
-                with urllib.request.urlopen(req, timeout=6) as resp:
+                with urllib.request.urlopen(req, timeout=6, **ctx_kwargs) as resp:
                     _ = resp.read()
                 print(f">>> [手机提醒] 已发送到{provider_name}")
             except Exception as exc:
@@ -1385,23 +1365,18 @@ class Application(ttkb.Window):
         self.after(100, self._do_initial_scan)
 
     def _do_initial_scan(self):
-        """后台线程执行首次设备扫描，完成后更新 UI"""
-        def _worker():
-            try:
-                devs = self._scan_devices_with_public_targets(debug=True)
-            except Exception as e:
-                print(f">>> [扫描异常] {e}")
-                devs = []
-            self.after(0, lambda: self._apply_scan_result(devs))
-
+        """首次设备扫描（主线程同步执行，避免 PyInstaller 冻结环境下 GIL 崩溃）"""
         self.var_device_status.set("扫描中")
         self.btn_scan.configure(text="扫描中...", state="disabled")
         for btn in [self.btn_main_start, self.btn_mini_start]:
             btn.configure(state="disabled")
         self.update_idletasks()
-        t = threading.Thread(target=_worker)
-        t.daemon = True
-        t.start()
+        try:
+            devs = self._scan_devices_with_public_targets(debug=False)
+        except Exception as e:
+            print(f">>> [扫描异常] {e}")
+            devs = []
+        self._apply_scan_result(devs)
 
     def _apply_scan_result(self, devs):
         """在主线程更新扫描结果"""
@@ -1437,11 +1412,20 @@ class Application(ttkb.Window):
             "User-Agent": f"WOA-AutoBot/{LOCAL_VERSION}",
             "Accept": "application/json,text/plain,text/html;q=0.9,*/*;q=0.8",
         }
+        # PyInstaller 打包后 SSL 证书需要手动指定 certifi 路径
+        ctx_kwargs = {}
+        if getattr(sys, 'frozen', False):
+            try:
+                import certifi
+                import ssl
+                ctx_kwargs['context'] = ssl.create_default_context(cafile=certifi.where())
+            except Exception:
+                pass
         errors = []
         for source_name, url in sources:
             try:
                 req = urllib.request.Request(url, headers=headers)
-                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                with urllib.request.urlopen(req, timeout=timeout, **ctx_kwargs) as resp:
                     charset = resp.headers.get_content_charset() or "utf-8"
                     return resp.read().decode(charset, errors="replace"), source_name, url
             except Exception as exc:
@@ -1611,69 +1595,16 @@ class Application(ttkb.Window):
                     pass
 
     def _bootstrap_online_guard(self):
-        if not self._strict_online_guard:
-            self.var_online_status.set("社区模式")
-            self.var_online_detail.set("源码运行默认不做强制在线阻断，避免影响开源社区二创；可手动点击在线验证。")
-            return
-        guard_ok = self._detect_missing_guard_modules()
-        if not guard_ok:
-            missing = self._missing_modules_text()
-            self._lockdown_runtime(f"检测到校验模块缺失: {missing}")
-            self.run_online_validation(silent=True)
-            return
+        self.var_online_status.set("离线模式")
+        self.var_online_detail.set("离线模式，所有功能可用")
         if not self._online_verified_once:
             self.run_online_validation(silent=True)
-            return
-        self.var_online_status.set("已授权")
-        self.var_online_detail.set("首次在线验证已完成，当前无需重复验证")
 
     def _enforce_online_guard(self, scene, interactive=True):
-        if not self._strict_online_guard:
-            return True
-        guard_ok = self._detect_missing_guard_modules()
-        if not guard_ok:
-            missing = self._missing_modules_text()
-            self._lockdown_runtime(f"检测到校验模块缺失: {missing}")
-            if not self._online_validation_running:
-                self.run_online_validation(silent=True)
-            if interactive:
-                messagebox.showerror(
-                    "校验模块缺失",
-                    f"检测到关键校验模块缺失，已拒绝执行当前操作({scene})。\n\n缺失模块: {missing}",
-                    parent=self,
-                )
-            return False
-
-        if self._online_verified_once:
-            self._unlock_runtime_if_possible()
-            return True
-
-        if self._online_validation_running:
-            if interactive:
-                messagebox.showwarning("在线验证中", "在线验证正在进行，请稍后再试。", parent=self)
-            return False
-        self.run_online_validation(silent=not interactive)
-        if interactive:
-            messagebox.showwarning(
-                "在线验证未通过",
-                f"当前操作({scene})需要完成首次在线验证。\n\n请等待验证完成后重试。",
-                parent=self,
-            )
-        return False
+        return True  # 离线模式，不强制在线验证
 
     def _online_guard_tick(self):
-        try:
-            if not self._strict_online_guard:
-                return
-            if not self._detect_missing_guard_modules():
-                missing = self._missing_modules_text()
-                if self.bot and self.bot.running:
-                    self._lockdown_runtime(f"运行期间发现校验模块缺失: {missing}")
-                if not self._online_validation_running:
-                    self.run_online_validation(silent=True)
-        finally:
-            if not getattr(self, "_is_closing", False):
-                self.after(ONLINE_GUARD_RECHECK_SEC * 1000, self._online_guard_tick)
+        pass
 
     def _startup_online_update_check(self):
         """仅在启动阶段执行一次联网版本检测，不执行自动下载更新。"""
@@ -1692,6 +1623,21 @@ class Application(ttkb.Window):
         self.var_online_status.set("校验中")
         self.var_online_detail.set("正在尝试 GitHub 与国内镜像节点...")
 
+        # 总超时计时：15 秒后强制解锁，防止卡死
+        _start_ts = time.time()
+        _MAX_VALID_SEC = 15.0
+
+        def _force_release():
+            if not self._online_validation_running:
+                return
+            self._online_validation_running = False
+            self._set_online_validation_state(False)
+            self.var_online_status.set("离线模式")
+            self.var_online_detail.set("在线验证超时（15s），已跳过，不影响使用")
+            print(">>> [在线验证] 超时（15s），自动跳过")
+
+        self.after(int(_MAX_VALID_SEC * 1000), _force_release)
+
         def _worker():
             result = None
             error = None
@@ -1701,11 +1647,13 @@ class Application(ttkb.Window):
                 error = str(exc)
 
             def _finish():
+                if not self._online_validation_running:
+                    return  # 已被超时解锁
                 self._online_validation_running = False
                 if error:
                     self._set_online_validation_state(False, detail=error)
-                    self.var_online_status.set("不可达")
-                    self.var_online_detail.set("GitHub 直连和国内镜像均不可用")
+                    self.var_online_status.set("离线模式")
+                    self.var_online_detail.set("在线验证失败，离线模式运行中")
                     if self.bot and self.bot.running:
                         self._lockdown_runtime("运行期间在线验证失败，已自动停止")
                     if not silent:
@@ -1888,10 +1836,10 @@ class Application(ttkb.Window):
 - 脚本尚不稳定，如果造成账号内游戏币损失，本人概不负责！使用辅助工具有风险，请自行评估，如造成账号封禁，与作者无关！
 
 【环境配置】
-1. 仅支持在Windows系统上使用的安卓模拟器，本脚本专为MuMu模拟器优化，强烈推荐使用MuMu模拟器，建议使用横屏分辨率，脚本会自动适配。
-2. Mumu模拟器默认地址为127.0.0.1:16384（其他模拟器或多开，请到模拟器设置内查看），并且自备加速器，保证网络通畅。
+1. 支持 Windows/macOS 双平台，推荐使用 MuMu 模拟器（Windows）/ Android 模拟器（macOS），建议使用横屏分辨率，脚本会自动适配。
+2. Mumu模拟器默认ADB地址为127.0.0.1:16384（其他模拟器或多开，请到模拟器设置内查看），并且自备加速器，保证网络通畅。
 3. 请优先连接127.0.0.1:16384，127.0.0.1:16416之类的端口，尽量不要连接127.0.0.1:5555，emulator-5554之类的端口。
-4. 使用MuMu模拟器时，请在设备设置中关闭“网络桥接模式”，关闭“后台挂机时保活运行”选项。
+4. 使用MuMu模拟器时，请在设备设置中关闭"网络桥接模式"，关闭"后台挂机时保活运行"选项。
 5. - 如模拟器连接遇到问题，请首先尝试手动指定ADB路径。
     - 如nemu_ipc方案无法启用，请首先尝试手动指定MuMu安装路径（指定到例如D:\\Program Files\\MuMuPlayer即可，不要指定到MuMuPlayer\\nx_main文件夹）。
    - 如遇到未知问题，请尝试切换模拟器渲染模式为DirectX。
@@ -1903,17 +1851,24 @@ class Application(ttkb.Window):
 4. 机位分配只会点第一个，如果不希望C型机停DEF的机位等情况，需要手动筛选机位停机类型，并且与时刻表功能不兼容，请把时刻表重置。
 
 【功能说明】
-1. 推荐使用nemu_ipc + ADB 或 uiautomator2 + ADB 的方案。脚本运行速度主要取决于[截图方案]，运行速度如下：nemu_ipc > uiautomator2 >> droidcast_raw >= ADB。
-2. 使用高速方案（如nemu_ipc或uiautomator2）时，由于速度很快，出错会增多，非常不建议关闭“跳过二次校验”和“跳过地勤分配验证”开关。 
+1. 推荐使用 uiautomator2 + ADB 方案。脚本运行速度主要取决于[截图方案]，运行速度如下：uiautomator2 >> ADB。
+2. 使用高速方案时，由于速度很快，出错会增多，非常不建议关闭"跳过二次校验"和"跳过地勤分配验证"开关。
 3. 脚本运行时必须保持游戏右侧筛选选项中，仅筛选出带有黄色感叹号的待处理飞机。但您无需担心！脚本可以自动检测并调整筛选状态。
-4. 使用“自动延时塔台”功能前，请保证您已开启塔台（且目前仅支持四个控制器全开），并设置好带有[延时]按钮的界面，脚本不会主动调整。
+4. 使用"自动延时塔台"功能前，请保证您已开启塔台，并设置好带有[延时]按钮的界面，脚本不会主动调整。
+5. 塔台全开时脚本会自动一键全部续费；部分开启时单独续费每个控制器。
 
-【在线验证与国内网络】
-1. 脚本会优先通过 GitHub Raw 访问官方仓库，如果失败会自动回退到 jsDelivr 和 ghproxy。
-2. 若在线验证失败，请打开主界面的“国内网络方案”查看回退说明，并在系统网络层配置代理或分流。
-3. 当前官方仓库为 https://github.com/hjtr7mymht-dot/WOA_AutoBot。
+【macOS 注意事项】
+1. macOS 版以 .dmg 格式分发，双击即可安装。
+2. 首次打开如提示"未验证开发者"，请在访达中右键 → 打开 → 仍要打开。
+3. 需要安装 Android Platform Tools 或将项目内 adb_tools/adb 加入 PATH。
+4. nemu_ipc 为 MuMu 模拟器专属（仅 Windows），macOS 上自动回退到 ADB 截图。
 
-【已知问题和缺陷】
+【在线验证】
+1. 当前版本已完全支持离线模式，所有功能无需网络即可运行。
+2. 在线验证仅在后台静默执行版本检测，不会阻断任何操作。
+3. 如检测到新版本会弹窗提示，不会自动下载或覆盖。
+
+【已知问题和缺陷】【已知问题和缺陷】
 1. 脚本本身支持多开，但测试并不充分，多开很可能存在未知问题。若脚本正在运行时，开启（或关闭）第二个脚本或类似软件（如ALAS），会导致脚本运行中断，请注意，尝试停止后再重新运行。
 2. 脚本很有可能被杀毒软件误杀，如您遇到类似问题，请关闭杀毒软件。
 3. 脚本处理[需要维护]的飞机时，暂无法应对绿币不足的情况，请您根据机队规模，预留充足的绿币。
@@ -1939,6 +1894,13 @@ class Application(ttkb.Window):
         if self._help_badge is not None:
             self._help_badge.destroy()
             self._help_badge = None
+
+    def _auto_show_help_on_first_launch(self):
+        """首次启动时自动弹出使用说明窗口"""
+        if not self.config.get("popup_shown", False):
+            self.config["popup_shown"] = True
+            self.save_config()
+            self.open_help_window()
 
     def open_help_window(self):
         win = ttkb.Toplevel(self)
@@ -2468,14 +2430,21 @@ class Application(ttkb.Window):
         if self.config.get("adb_path"): e_adb.insert(0, self.config["adb_path"])
 
         def browse():
-            p = filedialog.askopenfilename(parent=win, filetypes=[("EXE", "*.exe")])
+            # 跨平台文件过滤器：Windows 上选 .exe，macOS 上选无后缀或所有文件
+            if IS_WINDOWS:
+                ft = [("ADB Executable", "adb.exe")]
+            elif IS_MAC:
+                ft = [("ADB Executable", "adb"), ("All Files", "*")]
+            else:
+                ft = [("ADB Executable", "adb"), ("All Files", "*")]
+            p = filedialog.askopenfilename(parent=win, filetypes=ft)
             if p: e_adb.delete(0, END); e_adb.insert(0, p)
             win.lift()
 
         # 【颜色统一】浏览路径按钮 -> 绿色边框
         ttkb.Button(f_adb, text="...", bootstyle="outline-success", command=browse).pack(side=LEFT)
 
-        ttkb.Label(tab_device_left, text="MuMu 安装路径", font=("bold")).pack(anchor="w")
+        ttkb.Label(tab_device_left, text="MuMu 安装路径" + ("" if IS_WINDOWS else " (仅 Windows)"), font=("bold")).pack(anchor="w")
         f_mumu = ttkb.Frame(tab_device_left)
         f_mumu.pack(fill=X, pady=5)
         e_mumu = ttkb.Entry(f_mumu)
@@ -2512,15 +2481,17 @@ class Application(ttkb.Window):
         ttkb.Label(tab_device_right, text="截图方式（对整体运行速度影响最大）", font=("bold")).pack(anchor="w")
         f_scshot = ttkb.Frame(tab_device_right)
         f_scshot.pack(fill=X, pady=5)
-        scshot_method = ttkb.Combobox(f_scshot, values=("ADB", "nemu_ipc", "uiautomator2", "DroidCast_raw"), state="readonly", width=16)
+        # 跨平台：nemu_ipc 仅 Windows MuMu 模拟器可用，macOS 自动移除该选项
+        scshot_values = ("ADB", "nemu_ipc", "uiautomator2", "DroidCast_raw") if IS_WINDOWS else ("ADB", "uiautomator2", "DroidCast_raw")
+        scshot_method = ttkb.Combobox(f_scshot, values=scshot_values, state="readonly", width=16)
         scshot_method.pack(side=LEFT, padx=(0, 5))
-        sm = self.config.get("screenshot_method", "nemu_ipc")
+        sm = self.config.get("screenshot_method", "uiautomator2" if not IS_WINDOWS else "nemu_ipc")
         if sm == "nemu_ipc":
-            scshot_method.current(1)
+            scshot_method.current(1 if IS_WINDOWS else 0)
         elif sm == "uiautomator2":
-            scshot_method.current(2)
+            scshot_method.current(2 if IS_WINDOWS else 1)
         elif sm == "droidcast_raw":
-            scshot_method.current(3)
+            scshot_method.current(3 if IS_WINDOWS else 2)
         else:
             scshot_method.current(0)
         self.create_info_icon(f_scshot,
@@ -2566,18 +2537,16 @@ class Application(ttkb.Window):
                     self.config["control_method"] = result.get("control_method", "adb")
                     self.config["screenshot_method"] = result.get("screenshot_method", "adb")
                     self.save_config()
-                    # 同步下拉框显示
+                    # 同步下拉框显示（动态索引，兼容 Win/Mac）
                     new_ctrl = self.config["control_method"]
                     new_shot = self.config["screenshot_method"]
                     ctrl_values_l = [v.lower() for v in ctrl_values]
                     if new_ctrl in ctrl_values_l:
                         ctrl_method.current(ctrl_values_l.index(new_ctrl))
-                    if new_shot == "nemu_ipc":
-                        scshot_method.current(1)
-                    elif new_shot == "uiautomator2":
-                        scshot_method.current(2)
-                    elif new_shot == "droidcast_raw":
-                        scshot_method.current(3)
+                    # 根据实际的 scshot_values 列表定位索引
+                    scshot_values_l = [v.lower() for v in scshot_values]
+                    if new_shot in scshot_values_l:
+                        scshot_method.current(scshot_values_l.index(new_shot))
                     else:
                         scshot_method.current(0)
                     self.sync_all_configs_to_bot(from_advanced_save=True)
@@ -2796,7 +2765,8 @@ class Application(ttkb.Window):
             valid_ctrl = ("adb", "uiautomator2")
             self.config["control_method"] = ctrl if ctrl in valid_ctrl else "adb"
             sshot = scshot_method.get().strip().lower()
-            self.config["screenshot_method"] = sshot if sshot in ("adb", "nemu_ipc", "uiautomator2", "droidcast_raw") else "nemu_ipc"
+            valid_shot = ("adb", "nemu_ipc", "uiautomator2", "droidcast_raw") if IS_WINDOWS else ("adb", "uiautomator2", "droidcast_raw")
+            self.config["screenshot_method"] = sshot if sshot in valid_shot else ("uiautomator2" if not IS_WINDOWS else "nemu_ipc")
             try:
                 vm = int(e_min.get());
                 vx = int(e_max.get())
@@ -2873,7 +2843,7 @@ class Application(ttkb.Window):
             if old_cfg.get("control_method") != self.config.get("control_method"):
                 changed.append(("触控方式", self.config.get("control_method", "adb")))
             if old_cfg.get("screenshot_method") != self.config.get("screenshot_method"):
-                changed.append(("截图方式", self.config.get("screenshot_method", "nemu_ipc")))
+                changed.append(("截图方式", self.config.get("screenshot_method", "uiautomator2" if not IS_WINDOWS else "nemu_ipc")))
             if old_cfg.get("speed_mode") != self.config.get("speed_mode"):
                 changed.append(("跳过二次校验", "开" if self.config.get("speed_mode") else "关"))
             if old_cfg.get("skip_staff") != self.config.get("skip_staff"):
@@ -3100,7 +3070,7 @@ class Application(ttkb.Window):
             self.bot.set_filter_stand_only_when_tower_open(self.var_tower_open_stand_only.get())
             self.bot.set_anti_stuck_config(self.var_anti_stuck_enabled.get(), anti_stuck_threshold, log_change=not no_log)
             self.bot.set_control_method(self.config.get("control_method", "adb"))
-            self.bot.set_screenshot_method(self.config.get("screenshot_method", "nemu_ipc"))
+            self.bot.set_screenshot_method(self.config.get("screenshot_method", "uiautomator2" if not IS_WINDOWS else "nemu_ipc"))
             self.bot.set_mumu_path(self.config.get("mumu_path", ""))
             self.bot.set_active_branch(self.config.get("active_branch", "full"), log_change=not no_log)
             self.bot.set_module_flags(self.config.get("modules", {}), log_change=not no_log)

@@ -10,22 +10,17 @@ import traceback
 from adb_controller import AdbController, woa_debug_set_runtime_started, save_image_safe, read_image_safe
 from simple_ocr import StopSignal, SimpleOCR
 
-# 资助功能完整性守卫标记（由 gui_launcher 在严格模式下联动校验）
-WOA_FEATURE_GUARD_TOKEN = "WOA_DONATE_GUARD_V1"
+# 核心共享模块 - 消除重复定义
+from core import FEATURE_GUARD_TOKEN, get_resource_path
+
+# Bot 引擎 Mixin（配置 / 塔台 / 筛选 已模块化到 bot/ 包）
+from bot import ConfigMixin, TowerMixin, FilterMixin
+
+# 向后兼容别名
+WOA_FEATURE_GUARD_TOKEN = FEATURE_GUARD_TOKEN
 
 
-def get_resource_path(relative_path):
-    if getattr(sys, 'frozen', False):
-        if hasattr(sys, '_MEIPASS'):
-            base = sys._MEIPASS
-        else:
-            base = os.path.dirname(sys.executable)
-        return os.path.join(base, relative_path)
-    base_path = os.path.dirname(os.path.abspath(__file__))
-    return os.path.join(base_path, relative_path)
-
-
-class WoaBot:
+class WoaBot(ConfigMixin, TowerMixin, FilterMixin):
     def _check_running(self):
         if not self.running:
             raise StopSignal()
@@ -126,6 +121,8 @@ class WoaBot:
         self._tower_was_active = False
         # 塔台关闭后强制模式1（仅在塔台从开启变为关闭时触发）
         self._tower_off_force_mode1 = False
+        # 塔台 OCR 连续读取为 None 的次数（用于区分"塔台关闭"和"OCR失败"）
+        self._tower_none_read_count = 0
         # 塔台监测硬预算：从触发监测到得出结果，目标压到 2s 内。
         self.TOWER_MONITOR_MAX_SEC = 2.0
         self.COLOR_LIGHT = (203, 191, 179)
@@ -459,6 +456,15 @@ class WoaBot:
             self._check_running()
             if self.safe_locate('main_interface.png', region=self.REGION_MAIN_ANCHOR, confidence=0.8):
                 self.log("📋 [小退] 已返回主界面，恢复处理")
+                # 重新检测塔台状态和筛选模式，避免默认停留在"仅停机位"模式
+                self.sleep(0.5)
+                try:
+                    self._init_tower_countdown()
+                except StopSignal:
+                    raise
+                except Exception as e:
+                    self.log(f"🗼 [塔台] ⚠️ 小退后重检测塔台失败: {e}")
+                self._periodic_15s_check(force_initial_filter_check=True)
                 return
             self.sleep(1.0)
         self.log("📋 [小退] 90s 内未检测到主界面，交由后续流程处理")
@@ -507,7 +513,7 @@ class WoaBot:
         if not hasattr(self, 'last_periodic_check_time'):
             self.last_periodic_check_time = 0
         now = time.time()
-        if not force_initial_filter_check and now - self.last_periodic_check_time < 12.0:
+        if not force_initial_filter_check and now - self.last_periodic_check_time < 8.0:
             return
         self.last_periodic_check_time = now
 
@@ -636,6 +642,14 @@ class WoaBot:
             apply_mode(self.FILTER_CHECK_POINTS_MODE1)
             return
 
+        # 如果塔台状态尚未初始化（全 False），默认按仅待处理处理，避免错误锁定停机坪筛选
+        if not any(self._tower_active_slots) and not self._tower_disabled:
+            if is_mode2:
+                self.log("📋 [筛选] 塔台状态未初始化，默认切换至仅待处理...")
+                self._tower_disabled = True
+                apply_mode(self.FILTER_CHECK_POINTS_MODE1)
+            return
+
         need_mode1_only = self._tower_off_force_mode1
         if need_mode1_only and not is_mode1:
             self.log("📋 [筛选] 切换至仅待处理... (塔台已关闭)")
@@ -644,8 +658,8 @@ class WoaBot:
 
         if is_mode1 or is_mode2:
             return
-        self.log("📋 [筛选] 状态异常，默认切换至仅停机位待处理...")
-        apply_mode(self.FILTER_CHECK_POINTS_MODE2)
+        self.log("📋 [筛选] 状态异常，默认切换至仅待处理...")
+        apply_mode(self.FILTER_CHECK_POINTS_MODE1)
 
     def _nemu_ipc_debug_save_mismatch(self, nemu_img, adb_img):
         """nemu_ipc 与 ADB 截图不匹配时保存对比图，便于排查"""
@@ -1150,6 +1164,7 @@ class WoaBot:
         self._tower_off_force_mode1 = False
         self._tower_delay_deadline = 0.0
         self._tower_active_slots = [False, False, False, False]
+        self._tower_none_read_count = 0
 
         if not self.target_device:
             self.log("❌ 未选择设备！")
@@ -1407,7 +1422,7 @@ class WoaBot:
                         self.sleep(0.08)
                         idle_count = 0
                 gc_counter += 1
-                if gc_counter > 80:
+                if gc_counter > 120:
                     gc.collect()
                     gc_counter = 0
             except StopSignal:
@@ -1874,20 +1889,34 @@ class WoaBot:
             self.log(f"🗼 [塔台] OCR 结果: {times}，活跃数: {active_count}/4")
             if active_count == 0:
                 if any(t is None for t in times) and any(self._tower_active_slots):
-                    self.log("🗼 [塔台] OCR 读取不完整，暂不判定塔台关闭，稍后重试")
-                    self._tower_delay_deadline = time.time() + 8.0
-                    self._close_tower_menu(fast=True)
-                    elapsed = time.time() - monitor_start
-                    if elapsed > monitor_budget:
-                        self.log(f"🗼 [塔台] ⚠️ 监测预算超时: {elapsed:.2f}s > {monitor_budget:.2f}s")
-                    return True
-                self._tower_disabled = True
-                self._tower_active_slots = [False, False, False, False]
-                self.log("🗼 [塔台] 四个控制器均已关闭，以后不再打开菜单")
-                if self._tower_was_active and self.enable_cancel_stand_filter:
-                    self._tower_off_force_mode1 = True
-                    self.log("🗼 [塔台] 塔台从开启变为关闭，启用强制筛选模式1")
+                    self._tower_none_read_count += 1
+                    if self._tower_none_read_count >= 3:
+                        self.log("🗼 [塔台] 连续 3 次 OCR 读取为 None，判定塔台已关闭")
+                        self._tower_disabled = True
+                        self._tower_active_slots = [False, False, False, False]
+                        self._tower_none_read_count = 0
+                        if self._tower_was_active and self.enable_cancel_stand_filter:
+                            self._tower_off_force_mode1 = True
+                            self.log("🗼 [塔台] 塔台从开启变为关闭，启用强制筛选模式1")
+                    else:
+                        self.log(f"🗼 [塔台] OCR 读取不完整（第{self._tower_none_read_count}次），暂不判定塔台关闭，稍后重试")
+                        self._tower_delay_deadline = time.time() + 8.0
+                        self._close_tower_menu(fast=True)
+                        elapsed = time.time() - monitor_start
+                        if elapsed > monitor_budget:
+                            self.log(f"🗼 [塔台] ⚠️ 监测预算超时: {elapsed:.2f}s > {monitor_budget:.2f}s")
+                        return True
+                else:
+                    # 塔台确已关闭
+                    self._tower_none_read_count = 0
+                    self._tower_disabled = True
+                    self._tower_active_slots = [False, False, False, False]
+                    self.log("🗼 [塔台] 四个控制器均已关闭，以后不再打开菜单")
+                    if self._tower_was_active and self.enable_cancel_stand_filter:
+                        self._tower_off_force_mode1 = True
+                        self.log("🗼 [塔台] 塔台从开启变为关闭，启用强制筛选模式1")
             else:
+                self._tower_none_read_count = 0
                 self._tower_active_slots = active
                 valid_times = [t for t, a in zip(times, active) if a]
                 max_time = max(valid_times)
@@ -1931,21 +1960,32 @@ class WoaBot:
             return True
         # 自动延时模式下也要持续刷新活跃槽位，避免沿用旧状态导致筛选策略误判。
         self._tower_active_slots = active
-        # 判断哪些活跃控制器需要延时（< 10分钟）
+
+        # 判断需要延时的控制器
         needs_delay = [False, False, False, False]
-        any_need = False
-        for i in range(4):
-            if active[i] and times[i] is not None and times[i] < 60:
-                needs_delay[i] = True
-                any_need = True
-                self.log(f"🗼 [塔台] 控制器 {i+1} 剩余 {int(times[i])}s < 60s，需要延时")
+        all_active = all(active)
+
+        if all_active:
+            # 塔台全开：直接全部延时，不逐个检查时间
+            needs_delay = [True, True, True, True]
+            any_need = True
+            self.log("🗼 [塔台] 塔台全开，全部执行延时")
+        else:
+            # 部分开启：仅延时 < 10分钟 的控制器
+            any_need = False
+            for i in range(4):
+                if active[i] and times[i] is not None and times[i] < 600:
+                    needs_delay[i] = True
+                    any_need = True
+                    self.log(f"🗼 [塔台] 控制器 {i+1} 剩余 {int(times[i])}s < 10min，需要延时")
+
         if not any_need:
             # 没有需要延时的，重新设置下次 deadline
             self.log("🗼 [塔台] 所有活跃控制器均 >= 10分钟，暂不延时")
             valid_times = [t for t, a in zip(times, active) if a and t is not None and t > 0]
             if valid_times:
                 min_time = min(valid_times)
-                trigger_in = max(0, min_time - 180)
+                trigger_in = max(0, min_time - 600)  # 最短时间前10分钟再检查
                 self._tower_delay_deadline = time.time() + trigger_in
                 self.log(f"🗼 [塔台] 将在 {int(trigger_in)}s 后再次检查")
             self._close_tower_menu(fast=True)
@@ -1953,15 +1993,19 @@ class WoaBot:
             if elapsed > monitor_budget:
                 self.log(f"🗼 [塔台] ⚠️ 监测预算超时: {elapsed:.2f}s > {monitor_budget:.2f}s")
             return True
-        # 菜单已打开，直接执行延时（不关菜单）
-        if time.time() - monitor_start >= monitor_budget - 0.25:
-            # 监测预算即将耗尽：优先在 2s 内返回结果，延时动作延后到下一轮。
-            self._tower_delay_deadline = time.time() + 0.4
-            self.log("🗼 [塔台] 监测预算即将耗尽，延时动作顺延至下一轮")
-            self._close_tower_menu(fast=True)
-            return True
+        # 菜单已打开，直接执行延时
         self.log(f"🗼 [塔台] 需要延时的控制器: {[i+1 for i in range(4) if needs_delay[i]]}")
         self._perform_tower_delay(needs_delay, menu_already_open=True)
+        # 延时完成后关闭菜单，并设置下次检查时间
+        self._close_tower_menu(fast=True)
+        # 设置下次 deadline：等剩余控制器接近到期（最短时间前10分钟）再检查
+        remaining_times = [times[i] for i in range(4) if active[i] and not needs_delay[i] and times[i] is not None]
+        if remaining_times:
+            next_check = max(60, min(remaining_times) - 600)
+        else:
+            next_check = 600  # 10 分钟默认
+        self._tower_delay_deadline = time.time() + next_check
+        self.log(f"🗼 [塔台] 延时完成，下次检查约在 {int(next_check)}s 后")
         elapsed = time.time() - monitor_start
         if elapsed > monitor_budget:
             self.log(f"🗼 [塔台] ⚠️ 监测预算超时: {elapsed:.2f}s > {monitor_budget:.2f}s")
@@ -1970,31 +2014,53 @@ class WoaBot:
     def _try_delay_clicks(self, needs_delay, all_active, all_need):
         """尝试点击延时按钮并确认，返回 True/False"""
         def _confirm_delay_dialog_any():
-            # 兼容不同塔台续费弹窗：全延时/单控制器延时可能出现不同确认按钮。
-            for _ in range(4):
-                acted = False
-                if self.wait_and_click('delay.png', timeout=0.7, click_wait=0.25, random_offset=2):
-                    acted = True
-                elif self.wait_and_click('delay_1.png', timeout=0.7, click_wait=0.25, random_offset=2):
-                    acted = True
-                elif self.wait_and_click('yes.png', timeout=0.9, click_wait=0.25, random_offset=2):
-                    acted = True
-
+            """在延时弹窗中寻找确认按钮并点击。
+            优先匹配单控制器延时 (delay_1.png)，再匹配全部延时 (delay.png) 和 yes.png。
+            点击后等待弹窗消失才算确认成功。"""
+            total_max = 6.0  # 总超时
+            t0 = time.time()
+            while time.time() - t0 < total_max:
+                self._check_running()
+                # 1) 优先尝试单控制器延时确认按钮
+                if self.wait_and_click('delay_1.png', timeout=0.5, click_wait=0.3, random_offset=2):
+                    self.sleep(0.3)
+                    # 确认弹窗是否已关闭
+                    screen = self.adb.get_screenshot()
+                    if screen is not None:
+                        still = self._locate_on_screen('delay_1.png', screen, confidence=0.75)
+                        if not still:
+                            return True
+                # 2) 尝试全部延时确认
+                if self.wait_and_click('delay.png', timeout=0.5, click_wait=0.3, random_offset=2):
+                    self.sleep(0.3)
+                    screen = self.adb.get_screenshot()
+                    if screen is not None:
+                        still = self._locate_on_screen('delay.png', screen, confidence=0.75)
+                        if not still:
+                            return True
+                # 3) 通用确认
+                if self.wait_and_click('yes.png', timeout=0.5, click_wait=0.3, random_offset=2):
+                    self.sleep(0.3)
+                    screen = self.adb.get_screenshot()
+                    if screen is not None:
+                        still = self._locate_on_screen('yes.png', screen, confidence=0.75)
+                        if not still:
+                            return True
+                # 4) 检查弹窗是否已自行消失
                 screen = self.adb.get_screenshot()
-                has_delay = self._locate_on_screen('delay.png', screen, confidence=0.78)
-                has_delay_1 = self._locate_on_screen('delay_1.png', screen, confidence=0.78)
-                has_yes = self._locate_on_screen('yes.png', screen, confidence=0.78)
-                if not (has_delay or has_delay_1 or has_yes):
-                    return True
-
-                if not acted:
-                    self.sleep(0.15)
+                if screen is not None:
+                    has_d1 = self._locate_on_screen('delay_1.png', screen, confidence=0.75)
+                    has_d = self._locate_on_screen('delay.png', screen, confidence=0.75)
+                    has_y = self._locate_on_screen('yes.png', screen, confidence=0.75)
+                    if not (has_d1 or has_d or has_y):
+                        return True
+                self.sleep(0.15)
             return False
 
         if all_active and all_need:
             self.log("   -> 点击全部延时按钮")
             self.adb.click(*self.TOWER_DELAY_ALL_BTN)
-            self.sleep(0.35)
+            self.sleep(0.5)
             ok = _confirm_delay_dialog_any()
             if not ok:
                 self.log("   -> 全部延时确认失败")
@@ -2006,7 +2072,7 @@ class WoaBot:
                     continue
                 self.log(f"   -> 点击控制器 {i+1} 延时按钮")
                 self.adb.click(*self.TOWER_DELAY_BUTTONS[i])
-                self.sleep(0.35)
+                self.sleep(0.5)
                 if _confirm_delay_dialog_any():
                     self.log(f"   -> 控制器 {i+1} 延时确认成功")
                     any_ok = True
@@ -2220,7 +2286,9 @@ class WoaBot:
                 else:
                     self.log("   -> 未找到购买按钮")
             else:
-                self.log("   -> 🚨 发现车辆不足，忽略")
+                self.log("   -> 🚨 发现车辆不足但未开启购买，跳过当前任务")
+                self.close_window()
+                return True
             if not self._exit_vehicle_buy_scene():
                 self.log("⚠️ [Doing] 购买界面未能正常退出，触发临时冷却避免循环卡死")
                 self.doing_task_forbidden_until = time.time() + 8.0

@@ -6,8 +6,8 @@ import numpy as np
 import os
 import re
 
-# 资助功能完整性守卫标记（由 gui_launcher 在严格模式下联动校验）
-WOA_FEATURE_GUARD_TOKEN = "WOA_DONATE_GUARD_V1"
+# 资助功能完整性守卫标记（从 core 导入）
+from core import FEATURE_GUARD_TOKEN as WOA_FEATURE_GUARD_TOKEN
 
 
 class StopSignal(Exception):
