@@ -18,7 +18,18 @@ from tkinter import filedialog, messagebox
 from tkinter.scrolledtext import ScrolledText
 from tkinter.constants import BOTH, END, LEFT, RIGHT, TOP, X, Y
 
-from platform_utils import IS_WINDOWS, CREATE_NO_WINDOW, try_lock_file, lock_file, unlock_file, ADB_EXE_NAME, IS_MAC, safe_subprocess_run, get_app_data_dir
+# ─── 核心共享模块 ───────────────────────────────────────
+from core import (
+    IS_WINDOWS, IS_MAC, ADB_EXE_NAME, CREATE_NO_WINDOW,
+    try_lock_file, lock_file, unlock_file,
+    safe_subprocess_run, get_app_data_dir,
+    get_resource_path, get_bundled_resource_path, ICON_DIR,
+    get_woa_debug_dir,
+    FEATURE_GUARD_TOKEN, LOCAL_VERSION, MAX_INSTANCES,
+    OFFICIAL_REPO_URL, OFFICIAL_REPO_NAME, ONLINE_VERSION_PATH,
+    REQUIRED_GUARD_MODULES,
+    DEFAULT_FONT, MONO_FONT, MUMU_PORTS,
+)
 
 try:
     import orjson
@@ -48,49 +59,15 @@ except ImportError:
     get_mumu_adb_paths = None
 
 # MuMu 常用 ADB 端口（部分机型如 MuMu12+Vulkan 需用 MuMu 自带 adb 才能正常点击）
-_MUMU_PORTS = {16384, 16385, 16416, 16448, 7555, 5555}
+# 从 core.constants 导入
+_MUMU_PORTS = MUMU_PORTS  # 向后兼容别名
 
-# 跨平台默认字体
-if IS_MAC:
-    DEFAULT_FONT = "SF Pro"
-    MONO_FONT = "Menlo"
-elif IS_WINDOWS:
-    DEFAULT_FONT = "Microsoft YaHei UI"
-    MONO_FONT = "Consolas"
-else:
-    DEFAULT_FONT = "Sans"
-    MONO_FONT = "Monospace"
+# 跨平台默认字体 - 从 core.constants 已导入
+# DEFAULT_FONT / MONO_FONT 已在上方 import 中定义
 
-
-# 资源路径获取（兼容 PyInstaller 与 Nuitka）
-def get_resource_path(relative_path):
-    if getattr(sys, 'frozen', False):
-        if hasattr(sys, '_MEIPASS'):
-            base = sys._MEIPASS
-        else:
-            base = os.path.dirname(sys.executable)
-        return os.path.join(base, relative_path)
-    base_path = os.path.dirname(os.path.abspath(__file__))
-    p1 = os.path.join(base_path, relative_path)
-    if os.path.exists(p1):
-        return p1
-    if hasattr(sys, 'executable'):
-        exe_path = os.path.dirname(sys.executable)
-        p2 = os.path.join(exe_path, relative_path)
-        if os.path.exists(p2):
-            return p2
-    p3 = os.path.join(os.getcwd(), relative_path)
-    if os.path.exists(p3):
-        return p3
-    return p1
-
-if cached and TTLCache:
-    get_resource_path = cached(cache=TTLCache(maxsize=128, ttl=300))(get_resource_path)
-
-
-_ICON_DIR = "icon"
-
-MAX_INSTANCES = 3
+# get_resource_path / get_bundled_resource_path 已从 core.resources 导入
+# _ICON_DIR → ICON_DIR 已从 core.resources 导入
+# MAX_INSTANCES 已从 core.constants 导入
 
 # 数据存储路径（开发模式：当前目录；打包后：系统 Application Support）
 _DATA_BASE = get_app_data_dir()
@@ -128,19 +105,11 @@ if INSTANCE_ID is None:
 CONFIG_FILE = os.path.join(_DATA_BASE, "config.json" if INSTANCE_ID == 1 else f"config_{INSTANCE_ID}.json")
 STATS_FILE = os.path.join(_DATA_BASE, "woa_stats.csv")
 
-LOCAL_VERSION = "1.2.1"
-OFFICIAL_REPO_URL = "https://github.com/hjtr7mymht-dot/WOA_AutoBot"
-OFFICIAL_REPO_NAME = "hjtr7mymht-dot/WOA_AutoBot"
-ONLINE_VERSION_PATH = "version.json"
+# 以下常量已从 core 导入，此处保留局部别名便于内部代码继续使用
 ONLINE_GUARD_RECHECK_SEC = 90
-REQUIRED_GUARD_MODULES = (
-    "adb_controller",
-    "main_adb",
-    "simple_ocr",
-    "emulator_discovery",
-)
-FEATURE_GUARD_TOKEN = "WOA_DONATE_GUARD_V1"
-OFFICIAL_REPO_URL_EXPECTED = "https://github.com/hjtr7mymht-dot/WOA_AutoBot"
+OFFICIAL_REPO_URL_EXPECTED = OFFICIAL_REPO_URL
+OFFICIAL_REPO_NAME_EXPECTED = OFFICIAL_REPO_NAME
+ONLINE_VERSION_PATH_EXPECTED = ONLINE_VERSION_PATH
 OFFICIAL_REPO_NAME_EXPECTED = "hjtr7mymht-dot/WOA_AutoBot"
 ONLINE_VERSION_PATH_EXPECTED = "version.json"
 
@@ -401,7 +370,7 @@ class Application(ttkb.Window):
         if IS_WINDOWS:
             try:
                 import ctypes
-                myappid = 'woabot.launcher.v1.2.1'
+                myappid = 'woabot.launcher.v1.2.2'
                 ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
             except Exception:
                 pass
@@ -643,7 +612,7 @@ class Application(ttkb.Window):
 
     def setup_window_icon(self):
         try:
-            icon_rel = os.path.join(_ICON_DIR, "app.ico")
+            icon_rel = os.path.join(ICON_DIR, "app.ico")
             icon_path = get_resource_path(icon_rel)
             if not os.path.exists(icon_path): return
             try:

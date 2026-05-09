@@ -10,22 +10,17 @@ import traceback
 from adb_controller import AdbController, woa_debug_set_runtime_started, save_image_safe, read_image_safe
 from simple_ocr import StopSignal, SimpleOCR
 
-# 资助功能完整性守卫标记（由 gui_launcher 在严格模式下联动校验）
-WOA_FEATURE_GUARD_TOKEN = "WOA_DONATE_GUARD_V1"
+# 核心共享模块 - 消除重复定义
+from core import FEATURE_GUARD_TOKEN, get_resource_path
+
+# Bot 引擎 Mixin（配置 / 塔台 / 筛选 已模块化到 bot/ 包）
+from bot import ConfigMixin, TowerMixin, FilterMixin
+
+# 向后兼容别名
+WOA_FEATURE_GUARD_TOKEN = FEATURE_GUARD_TOKEN
 
 
-def get_resource_path(relative_path):
-    if getattr(sys, 'frozen', False):
-        if hasattr(sys, '_MEIPASS'):
-            base = sys._MEIPASS
-        else:
-            base = os.path.dirname(sys.executable)
-        return os.path.join(base, relative_path)
-    base_path = os.path.dirname(os.path.abspath(__file__))
-    return os.path.join(base_path, relative_path)
-
-
-class WoaBot:
+class WoaBot(ConfigMixin, TowerMixin, FilterMixin):
     def _check_running(self):
         if not self.running:
             raise StopSignal()

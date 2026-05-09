@@ -1,37 +1,39 @@
-﻿# WOA AutoBot Dependencies
-# ==========================
-# 通用依赖 (所有平台)
+﻿# WOA AutoBot 依赖清单
+# =========================
+# 用法: pip install -r requirements.txt
+
+# ─── 核心必需依赖 ──────────────────────────────────────
+# ADB / 设备控制
 adbutils>=2.12.0
-certifi>=2024.0
-charset-normalizer>=3.0
-deprecation>=2.1.0
-idna>=3.0
-lxml>=5.0
-numpy>=1.26.0
-opencv-python>=4.8.0
-opencv-python-headless>=4.8.0
-pillow>=10.0
-requests>=2.28.0
-retry2>=0.9.0
-ttkbootstrap>=1.20.0
 uiautomator2>=3.0.0
 uiautomator2cache>=0.3.0
-urllib3>=2.0
-pystray>=0.19.0
 
-# 性能优化库
+# 图像识别
+opencv-python>=4.8.0
+numpy>=1.26.0
+Pillow>=10.0
+
+# 现代 UI 框架
+ttkbootstrap>=1.20.0
+
+# XML / 网络
+lxml>=5.0
+requests>=2.28.0
+certifi>=2024.0
+urllib3>=2.0
+
+# 字符编码
+charset-normalizer>=3.0
+idna>=3.0
+
+# ─── 性能优化（可选但推荐） ────────────────────────────
 orjson>=3.10.0
 cachetools>=5.0.0
 
-# 图形化界面辅助 (可选)
-PyAutoGUI>=0.9.50
-pyperclip>=1.8.0
+# ─── 工具库 ────────────────────────────────────────────
+deprecation>=2.1.0
+retry2>=0.9.0
 
-# Windows 专属 (打包/编译)
+# ─── 打包（开发环境） ──────────────────────────────────
 # pyinstaller>=6.0
-# Nuitka>=2.0
-# pywin32-ctypes>=0.2.0
-# altgraph>=0.17.0
-# pefile>=2024.0
-# pyarmor>=9.0
-# zstandard>=0.22.0
+# pyinstaller-hooks-contrib>=2024.0

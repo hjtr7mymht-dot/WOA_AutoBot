@@ -1,14 +1,14 @@
 {
-  "version": "1.2.1",
+  "version": "1.2.2",
   "package_urls": [
     {
       "name": "GitHub Release",
-      "url": "https://github.com/hjtr7mymht-dot/WOA_AutoBot/releases/download/1.2.1/WOA_AutoBot.zip"
+      "url": "https://github.com/hjtr7mymht-dot/WOA_AutoBot/releases/download/1.2.2/WOA_AutoBot.zip"
     },
     {
       "name": "ghproxy Release",
-      "url": "https://ghproxy.cn/https://github.com/hjtr7mymht-dot/WOA_AutoBot/releases/download/1.2.1/WOA_AutoBot.zip"
+      "url": "https://ghproxy.cn/https://github.com/hjtr7mymht-dot/WOA_AutoBot/releases/download/1.2.2/WOA_AutoBot.zip"
     }
   ],
-  "notes": "1.2.1：塔台延时全面优化，全开时一键全部续费，部分开启时逐控制器精准续费；修复延时确认点击失败问题；离线模式完整可用；默认筛选模式改为全部勾选。"
+  "notes": "1.2.2：全面代码重构，核心模块解耦为 core/ 与 bot/ 包；消除重复代码与死依赖；跨平台兼容性修复（Win/macOS 截图方案自适应、ADB 路径、MuMu 标签等）；清理孤立文件与过期配置。"
 }

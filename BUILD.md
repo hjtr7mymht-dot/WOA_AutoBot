@@ -1,40 +1,38 @@
-WOA AutoBot v1.2.1 打包指南
+WOA AutoBot v1.2.2 打包指南
 ===========================
 
-macOS DMG 打包 (在当前 Mac 上已完成)
-------------------------------------
-打包结果位于 dist/ 目录:
-  - WOA_AutoBot_macOS.dmg (双击即可安装，推荐分发格式)
-
-⭐ 推荐使用 DMG 构建脚本一键完成:
-  bash build_dmg.sh
-
-如需手动从源码重新打包:
-  cd WOA_AutoBot
-  uv run pyinstaller -y --clean WOA_AutoBot_mac.spec
-  # 清理资源分叉（否则 codesign 失败）
-  find dist/WOA_AutoBot.app -name "._*" -delete
-  ditto --norsrc dist/WOA_AutoBot.app /tmp/WOA_clean.app
-  rm -rf dist/WOA_AutoBot.app
-  mv /tmp/WOA_clean.app dist/WOA_AutoBot.app
-  xattr -rc dist/WOA_AutoBot.app
-  codesign --remove-signature dist/WOA_AutoBot.app 2>/dev/null
-  codesign --deep --force --sign - dist/WOA_AutoBot.app
-  # 制作 DMG
-  ditto -c -k --sequesterRsrc --keepParent dist/WOA_AutoBot.app dist/WOA_AutoBot_macOS.zip
-
-注意: Windows 版需要有 adb.exe 在 adb_tools/ 和 platform-tools/ 目录中。
-
-
-用户使用说明
+Windows 打包
 -----------
-macOS 用户:
-  1. 解压 WOA_AutoBot_macOS.zip
-  2. 将 WOA_AutoBot.app 拖入「应用程序」文件夹
-  3. 首次打开如提示「未识别的开发者」：
-     系统设置 → 隐私与安全性 → 仍要打开
-  4. 需要连接安卓模拟器或真机 (通过 adb)
+```powershell
+# 使用虚拟环境中的 PyInstaller（推荐）
+.venv\Scripts\python.exe -m PyInstaller -y --clean WOA_AutoBot.spec
 
-Windows 用户:
-  1. 解压后运行 WOA_AutoBot.exe
-  2. 需要连接安卓模拟器或真机 (通过 adb)
+# 打包结果位于 dist/WOA_AutoBot/
+# 运行: dist\WOA_AutoBot\WOA_AutoBot.exe
+```
+
+macOS DMG 打包
+--------------
+```bash
+# 推荐使用 DMG 构建脚本一键完成
+bash build_dmg.sh
+
+# 或手动从源码打包
+uv run pyinstaller -y --clean WOA_AutoBot_mac.spec
+# 清理资源分叉
+find dist/WOA_AutoBot.app -name "._*" -delete
+ditto --norsrc dist/WOA_AutoBot.app /tmp/WOA_clean.app
+rm -rf dist/WOA_AutoBot.app
+mv /tmp/WOA_clean.app dist/WOA_AutoBot.app
+xattr -rc dist/WOA_AutoBot.app
+codesign --remove-signature dist/WOA_AutoBot.app 2>/dev/null
+codesign --deep --force --sign - dist/WOA_AutoBot.app
+# 制作 DMG
+hdiutil create -volname "WOA AutoBot v1.2.2" -srcfolder dist/WOA_AutoBot.app -ov -format UDZO dist/WOA_AutoBot_macOS.dmg
+```
+
+注意
+----
+- Windows 版需要 `adb.exe` 在系统 PATH 或连接 MuMu 模拟器自动发现
+- `adb_tools/` 与 `platform-tools/` 目录中的二进制为 macOS 通用格式，打包时会随 spec 一同复制
+- 重构后的 `core/` 和 `bot/` 包已列入 spec datas，打包时自动包含
