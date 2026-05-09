@@ -1,10 +1,12 @@
 # MuMu12 nemu_ipc DLL 截图模块
 # 从 adb_controller.py 提取的独立模块
+# 注意：此模块仅在 Windows 上可用（依赖 MuMu 模拟器的 external_renderer_ipc.dll）
 
 import ctypes
 import os
 import sys
 
+from platform_utils import IS_WINDOWS
 from woa_debug import _woa_debug_log, save_image_safe
 
 # 写死为 0，长期关闭 nemu_ipc_debug 文件夹内截图保存；改为 1 可重新开启
@@ -12,8 +14,11 @@ NEMU_IPC_DEBUG = 0
 
 
 class _SafeDLLWrapper:
-    """包装 DLL 句柄，手动通过 GetProcAddress 获取函数地址，绕过 Nuitka 的 ctypes 拦截逻辑"""
+    """包装 DLL 句柄，手动通过 GetProcAddress 获取函数地址，绕过 Nuitka 的 ctypes 拦截逻辑
+    仅在 Windows 上有效。"""
     def __init__(self, handle, path):
+        if not IS_WINDOWS:
+            raise OSError("nemu_ipc DLL 加载仅支持 Windows 平台")
         self._handle = handle
         self._path = path
         self._funcs = {}
@@ -76,7 +81,10 @@ class _SafeDLLWrapper:
 
 
 def _load_dll_safe(dll_path):
-    """从可能包含中文的路径加载 DLL，兼容 ctypes 在非 ASCII 路径下的问题"""
+    """从可能包含中文的路径加载 DLL，兼容 ctypes 在非 ASCII 路径下的问题。
+    非 Windows 平台直接返回 None。"""
+    if not IS_WINDOWS:
+        return None
     dll_path = os.path.abspath(dll_path)
     if not os.path.exists(dll_path):
         return None
@@ -147,7 +155,10 @@ class NemuIpcHelper:
         self._debug_count = 0
 
     def find_folder_and_id(self):
-        """从 serial 解析 MuMu12 安装路径和实例 ID（参考 ALAS NemuIpcImpl.serial_to_id）"""
+        """从 serial 解析 MuMu12 安装路径和实例 ID（参考 ALAS NemuIpcImpl.serial_to_id）
+        仅在 Windows 上可用。"""
+        if not IS_WINDOWS:
+            return None, None
         if not self._ctrl.device_serial or ":" not in self._ctrl.device_serial:
             return None, None
         try:
