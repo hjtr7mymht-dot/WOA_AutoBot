@@ -125,6 +125,10 @@ class WoaBot(ConfigMixin, TowerMixin, FilterMixin):
         self._tower_none_read_count = 0
         # 塔台监测硬预算：从触发监测到得出结果，目标压到 2s 内。
         self.TOWER_MONITOR_MAX_SEC = 2.0
+        # 像素全开稳定性确认（避免偶发误判导致筛选模式跳变）
+        self._tower_all_open_stable_count = 0
+        self.TOWER_STABLE_CONFIRM_COUNT = 3
+        self._last_tower_all_open_state = False
         self.COLOR_LIGHT = (203, 191, 179)
         self.COLOR_DARK = (101, 85, 70)
         self.FILTER_MENU_BTN = (1537, 37)
@@ -420,6 +424,22 @@ class WoaBot(ConfigMixin, TowerMixin, FilterMixin):
         self._no_takeoff_cycle_next_switch_time = time.time() + self._no_takeoff_switch_interval
         self.log(f"📋 [不起飞模式] {reason}，切换到{'待降落' if self._no_takeoff_cycle_side == 'landing' else '停机坪'}")
 
+    def _check_no_takeoff_schedules(self):
+        """每轮主循环检查不起飞/独立小退到期时间。"""
+        if not self.enable_no_takeoff_mode and not self.enable_standalone_logout:
+            return
+        now = time.time()
+        # 不起飞自动小退
+        if self.enable_no_takeoff_mode and self._no_takeoff_auto_logout_next_time > 0 and now >= self._no_takeoff_auto_logout_next_time:
+            self.log("📋 [不起飞模式] 自动小退到期")
+            self._do_no_takeoff_small_logout()
+            self._schedule_no_takeoff_auto_logout()
+        # 独立小退
+        if self.enable_standalone_logout and self._standalone_logout_next_time > 0 and now >= self._standalone_logout_next_time:
+            self.log("📋 [独立小退] 到期")
+            self._do_no_takeoff_small_logout()
+            self._standalone_logout_next_time = now + self._standalone_logout_interval * 60.0
+
     def _get_no_takeoff_strategy(self):
         if all(self._tower_active_slots):
             return 'stand_only'
@@ -428,46 +448,46 @@ class WoaBot(ConfigMixin, TowerMixin, FilterMixin):
         return 'stand_only'
 
     def _do_no_takeoff_small_logout(self):
-        """不起飞模式小退：点击主界面 -> 等待0.5s -> 点击换机场 -> 等待4s -> 点击 first_start_2(30s内) -> 等待10s -> 等待主界面(90s内)"""
+        """小退流程：主界面 → 换机场 → first_start_2 → 等待主界面。"""
         self._check_running()
         loc = self.safe_locate('main_interface.png', region=self.REGION_MAIN_ANCHOR, confidence=0.8)
         if not loc:
-            self.log("📋 [小退] 未找到主界面按钮，跳过本次小退")
+            self.log("📋 [小退] 未找到主界面按钮，跳过")
             return
         self.adb.click(loc[0], loc[1], random_offset=5)
         self.sleep(0.5)
+
         if not self.find_and_click('change_airport.png', confidence=0.75, wait=0):
             self.log("📋 [小退] 未找到更改机场按钮，跳过")
             return
         self.sleep(4.0)
+
         t0 = time.time()
-        found_fs2 = False
+        found = False
         while time.time() - t0 < 30.0:
             self._check_running()
             if self.find_and_click('first_start_2.png', wait=0.5):
-                found_fs2 = True
+                found = True
                 break
             self.sleep(0.5)
-        if not found_fs2:
-            self.log("📋 [小退] 30s 内未找到开始按钮，继续等待主界面")
+        if not found:
+            self.log("📋 [小退] 30s 内未找到开始按钮，等待主界面")
+
         self.sleep(10.0)
-        wait_main = time.time()
-        while time.time() - wait_main < 90.0:
+        t0 = time.time()
+        while time.time() - t0 < 90.0:
             self._check_running()
             if self.safe_locate('main_interface.png', region=self.REGION_MAIN_ANCHOR, confidence=0.8):
-                self.log("📋 [小退] 已返回主界面，恢复处理")
-                # 重新检测塔台状态和筛选模式，避免默认停留在"仅停机位"模式
+                self.log("📋 [小退] 已返回主界面")
                 self.sleep(0.5)
                 try:
                     self._init_tower_countdown()
-                except StopSignal:
-                    raise
                 except Exception as e:
-                    self.log(f"🗼 [塔台] ⚠️ 小退后重检测塔台失败: {e}")
+                    self.log(f"🗼 [塔台] ⚠️ 小退后重检塔台失败: {e}")
                 self._periodic_15s_check(force_initial_filter_check=True)
                 return
             self.sleep(1.0)
-        self.log("📋 [小退] 90s 内未检测到主界面，交由后续流程处理")
+        self.log("📋 [小退] 90s 内未检测到主界面")
 
     def _force_switch_filter_mode1(self):
         """在主循环中强制将筛选状态切回模式1（仅待处理）"""
@@ -614,20 +634,22 @@ class WoaBot(ConfigMixin, TowerMixin, FilterMixin):
                 else:
                     break
 
+        # ═══ 不起飞模式筛选管理 ═══
         if self.enable_no_takeoff_mode:
             strategy = self._get_no_takeoff_strategy()
-            # OCR 读取偶发抖动时，用像素状态兜底：全开塔台强制按仅停机位处理。
+            # 像素兜底：OCR 可能误判塔台关闭
             if strategy == 'landing_stand_cycle' and self._is_tower_all_open_by_pixels(screen):
                 strategy = 'stand_only'
                 self._tower_active_slots = [True, True, True, True]
+
             if strategy == 'landing_stand_cycle':
                 current_side = self._get_mode3_side(screen) if is_mode3 else None
                 if current_side != self._no_takeoff_cycle_side:
                     self.log(f"📋 [不起飞模式] 应用{'待降落' if self._no_takeoff_cycle_side == 'landing' else '停机坪'}筛选...")
                     apply_mode3(self._no_takeoff_cycle_side)
-            else:
+            else:  # stand_only
                 if not is_mode2:
-                    self.log("📋 [不起飞模式] 塔台全开或非4号单开，强制切换至停机坪待处理...")
+                    self.log("📋 [不起飞模式] 强制切换至停机坪待处理...")
                     apply_mode(self.FILTER_CHECK_POINTS_MODE2)
             return
 
@@ -1663,10 +1685,13 @@ class WoaBot(ConfigMixin, TowerMixin, FilterMixin):
                 self.log("🗼 [塔台] ⚠️ 截图失败，无法读取控制器时间")
                 continue
             for i, region in enumerate(self.TOWER_TIME_REGIONS):
-                best_secs = times[i]
-                candidates = list(self._iter_region_fallbacks(region, pad_x=(8 if fast else 12), pad_y=4))
+                if times[i] is not None:
+                    continue  # 已成功读取，跳过以省预算
+                best_secs = None
+                candidates = list(self._iter_region_fallbacks(region, pad_x=(12 if fast else 15), pad_y=5))
                 if fast:
-                    candidates = candidates[:2]
+                    # 至少保留 4 个候选：原始 → 扩大 → 右移 → 左移，避免漏读偏移文字
+                    candidates = candidates[:4]
                 for candidate in candidates:
                     if _budget_exhausted(guard=0.15):
                         break
@@ -1676,24 +1701,26 @@ class WoaBot(ConfigMixin, TowerMixin, FilterMixin):
                     secs = self.ocr.parse_tower_time(text)
                     if secs is None:
                         continue
-                    # 取更大值可减少 OCR 漏位把 8m35s 误读成 35s 的情况。
                     if best_secs is None or secs > best_secs:
                         best_secs = secs
-                times[i] = best_secs
+                times[i] = best_secs if best_secs is not None else times[i]
             if all(v is not None for v in times):
                 break
-            if not fast:
+            # 快速模式：若仍有未读到的控制器，再做一次 pass
+            if fast and not all(v is not None for v in times):
+                self.sleep(0.05)
+            elif not fast:
                 self.sleep(0.12)
             else:
                 self.sleep(0.03)
 
-        if not fast:
-            for i in range(4):
-                if times[i] is not None:
-                    self.log(f"   塔台控制器 {i+1}: {times[i]}s")
-                else:
-                    raw_preview = ", ".join(sorted(raw_by_slot[i])) if raw_by_slot[i] else "无"
-                    self.log(f"   塔台控制器 {i+1}: 无有效数字 (raw={raw_preview})")
+        # 始终输出诊断日志（包括 fast 模式），帮助排查漏读
+        for i in range(4):
+            if times[i] is not None:
+                self.log(f"   塔台控制器 {i+1}: {times[i]}s")
+            else:
+                raw_preview = ", ".join(sorted(raw_by_slot[i])) if raw_by_slot[i] else "无"
+                self.log(f"   塔台控制器 {i+1}: 无有效数字 (raw={raw_preview})")
         return times
 
     def _handle_server_error_popup(self, force=False):
@@ -1835,8 +1862,8 @@ class WoaBot(ConfigMixin, TowerMixin, FilterMixin):
                     urgent = True
             if urgent:
                 urgent_slots = [i+1 for i in range(4) if needs_delay_now[i]]
-                self.log(f"🗼 [塔台] ⚠️ 控制器 {urgent_slots} 剩余不足3分钟，立即执行延时！")
-                self._perform_tower_delay(needs_delay_now, menu_already_open=True)
+                self.log(f"🗼 [塔台] ⚠️ 控制器 {urgent_slots} 剩余不足3分钟，立即执行全部延时！")
+                self._do_tower_delay(menu_already_open=True)
                 return
             # 自动延时已开启：提前3分钟触发
             trigger_in = max(0, min_time - 180)
@@ -1936,6 +1963,22 @@ class WoaBot(ConfigMixin, TowerMixin, FilterMixin):
         self.log("🗼 [塔台] 延时倒计时到期，打开菜单检查剩余时间...")
         times = self._read_tower_times(open_menu=True, fast=True, budget_start=monitor_start, budget_sec=monitor_budget)
         self.log(f"🗼 [塔台] OCR 结果: {times}")
+        # OCR 可能漏读部分控制器 → 用像素检测兜底
+        screen = self.adb.get_screenshot()
+        if screen is not None and any(t is None for t in times):
+            for i in range(4):
+                if times[i] is None:
+                    try:
+                        x, y = self.TOWER_CHECK_POINTS[i]
+                        b, g, r = screen[y, x]
+                        is_red = self._is_point_red(int(b), int(g), int(r))
+                        is_green = self._color_diff((int(b), int(g), int(r)), self.TOWER_GREEN_BGR) < 55
+                        if is_red or is_green:
+                            # 像素显示激活但 OCR 漏读 → 用保守估计 300s
+                            times[i] = 300
+                            self.log(f"🗼 [塔台] 控制器 {i+1} OCR 漏读，像素显示{'红' if is_red else '绿'}，补为 300s 延时")
+                    except (IndexError, TypeError):
+                        pass
         # 先检查是否全部关闭（全 None）
         active = [t is not None and t > 0 for t in times]
         if sum(active) == 0:
@@ -1993,242 +2036,138 @@ class WoaBot(ConfigMixin, TowerMixin, FilterMixin):
             if elapsed > monitor_budget:
                 self.log(f"🗼 [塔台] ⚠️ 监测预算超时: {elapsed:.2f}s > {monitor_budget:.2f}s")
             return True
-        # 菜单已打开，直接执行延时
+        # 菜单已打开，直接执行全部延时
         self.log(f"🗼 [塔台] 需要延时的控制器: {[i+1 for i in range(4) if needs_delay[i]]}")
-        self._perform_tower_delay(needs_delay, menu_already_open=True)
-        # 延时完成后关闭菜单，并设置下次检查时间
-        self._close_tower_menu(fast=True)
-        # 设置下次 deadline：等剩余控制器接近到期（最短时间前10分钟）再检查
-        remaining_times = [times[i] for i in range(4) if active[i] and not needs_delay[i] and times[i] is not None]
-        if remaining_times:
-            next_check = max(60, min(remaining_times) - 600)
-        else:
-            next_check = 600  # 10 分钟默认
-        self._tower_delay_deadline = time.time() + next_check
-        self.log(f"🗼 [塔台] 延时完成，下次检查约在 {int(next_check)}s 后")
+        self._do_tower_delay(menu_already_open=True)
+        # _do_tower_delay 已内置：关菜单 + 读倒计时 + 设 deadline，无需再手动处理
         elapsed = time.time() - monitor_start
         if elapsed > monitor_budget:
             self.log(f"🗼 [塔台] ⚠️ 监测预算超时: {elapsed:.2f}s > {monitor_budget:.2f}s")
         return True
 
-    def _try_delay_clicks(self, needs_delay, all_active, all_need):
-        """尝试点击延时按钮并确认，返回 True/False"""
-        def _confirm_delay_dialog_any():
-            """在延时弹窗中寻找确认按钮并点击。
-            优先匹配单控制器延时 (delay_1.png)，再匹配全部延时 (delay.png) 和 yes.png。
-            点击后等待弹窗消失才算确认成功。"""
-            total_max = 6.0  # 总超时
-            t0 = time.time()
-            while time.time() - t0 < total_max:
-                self._check_running()
-                # 1) 优先尝试单控制器延时确认按钮
-                if self.wait_and_click('delay_1.png', timeout=0.5, click_wait=0.3, random_offset=2):
-                    self.sleep(0.3)
-                    # 确认弹窗是否已关闭
-                    screen = self.adb.get_screenshot()
-                    if screen is not None:
-                        still = self._locate_on_screen('delay_1.png', screen, confidence=0.75)
-                        if not still:
-                            return True
-                # 2) 尝试全部延时确认
-                if self.wait_and_click('delay.png', timeout=0.5, click_wait=0.3, random_offset=2):
-                    self.sleep(0.3)
-                    screen = self.adb.get_screenshot()
-                    if screen is not None:
-                        still = self._locate_on_screen('delay.png', screen, confidence=0.75)
-                        if not still:
-                            return True
-                # 3) 通用确认
-                if self.wait_and_click('yes.png', timeout=0.5, click_wait=0.3, random_offset=2):
-                    self.sleep(0.3)
-                    screen = self.adb.get_screenshot()
-                    if screen is not None:
-                        still = self._locate_on_screen('yes.png', screen, confidence=0.75)
-                        if not still:
-                            return True
-                # 4) 检查弹窗是否已自行消失
+    # ═══════════════════════════════════════════════════════════════
+    # 塔台延时 — 统一使用「全部延时」按钮
+    # ═══════════════════════════════════════════════════════════════
+
+    def _try_click_all_delay(self):
+        """点击全部延时按钮 → 确认 delay.png / yes.png → 返回 True/False。"""
+        self.log("   -> 点击「全部延时」按钮")
+        self.adb.click(*self.TOWER_DELAY_ALL_BTN)
+        self.sleep(0.5)
+
+        deadline = time.time() + 6.0
+        while time.time() < deadline:
+            self._check_running()
+            # 1) 全部延时确认按钮
+            if self.wait_and_click('delay.png', timeout=0.6, click_wait=0.3, random_offset=2):
+                self.sleep(0.3)
                 screen = self.adb.get_screenshot()
-                if screen is not None:
-                    has_d1 = self._locate_on_screen('delay_1.png', screen, confidence=0.75)
-                    has_d = self._locate_on_screen('delay.png', screen, confidence=0.75)
-                    has_y = self._locate_on_screen('yes.png', screen, confidence=0.75)
-                    if not (has_d1 or has_d or has_y):
-                        return True
-                self.sleep(0.15)
-            return False
-
-        if all_active and all_need:
-            self.log("   -> 点击全部延时按钮")
-            self.adb.click(*self.TOWER_DELAY_ALL_BTN)
-            self.sleep(0.5)
-            ok = _confirm_delay_dialog_any()
-            if not ok:
-                self.log("   -> 全部延时确认失败")
-            return ok
-        else:
-            any_ok = False
-            for i in range(4):
-                if not needs_delay[i]:
-                    continue
-                self.log(f"   -> 点击控制器 {i+1} 延时按钮")
-                self.adb.click(*self.TOWER_DELAY_BUTTONS[i])
-                self.sleep(0.5)
-                if _confirm_delay_dialog_any():
-                    self.log(f"   -> 控制器 {i+1} 延时确认成功")
-                    any_ok = True
-                else:
-                    self.log(f"   -> 控制器 {i+1} 延时确认失败")
-            return any_ok
-
-    def _check_delay_by_ocr(self, pre_times):
-        """通过 OCR 对比延时前后的时间，若任意活跃控制器时间变长则视为延时成功。
-        pre_times: 延时前的 [秒数, ...] 列表。返回 True/False。"""
-        self.sleep(0.6)
-        post_times = self._read_tower_times(open_menu=False)
-        for i in range(4):
-            if not self._tower_active_slots[i]:
-                continue
-            before = pre_times[i]
-            after = post_times[i]
-            if before is not None and after is not None and after > before:
-                self.log(f"   -> 🗼 OCR 检测：控制器 {i+1} 时间 {before}s -> {after}s，判定延时成功")
-                return True
+                if screen is not None and not self._locate_on_screen('delay.png', screen, confidence=0.75):
+                    return True
+            # 2) 通用 yes 兜底
+            if self.wait_and_click('yes.png', timeout=0.5, click_wait=0.3, random_offset=2):
+                self.sleep(0.3)
+                screen = self.adb.get_screenshot()
+                if screen is not None and not self._locate_on_screen('yes.png', screen, confidence=0.75):
+                    return True
+            # 3) 弹窗是否自行消失
+            screen = self.adb.get_screenshot()
+            if screen is not None:
+                has_d = self._locate_on_screen('delay.png', screen, confidence=0.75)
+                has_y = self._locate_on_screen('yes.png', screen, confidence=0.75)
+                if not (has_d or has_y):
+                    return True
+            self.sleep(0.2)
         return False
 
-    def _perform_tower_delay(self, needs_delay, menu_already_open=False):
-        """执行塔台延时操作。needs_delay: [bool]*4 表示哪些控制器需要延时。
-        menu_already_open=True 时假设菜单已打开。
-        失败时重试：关窗重点按钮(最多2次) → 关窗+back退回主界面+重开菜单(1次)
-        每次尝试后通过 OCR 对比时间变化，防止误判导致重复延时。"""
-        delay_slots = [i+1 for i in range(4) if needs_delay[i]]
-        self.log(f"🗼 [塔台] 开始延时操作，目标控制器: {delay_slots}，菜单已打开: {menu_already_open}")
+    def _do_tower_delay(self, menu_already_open=False):
+        """执行一次全部延时：开菜单 → 点按钮 → 确认 → 最多重试1次。"""
+        self.log("🗼 [塔台] 执行全部延时...")
         if not menu_already_open:
             self.close_window()
             self.sleep(0.3)
             if not self._open_tower_menu():
-                self.log("🗼 [塔台] ⚠️ 菜单打开失败，30s 后再次尝试")
+                self.log("🗼 [塔台] ⚠️ 菜单打开失败，30s 后重试")
                 self._tower_delay_deadline = time.time() + 30
-                return True
-        # 记录延时前的 OCR 时间，用于后续对比
-        pre_times = self._read_tower_times(open_menu=False)
-        self.log(f"🗼 [塔台] 延时前 OCR 时间: {pre_times}")
-        all_active = all(self._tower_active_slots)
-        all_need = all(n for n, a in zip(needs_delay, self._tower_active_slots) if a)
-        confirm_success = self._try_delay_clicks(needs_delay, all_active, all_need)
-        # UI 未确认时，用 OCR 对比判断是否实际已延时
-        if not confirm_success:
-            if self._check_delay_by_ocr(pre_times):
-                confirm_success = True
-        # 重试阶段1：关窗后重新点击按钮（最多2次）
-        if not confirm_success:
-            for retry in range(2):
-                self.log(f"   -> ⚠️ 延时未确认，关窗重试 ({retry+1}/2)...")
-                self.close_window()
-                self.sleep(0.5)
-                confirm_success = self._try_delay_clicks(needs_delay, all_active, all_need)
-                if not confirm_success:
-                    if self._check_delay_by_ocr(pre_times):
-                        confirm_success = True
-                if confirm_success:
-                    break
-        # 重试阶段2：退回主界面，重新打开菜单（1次）
-        if not confirm_success:
-            self.log("   -> ⚠️ 关窗重试仍失败，退回主界面后重新打开菜单...")
-            self.close_window()
-            self.sleep(0.3)
-            if not self.wait_and_click('back.png', timeout=3.0, click_wait=0.5, random_offset=2):
-                self.close_window()
-            self.sleep(0.5)
-            if not self._open_tower_menu():
-                self.log("🗼 [塔台] ⚠️ 重开菜单失败")
-            else:
-                confirm_success = self._try_delay_clicks(needs_delay, all_active, all_need)
-                if not confirm_success:
-                    if self._check_delay_by_ocr(pre_times):
-                        confirm_success = True
-        if confirm_success:
-            self.log(f"   -> ✅ 延时操作完成，剩余延时次数: {self.auto_delay_count - 1}")
-            self.auto_delay_count -= 1
-            if self.config_callback:
-                self.config_callback("auto_delay_count", self.auto_delay_count)
-            # 延时确认后等待1s，此时仍在塔台页面，直接读取时间
-            self.sleep(1.0)
-            self.log("🗼 [塔台] 延时确认后，直接读取当前倒计时...")
-            times = self._read_tower_times(open_menu=False)
-            valid_times = [t for t, a in zip(times, self._tower_active_slots) if a and t is not None and t > 0]
-            if valid_times:
-                if self.auto_delay_count > 0:
-                    # 还有延时次数，按延时模式：最短时间 - 3分钟
-                    min_time = min(valid_times)
-                    trigger_in = max(0, min_time - 180)
-                    self._tower_delay_deadline = time.time() + trigger_in
-                    mins, secs = divmod(int(min_time), 60)
-                    self.log(f"🗼 [塔台] 最短剩余 {mins}m{secs}s，{int(trigger_in)}s 后执行下次延时")
-                else:
-                    # 延时次数已用完，切换为监控模式：最长时间 + 10s
-                    max_time = max(valid_times)
-                    trigger_in = max_time + 10
-                    self._tower_delay_deadline = time.time() + trigger_in
-                    mins, secs = divmod(int(max_time), 60)
-                    self.log(f"🗼 [塔台] 延时次数已用完，切换为监控模式，最长剩余 {mins}m{secs}s，{int(trigger_in)}s 后确认塔台状态")
-            else:
-                self._tower_delay_deadline = 0.0
-                self.log("🗼 [塔台] ⚠️ 延时后未能读取到有效时间")
-            self._close_tower_menu()
-        else:
-            self.log("   -> ⚠️ 所有重试均失败，30s 后再次尝试")
+                return False
+
+        # 首次尝试
+        ok = self._try_click_all_delay()
+        if ok:
+            return self._finish_delay_and_schedule()
+
+        # 重试一次：关窗 → 重开菜单 → 再点
+        self.log("   -> ⚠️ 首次未确认，关窗重试...")
+        self.close_window()
+        self.sleep(0.5)
+        if not self._open_tower_menu():
+            self.log("🗼 [塔台] ⚠️ 重开菜单失败，30s 后重试")
             self._tower_delay_deadline = time.time() + 30
             self._close_tower_menu()
+            return False
+        ok = self._try_click_all_delay()
+        if ok:
+            return self._finish_delay_and_schedule()
+
+        self.log("   -> ⚠️ 两次尝试均失败，30s 后重试")
+        self._tower_delay_deadline = time.time() + 30
+        self._close_tower_menu()
+        return False
+
+    def _finish_delay_and_schedule(self):
+        """延时确认后的收尾：扣次数 → 读倒计时 → 设下次 deadline → 关菜单。"""
+        self.log(f"   -> ✅ 全部延时完成，剩余次数: {self.auto_delay_count - 1}")
+        self.auto_delay_count -= 1
+        if self.config_callback:
+            self.config_callback("auto_delay_count", self.auto_delay_count)
+
+        self.sleep(1.0)
+        times = self._read_tower_times(open_menu=False)
+        valid_times = [t for t, a in zip(times, self._tower_active_slots)
+                       if a and t is not None and t > 0]
+        if valid_times:
+            if self.auto_delay_count > 0:
+                trigger_in = max(0, min(valid_times) - 180)
+                self._tower_delay_deadline = time.time() + trigger_in
+                m, s = divmod(int(min(valid_times)), 60)
+                self.log(f"🗼 [塔台] 最短 {m}m{s}s，{int(trigger_in)}s 后下次延时")
+            else:
+                trigger_in = max(valid_times) + 10
+                self._tower_delay_deadline = time.time() + trigger_in
+                m, s = divmod(int(max(valid_times)), 60)
+                self.log(f"🗼 [塔台] 次数用完，切换监控，最长 {m}m{s}s，{int(trigger_in)}s 后确认")
+        else:
+            self._tower_delay_deadline = 0.0
+            self.log("🗼 [塔台] ⚠️ 延时后未能读取有效时间")
+
+        self._close_tower_menu()
         return True
 
     def _check_and_perform_auto_delay(self, screen=None):
-        if self.auto_delay_count <= 0 or self._tower_disabled: return False
-
+        """最高优红灯检测：任一塔台采样点变红 → 立即执行全部延时。"""
+        if self.auto_delay_count <= 0 or self._tower_disabled:
+            return False
         if time.time() < self.doing_task_forbidden_until:
             return False
-
-        # 先检查塔台图标是否可见，确保当前在主界面
         if not self._is_tower_icon_visible():
             return False
 
         if screen is None:
             screen = self.adb.get_screenshot()
-        if screen is None: return False
-        is_triggered = False
+        if screen is None:
+            return False
+
         for (x, y) in self.TOWER_CHECK_POINTS:
             try:
                 b, g, r = screen[y, x]
                 if self._is_point_red(int(b), int(g), int(r)):
-                    is_triggered = True
-                    break
+                    self.log("🚨 [最高优] 检测到塔台红灯，执行全部延时！")
+                    self.close_window()
+                    self.sleep(0.3)
+                    self._do_tower_delay(menu_already_open=False)
+                    return True
             except Exception:
                 pass
-        if is_triggered:
-            self.log(f"🚨 [最高优] 监测到自动塔台红灯...")
-            # 打开塔台菜单，读取时间
-            self.close_window()
-            self.sleep(0.3)
-            if not self._open_tower_menu():
-                self.log("🗼 [塔台] ⚠️ 红灯触发但菜单打开失败，跳过本次")
-                return True
-            times = self._read_tower_times(open_menu=False)
-            self.log(f"🗼 [塔台] 红灯触发 OCR 结果: {times}")
-            # 判断哪些活跃控制器需要延时（< 2分钟，紧急）
-            needs_delay = [False, False, False, False]
-            for i in range(4):
-                if self._tower_active_slots[i] and times[i] is not None and times[i] < 120:
-                    needs_delay[i] = True
-                    self.log(f"🗼 [塔台] 控制器 {i+1} 剩余 {int(times[i])}s < 120s，紧急延时")
-            if any(needs_delay):
-                # 菜单已打开，直接延时
-                self.log(f"🗼 [塔台] 紧急延时控制器: {[i+1 for i in range(4) if needs_delay[i]]}")
-                self._perform_tower_delay(needs_delay, menu_already_open=True)
-            else:
-                # 全部活跃的都延时（红灯说明至少有一个快到期了）
-                needs_all = [a for a in self._tower_active_slots]
-                self.log(f"🗼 [塔台] 无 <2min 控制器，对所有活跃控制器执行延时")
-                self._perform_tower_delay(needs_all, menu_already_open=True)
-            return True
         return False
 
     def _exit_vehicle_buy_scene(self, max_rounds=4):
@@ -2864,6 +2803,7 @@ class WoaBot(ConfigMixin, TowerMixin, FilterMixin):
                 self.last_checked_avail_staff = current_avail
 
         if self._check_and_perform_auto_delay(current_screen): return True
+        self._check_no_takeoff_schedules()
         lx, ly, lw, lh = self.LIST_ROI_X, 0, self.LIST_ROI_W, self.LIST_ROI_H
         list_roi_img = current_screen[ly:ly + lh, lx:lx + lw]
         _, final_tasks = self._run_pending_detection(list_roi_img)

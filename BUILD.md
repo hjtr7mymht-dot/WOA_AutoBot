@@ -1,4 +1,4 @@
-WOA AutoBot v1.2.2 打包指南
+WOA AutoBot v1.2.3 打包指南
 ===========================
 
 Windows 打包

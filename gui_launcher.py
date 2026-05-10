@@ -370,7 +370,7 @@ class Application(ttkb.Window):
         if IS_WINDOWS:
             try:
                 import ctypes
-                myappid = 'woabot.launcher.v1.2.2'
+                myappid = 'woabot.launcher.v1.2.3'
                 ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
             except Exception:
                 pass
@@ -451,14 +451,12 @@ class Application(ttkb.Window):
         self.var_approach = tk.StringVar(value="0")
         self.var_depart = tk.StringVar(value="0")
         self.var_stand_summary = tk.StringVar(value="0 / 0")
+        self.var_error_count = tk.StringVar(value="0")
+        self.var_tower_delay_left = tk.StringVar(value="—")
+        self.var_tower_active = tk.StringVar(value="—")
         self.var_stats_source = tk.StringVar(value="当前未运行")
         self._runtime_start_time = None
-        self._runtime_stats = {
-            'tasks_completed': 0,
-            'cycles_completed': 0,
-            'errors_encountered': 0,
-            'last_cycle_time': 0.0,
-        }
+        self._runtime_error_count = 0
         
         self._online_validation_running = False
         self._online_validation_ok = False
@@ -715,24 +713,43 @@ class Application(ttkb.Window):
         m, s = divmod(rest, 60)
         self.var_runtime_duration.set(f"{h:02}:{m:02}:{s:02}")
 
+        # 基础数据
         snap = self._get_runtime_stats_snapshot()
         self.var_approach.set(str(snap.get("approach", 0)))
         self.var_depart.set(str(snap.get("depart", 0)))
         self.var_stand_summary.set(f"{snap.get('stand_count', 0)} / {snap.get('stand_staff', 0)}")
+
+        # 效率指标
+        total_ops = snap.get("approach", 0) + snap.get("depart", 0) + snap.get("stand_count", 0)
+        elapsed_hours = max(elapsed / 3600.0, 1.0 / 3600.0)
+        self.var_cycle_efficiency.set(f"{total_ops / elapsed_hours:.1f}/h")
+        self.var_avg_cycle_time.set(f"{elapsed / max(total_ops, 1):.1f}s")
+
+        # 错误计数
+        self.var_error_count.set(str(self._runtime_error_count))
+
+        # 塔台信息
+        bot = self.bot
+        if bot and getattr(bot, "running", False):
+            self.var_tower_delay_left.set(str(getattr(bot, "auto_delay_count", 0)))
+            active_slots = getattr(bot, "_tower_active_slots", [False]*4)
+            if any(active_slots):
+                slots = ",".join(str(i+1) for i, a in enumerate(active_slots) if a)
+                disabled = getattr(bot, "_tower_disabled", False)
+                self.var_tower_active.set("关闭" if disabled else slots)
+            else:
+                self.var_tower_active.set("无")
+        else:
+            self.var_tower_delay_left.set("—")
+            self.var_tower_active.set("—")
+
+        # 数据来源
         source_label = {
             'session': '本次运行',
             'csv': '当日CSV',
             'empty': '当前未运行'
         }.get(snap.get('source'), '当前未运行')
         self.var_stats_source.set(source_label)
-
-        total_ops = snap.get("approach", 0) + snap.get("depart", 0) + snap.get("stand_count", 0)
-        elapsed_hours = max(elapsed / 3600.0, 1.0 / 3600.0)
-        self.var_cycle_efficiency.set(f"{total_ops / elapsed_hours:.1f}/h")
-        if total_ops > 0:
-            self.var_avg_cycle_time.set(f"{elapsed / total_ops:.1f}s")
-        else:
-            self.var_avg_cycle_time.set("0.0s")
 
         self.after(1000, self._update_runtime_stats)
 
@@ -1267,23 +1284,28 @@ class Application(ttkb.Window):
         mid_pane.columnconfigure(1, weight=7, uniform="mid")
         mid_pane.rowconfigure(0, weight=1)
 
-        # ---- 左侧：实时数据 + 采集环境信息 ----
+        # ---- 左侧：实时数据面板 ----
         left_col = ttkb.Frame(mid_pane)
         left_col.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
 
         stats_card = ttkb.Labelframe(left_col, text=" 实时数据 ", padding=10, bootstyle="dark")
         stats_card.pack(fill=BOTH, expand=True)
 
-        for label, var in (
-            ("⏱ 运行时长", self.var_runtime_duration),
-            ("🛬 进场", self.var_approach),
-            ("🛫 离场", self.var_depart),
-            ("🅿️ 地勤(架次/人次)", self.var_stand_summary),
-            ("⚡ 效率", self.var_cycle_efficiency),
-            ("📊 数据来源", self.var_stats_source),
-        ):
+        _stat_items = [
+            ("⏱ 运行时长",     self.var_runtime_duration),
+            ("🛬 进场",         self.var_approach),
+            ("🛫 离场",         self.var_depart),
+            ("🅿️ 地勤 (架次/人次)", self.var_stand_summary),
+            ("⚡ 效率",         self.var_cycle_efficiency),
+            ("⏱ 平均周期",     self.var_avg_cycle_time),
+            ("❌ 运行出错",     self.var_error_count),
+            ("💰 塔台剩余延时", self.var_tower_delay_left),
+            ("🗼 活跃控制器",   self.var_tower_active),
+            ("📊 数据来源",     self.var_stats_source),
+        ]
+        for label, var in _stat_items:
             r = ttkb.Frame(stats_card)
-            r.pack(fill=X, pady=3)
+            r.pack(fill=X, pady=2)
             ttkb.Label(r, text=label, font=(DEFAULT_FONT, 9), bootstyle="secondary").pack(side=LEFT)
             ttkb.Label(r, textvariable=var, font=(DEFAULT_FONT, 9, "bold"), bootstyle="inverse-info").pack(side=RIGHT)
 
@@ -2963,6 +2985,7 @@ class Application(ttkb.Window):
         self.bot.start()
         self._stats_report_anchor_ts = time.time()
         self._runtime_start_time = time.time()
+        self._runtime_error_count = 0
         self.var_runtime_duration.set("00:00:00")
         self.var_approach.set("0")
         self.var_depart.set("0")
@@ -2970,6 +2993,9 @@ class Application(ttkb.Window):
         self.var_cycle_efficiency.set("0.0/h")
         self.var_stats_source.set("本次运行")
         self.var_avg_cycle_time.set("0.0s")
+        self.var_error_count.set("0")
+        self.var_tower_delay_left.set("—")
+        self.var_tower_active.set("—")
         self.after(1000, self._update_runtime_stats)
         self.var_runtime_status.set("运行中")
 
@@ -2980,6 +3006,7 @@ class Application(ttkb.Window):
             bot.stop()
         self._stats_report_anchor_ts = 0.0
         self._runtime_start_time = None
+        self._runtime_error_count = 0
         self.bot = None
         self.var_runtime_status.set("已停止")
         self.var_approach.set("0")
@@ -2988,6 +3015,9 @@ class Application(ttkb.Window):
         self.var_cycle_efficiency.set("0.0/h")
         self.var_stats_source.set("当前未运行")
         self.var_avg_cycle_time.set("0.0s")
+        self.var_error_count.set("0")
+        self.var_tower_delay_left.set("—")
+        self.var_tower_active.set("—")
         if not getattr(self, "_is_closing", False):
             for btn in [self.btn_main_start, self.btn_mini_start]:
                 btn.configure(state="normal", text="▶ 启动脚本")
@@ -3096,6 +3126,11 @@ class Application(ttkb.Window):
     def log_to_queue(self, msg):
         self.log_queue.put(msg)
         self._check_error_and_notify(msg)
+        # 实时错误计数
+        if self._runtime_start_time is not None:
+            text = str(msg or "")
+            if any(kw in text for kw in ("❌", "错误", "失败", "严重", "运行出错", "异常", "卡死", "超时")):
+                self._runtime_error_count += 1
 
     def process_log_queue(self):
         self.redirector._flush_queue()

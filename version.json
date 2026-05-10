@@ -1,14 +1,14 @@
 {
-  "version": "1.2.2",
+  "version": "1.2.3",
   "package_urls": [
     {
       "name": "GitHub Release",
-      "url": "https://github.com/hjtr7mymht-dot/WOA_AutoBot/releases/download/1.2.2/WOA_AutoBot.zip"
+      "url": "https://github.com/hjtr7mymht-dot/WOA_AutoBot/releases/download/1.2.3/WOA_AutoBot.zip"
     },
     {
       "name": "ghproxy Release",
-      "url": "https://ghproxy.cn/https://github.com/hjtr7mymht-dot/WOA_AutoBot/releases/download/1.2.2/WOA_AutoBot.zip"
+      "url": "https://ghproxy.cn/https://github.com/hjtr7mymht-dot/WOA_AutoBot/releases/download/1.2.3/WOA_AutoBot.zip"
     }
   ],
-  "notes": "1.2.2：全面代码重构，核心模块解耦为 core/ 与 bot/ 包；消除重复代码与死依赖；跨平台兼容性修复（Win/macOS 截图方案自适应、ADB 路径、MuMu 标签等）；清理孤立文件与过期配置。"
+  "notes": "1.2.3：全面重写塔台延时逻辑（统一全部延时按钮）；不起飞模式重构；实时数据面板增强（错误计数+塔台状态）；修复 TOO_STABLE_CONFIRM_COUNT 缺失崩溃；OCR 漏读兜底。"
 }
