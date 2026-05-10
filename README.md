@@ -6,6 +6,15 @@
 WOA AutoBot 是一款面向 World of Airports 的自动化辅助工具，目标是减少重复点击、提高挂机稳定性，并保留足够的可配置能力，方便不同模拟器和不同机场节奏下使用。
 **现已完整支持 macOS（Apple Silicon / Intel）与 Windows 双平台。**
 
+## 自愿资助
+
+如果你觉得这个项目有帮助，欢迎自愿资助作者买杯咖啡 ☕ 完全自愿，无任何功能限制。
+
+<p align="center">
+  <img src="assets/donate/wechat_pay.png" width="300" alt="微信支付" />
+  <img src="assets/donate/alipay_pay.png" width="300" alt="支付宝" />
+</p>
+
 ## 项目说明
 
 - 本项目为二创重置项目，原项目链接为 https://github.com/nj-yzf/WOA_AutoBot
