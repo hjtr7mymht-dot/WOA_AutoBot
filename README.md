@@ -6,12 +6,6 @@
 WOA AutoBot 是一款面向 World of Airports 的自动化辅助工具，目标是减少重复点击、提高挂机稳定性，并保留足够的可配置能力，方便不同模拟器和不同机场节奏下使用。
 **现已完整支持 macOS（Apple Silicon / Intel）与 Windows 双平台。**
 
-## 自愿资助
-
-如果你觉得这个项目有帮助，欢迎自愿资助作者买杯咖啡 ☕ 完全自愿，无任何功能限制。
-
-<img width="320" height="320" alt="3cffd32d561e0f4c708243f713e042d2" src="https://github.com/user-attachments/assets/a6408d27-bade-4deb-875a-1a5017f3aeab" /> <img width="320" height="320" alt="5bb49dee87f012d69790f2a112406cbf" src="https://github.com/user-attachments/assets/44ff6717-300e-43d5-b6b5-faa332e6bcfd" />
-
 ## 项目说明
 
 - 本项目为二创重置项目，原项目链接为 https://github.com/nj-yzf/WOA_AutoBot
@@ -120,3 +114,9 @@ python gui_launcher.py
 - 程序每次启动都会自动进行一次联网版本检测（GitHub Raw -> jsDelivr -> ghproxy）。
 - 检测到新版本时会直接弹窗提示，不会自动下载、覆盖或重启。
 - 运行过程中不再执行自动更新逻辑，避免覆盖失败或误替换带来的风险。
+
+## 自愿资助
+
+如果你觉得这个项目有帮助，欢迎自愿资助作者买杯咖啡 ☕ 完全自愿，无任何功能限制。
+
+<img width="320" height="320" alt="3cffd32d561e0f4c708243f713e042d2" src="https://github.com/user-attachments/assets/a6408d27-bade-4deb-875a-1a5017f3aeab" /> <img width="320" height="320" alt="5bb49dee87f012d69790f2a112406cbf" src="https://github.com/user-attachments/assets/44ff6717-300e-43d5-b6b5-faa332e6bcfd" />
