@@ -1377,6 +1377,11 @@ class Application(ttkb.Window):
         ttkb.Label(adb_frame, text="地址：", font=(DEFAULT_FONT, 9)).pack(side=LEFT)
         ttkb.Entry(adb_frame, textvariable=self.var_public_adb_targets, width=40).pack(side=LEFT, padx=5, fill=X, expand=True)
 
+        # [Tab 5] 自愿资助
+        tab5 = ttkb.Frame(notebook, padding=12)
+        notebook.add(tab5, text=" 🤝 自愿资助 ")
+        self._build_donate_tab(tab5)
+
         # ================== 4. 底部终端日志区 ==================
         log_group = ttkb.Labelframe(outer, text=" 实时终端输出 ", padding=6, bootstyle="dark")
         log_group.pack(fill=BOTH, expand=True, pady=(0, 0))
@@ -1728,6 +1733,36 @@ class Application(ttkb.Window):
             "4. 如需人工访问仓库，可先打开官方仓库按钮，必要时通过浏览器代理访问。"
         )
         messagebox.showinfo("国内网络方案", message, parent=self)
+
+    def _build_donate_tab(self, parent):
+        """在主界面「自愿资助」标签页内嵌入微信/支付宝收款码子标签。"""
+        header = ttkb.Frame(parent)
+        header.pack(fill=X, pady=(0, 10))
+        ttkb.Label(header, text="自愿资助作者买杯咖啡 ☕", font=(DEFAULT_FONT, 13, "bold"), bootstyle="primary").pack(anchor="w")
+        ttkb.Label(header, text="完全自愿，无任何功能限制；感谢支持项目持续维护。",
+                   bootstyle="secondary").pack(anchor="w", pady=(4, 0))
+
+        sub_nb = ttkb.Notebook(parent, bootstyle="info")
+        sub_nb.pack(fill=BOTH, expand=True)
+
+        self._donate_image_refs = []
+        for pay_type in ("微信支付", "支付宝"):
+            page = ttkb.Frame(sub_nb, padding=10)
+            sub_nb.add(page, text=f" {pay_type} ")
+            abs_path, expected_rel = self._resolve_donate_image(pay_type)
+            if abs_path:
+                try:
+                    photo = self._load_donate_photo(abs_path, max_width=320, max_height=500)
+                    img_label = ttkb.Label(page, image=photo)
+                    img_label.image = photo
+                    img_label.pack(expand=True)
+                    self._donate_image_refs.append(photo)
+                    ttkb.Label(page, text=f"已加载: {os.path.basename(abs_path)}", bootstyle="secondary").pack(pady=(6, 0))
+                except Exception as exc:
+                    ttkb.Label(page, text=f"图片加载失败: {exc}", bootstyle="danger").pack(expand=True)
+            else:
+                ttkb.Label(page, text=f"未找到收款码图片。\n请将图片放到: {expected_rel}",
+                           justify="center", bootstyle="warning").pack(expand=True)
 
     def _resolve_donate_image(self, pay_type):
         candidates = DONATE_IMAGE_CANDIDATES.get(pay_type, ())
@@ -2908,8 +2943,6 @@ class Application(ttkb.Window):
         ttkb.Button(top_action_row, text="保存设置", bootstyle="success", width=18, command=save).pack(side=LEFT)
         ttkb.Button(top_action_row, text="📊 统计图表", bootstyle="info-outline", width=18,
                 command=self._open_stats_chart).pack(side=LEFT, padx=(10, 0))
-        ttkb.Button(top_action_row, text="自愿资助", bootstyle="warning-outline", width=18,
-            command=self.open_donate_window).pack(side=LEFT, padx=(10, 0))
         ttkb.Separator(body).pack(fill=X, pady=10)
         win.after(50, lambda: self._center_toplevel_on_parent(win))
 
