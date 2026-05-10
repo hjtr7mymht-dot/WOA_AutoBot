@@ -115,15 +115,15 @@ ONLINE_VERSION_PATH_EXPECTED = "version.json"
 
 DONATE_IMAGE_CANDIDATES = {
     "微信支付": (
-        os.path.join("assets", "donate", "wechat_pay.jpg"),
         os.path.join("assets", "donate", "wechat_pay.png"),
+        os.path.join("assets", "donate", "wechat_pay.jpg"),
         os.path.join("assets", "donate", "wechat_pay.jpeg"),
         os.path.join("assets", "donate", "wechat_pay.webp"),
         os.path.join("assets", "donate", "wechat.png"),
     ),
     "支付宝": (
-        os.path.join("assets", "donate", "alipay_pay.jpg"),
         os.path.join("assets", "donate", "alipay_pay.png"),
+        os.path.join("assets", "donate", "alipay_pay.jpg"),
         os.path.join("assets", "donate", "alipay_pay.jpeg"),
         os.path.join("assets", "donate", "alipay_pay.webp"),
         os.path.join("assets", "donate", "alipay.png"),
