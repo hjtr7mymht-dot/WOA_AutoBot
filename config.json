@@ -5,6 +5,7 @@
   "auto_delay_count": 0,
   "bonus_staff": false,
   "cancel_stand_filter": true,
+  "coin_remind_enabled": true,
   "control_method": "uiautomator2",
   "delay_bribe": true,
   "initial_device_paths_detected": true,

@@ -144,6 +144,7 @@ class WoaBot(ConfigMixin, TowerMixin, FilterMixin):
         self.enable_standalone_logout = False
         self.enable_cancel_stand_filter = False
         self.enable_filter_stand_only_when_tower_open = False
+        self._fixed_no_takeoff_strategy = None  # 稳定策略缓存，避免 OCR 抖动
         self.FILTER_POINT_A = (1535, 118)
         self.FILTER_POINT_B = (1542, 190)
         self._no_takeoff_cycle_side = 'landing'
@@ -243,10 +244,12 @@ class WoaBot(ConfigMixin, TowerMixin, FilterMixin):
         if enabled:
             self._no_takeoff_cycle_side = 'landing'
             self._no_takeoff_cycle_next_switch_time = time.time() + self._no_takeoff_switch_interval
+            self._fixed_no_takeoff_strategy = None  # 重置策略缓存，下次 OCR 重新判定
             self._schedule_no_takeoff_auto_logout()
         else:
             self._no_takeoff_auto_logout_next_time = 0.0
             self._request_switch_mode1 = True
+            self._fixed_no_takeoff_strategy = None
 
     def set_no_takeoff_switch_interval(self, seconds):
         try:
@@ -425,15 +428,23 @@ class WoaBot(ConfigMixin, TowerMixin, FilterMixin):
         self.log(f"📋 [不起飞模式] {reason}，切换到{'待降落' if self._no_takeoff_cycle_side == 'landing' else '停机坪'}")
 
     def _check_no_takeoff_schedules(self):
-        """每轮主循环检查不起飞/独立小退到期时间。"""
+        """每轮主循环检查：轮切到期 / 自动小退 / 独立小退。"""
         if not self.enable_no_takeoff_mode and not self.enable_standalone_logout:
             return
         now = time.time()
+
+        # 轮切检查（仅 4 号塔台单开策略）
+        if self.enable_no_takeoff_mode and self._get_no_takeoff_strategy() == 'landing_stand_cycle':
+            if self._no_takeoff_cycle_next_switch_time > 0 and now >= self._no_takeoff_cycle_next_switch_time:
+                self._toggle_no_takeoff_cycle_side(reason="定时切换")
+                self._periodic_15s_check(force_initial_filter_check=True)
+
         # 不起飞自动小退
         if self.enable_no_takeoff_mode and self._no_takeoff_auto_logout_next_time > 0 and now >= self._no_takeoff_auto_logout_next_time:
             self.log("📋 [不起飞模式] 自动小退到期")
             self._do_no_takeoff_small_logout()
             self._schedule_no_takeoff_auto_logout()
+
         # 独立小退
         if self.enable_standalone_logout and self._standalone_logout_next_time > 0 and now >= self._standalone_logout_next_time:
             self.log("📋 [独立小退] 到期")
@@ -441,11 +452,31 @@ class WoaBot(ConfigMixin, TowerMixin, FilterMixin):
             self._standalone_logout_next_time = now + self._standalone_logout_interval * 60.0
 
     def _get_no_takeoff_strategy(self):
-        if all(self._tower_active_slots):
+        """稳定策略：不起飞模式启用时保存初始判断，仅像素全开确认时升级为 stand_only。
+        避免 OCR 噪声导致策略在 landing_stand_cycle ↔ stand_only 之间抖动。"""
+        # 优先像素确认全开 → 安全降级为全停机位模式
+        screen = self.adb.get_screenshot() if self.adb else None
+        if screen is not None and self._is_tower_all_open_by_pixels(screen):
+            self._fixed_no_takeoff_strategy = 'stand_only'
+            self._tower_active_slots = [True, True, True, True]
             return 'stand_only'
-        if self._tower_active_slots == [False, False, False, True]:
-            return 'landing_stand_cycle'
-        return 'stand_only'
+
+        # 如果已有固定策略且不是被像素全开更正的，沿用保存值（避免 OCR 抖动）
+        saved = getattr(self, '_fixed_no_takeoff_strategy', None)
+        if saved is not None and saved != 'stand_only':
+            return saved
+
+        # 从 OCR 推断初始策略
+        if all(self._tower_active_slots):
+            strategy = 'stand_only'
+        elif self._tower_active_slots[3] and not any(self._tower_active_slots[:3]):
+            # 只有 4 号控制器开启 → 待降落 ↔ 停机坪轮切
+            strategy = 'landing_stand_cycle'
+        else:
+            strategy = 'stand_only'
+
+        self._fixed_no_takeoff_strategy = strategy
+        return strategy
 
     def _do_no_takeoff_small_logout(self):
         """小退流程：主界面 → 换机场 → first_start_2 → 等待主界面。"""
@@ -1415,17 +1446,8 @@ class WoaBot(ConfigMixin, TowerMixin, FilterMixin):
                         self._request_switch_mode1 = False
                         self._force_switch_filter_mode1()
                     now_ts = time.time()
-                    if self.enable_no_takeoff_mode and self._get_no_takeoff_strategy() == 'landing_stand_cycle' and now_ts >= self._no_takeoff_cycle_next_switch_time:
-                        self._toggle_no_takeoff_cycle_side(reason="到达切换间隔")
-                        self._periodic_15s_check(force_initial_filter_check=True)
-                    if self.enable_no_takeoff_mode and self._no_takeoff_auto_logout_next_time > 0 and now_ts >= self._no_takeoff_auto_logout_next_time:
-                        self.log("📋 [不起飞模式] 到达自动小退间隔，执行小退...")
-                        self._do_no_takeoff_small_logout()
-                        self._schedule_no_takeoff_auto_logout()
-                    if self.enable_standalone_logout and self._standalone_logout_next_time > 0 and now_ts >= self._standalone_logout_next_time:
-                        self.log("📋 [独立小退] 到达小退间隔，执行小退...")
-                        self._do_no_takeoff_small_logout()
-                        self._schedule_standalone_logout()
+                    # 不起飞/独立小退到期检查（含轮切计时，已统一移至 _check_no_takeoff_schedules）
+                    self._check_no_takeoff_schedules()
                     # 检查塔台倒计时是否到期
                     if self._check_tower_countdown():
                         idle_count = 0
@@ -2803,7 +2825,6 @@ class WoaBot(ConfigMixin, TowerMixin, FilterMixin):
                 self.last_checked_avail_staff = current_avail
 
         if self._check_and_perform_auto_delay(current_screen): return True
-        self._check_no_takeoff_schedules()
         lx, ly, lw, lh = self.LIST_ROI_X, 0, self.LIST_ROI_W, self.LIST_ROI_H
         list_roi_img = current_screen[ly:ly + lh, lx:lx + lw]
         _, final_tasks = self._run_pending_detection(list_roi_img)
