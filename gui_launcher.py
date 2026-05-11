@@ -238,6 +238,12 @@ except Exception:
 
 # === 增强型日志重定向器 ===
 class MultiTextRedirector(object):
+    """输出重定向器：将 print 写入 tkinter 控件。
+    自适应批处理 + 队列溢出保护 + 重复消息折叠 + 行数内存上限。"""
+
+    MAX_LINES = 3000
+    FOLD_THRESHOLD = 5  # 连续重复消息 > 阈值时折叠
+
     def __init__(self, widgets=None, tag="stdout"):
         if widgets is None:
             widgets = []
@@ -245,12 +251,16 @@ class MultiTextRedirector(object):
         self.tag = tag
         self.log_buffer = collections.deque(maxlen=100)
         self.closing = False
-        self._queue = queue.Queue(maxsize=2000)  # 硬上限防止内存泄漏
+        self._queue = queue.Queue(maxsize=2000)
+        self._line_counts = {}      # widget → int 缓存行数
+        self._last_raw = ""         # 上条日志原始内容
+        self._repeat_count = 0      # 连续重复计数
 
     def add_widget(self, widget):
         if widget not in self.widgets:
             self.widgets.append(widget)
             self._setup_tags(widget)
+            self._line_counts[id(widget)] = 0
 
     def _setup_tags(self, widget):
         widget.tag_config("time", foreground="#999999", font=(MONO_FONT, 8))
@@ -261,14 +271,34 @@ class MultiTextRedirector(object):
         widget.tag_config("method", foreground="#c9a227")
         widget.tag_config("update", foreground="#e63946", font=(DEFAULT_FONT, 10, "bold"))
         widget.tag_config("stats", foreground="#2196F3", font=(DEFAULT_FONT, 9, "bold"))
+        widget.tag_config("fold", foreground="#aaaaaa", font=(MONO_FONT, 8, "italic"))
 
     def write(self, str_val):
         if self.closing:
             return
-        if "-> 执行动作:" in str_val: return
-        if str_val == "\n":
-            self._insert_to_all("\n", "normal")
+        if "-> 执行动作:" in str_val:
             return
+        if str_val == "\n":
+            self._insert("", "normal", scan_fold=False)
+            return
+
+        # ── 重复消息折叠 ──
+        raw_clean = str_val.strip()
+        is_dup = (raw_clean == self._last_raw)
+        self._last_raw = raw_clean
+
+        if is_dup:
+            self._repeat_count += 1
+            if self._repeat_count >= self.FOLD_THRESHOLD:
+                # 已超过折叠阈值：静默丢弃，等不再重复时输出折叠摘要
+                return
+            # 未到阈值：正常输出
+        else:
+            # 消息变化：如果之前有折叠，先输出折叠摘要
+            if self._repeat_count >= self.FOLD_THRESHOLD:
+                fold_msg = f"    ↳ 以上重复 {self._repeat_count} 次"
+                self._insert(fold_msg, "fold", scan_fold=False)
+            self._repeat_count = 0 if not is_dup else 1
 
         now_str = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-4]
         time_prefix = f"[{now_str}] "
@@ -283,57 +313,76 @@ class MultiTextRedirector(object):
         elif any(x in str_val for x in ["✅", "成功", "恢复", "通过"]):
             tag = "success"
         elif any(x in str_val for x in ["🛑", "❌", "错误", "失败", "严重", "卡死"]):
-            tag = "highlight"
+            tag = "error"
         elif any(x in str_val for x in ["[模式]", "触控方案", "截图方案", "触控:", "截图:"]):
             tag = "method"
 
         self.log_buffer.append(f"{time_prefix}{str_val}")
-        self._insert_to_all(time_prefix, "time", str_val, tag)
+        self._insert(f"{time_prefix}{str_val}", tag)
 
-    def _insert_to_all(self, txt1, tag1, txt2=None, tag2=None):
+    def _insert(self, text, tag, scan_fold=True):
         if self.closing:
             return
         try:
-            self._queue.put_nowait((txt1, tag1, txt2, tag2))
+            self._queue.put_nowait((text, tag))
         except queue.Full:
-            pass  # 队列满时丢弃，防止阻塞主线程
+            pass
+
+    # ── 向后兼容（旧调用方用 _insert_to_all） ──
+    def _insert_to_all(self, txt1, tag1, txt2=None, tag2=None):
+        if txt1:
+            self._insert(txt1, tag1)
+        if txt2:
+            self._insert(txt2, tag2)
 
     def _flush_queue(self):
-        batch_size = 50
+        """自适应批处理：30~200 条。严重积压（>1000）丢弃旧条目，批量插入用一次 w.index() 检查行数。"""
         qd = self._queue.qsize()
+
+        # 队列溢出保护：积压 > 1000 直接丢弃一半旧条目
+        if qd > 1000:
+            drain = min(qd // 2, 800)
+            for _ in range(drain):
+                try:
+                    self._queue.get_nowait()
+                except queue.Empty:
+                    break
+            qd = self._queue.qsize()
+
+        # 自适应批大小
         if qd > 500:
             batch_size = 200
-        elif qd > 200:
-            batch_size = 100
+        elif qd > 100:
+            batch_size = 80
+        elif qd > 20:
+            batch_size = 50
+        else:
+            batch_size = 30
 
-        count = 0
         batch = []
-        while not self._queue.empty() and count < batch_size:
+        for _ in range(batch_size):
             try:
                 batch.append(self._queue.get_nowait())
             except queue.Empty:
                 break
-            count += 1
         if not batch:
             return
 
-        MAX_LINES = 3000
         for w in self.widgets:
             try:
                 if not w.winfo_exists():
                     continue
                 w.configure(state="normal")
-                for txt1, tag1, txt2, tag2 in batch:
-                    w.insert("end", txt1, (tag1,))
-                    if txt2:
-                        w.insert("end", txt2, (tag2,))
-                try:
-                    total = int(w.index('end-1c').split('.')[0])
-                    if total > MAX_LINES:
-                        keep = MAX_LINES // 2
-                        w.delete("1.0", f"{total - keep}.0")
-                except Exception:
-                    pass
+                for text, tag in batch:
+                    w.insert("end", text, (tag,))
+                # 批量后一次性检查行数（而不是每条都 w.index()）
+                wid = id(w)
+                lc = self._line_counts.get(wid, 0) + len(batch)
+                self._line_counts[wid] = lc
+                if lc > self.MAX_LINES:
+                    keep = self.MAX_LINES // 2
+                    w.delete("1.0", f"{lc - keep}.0")
+                    self._line_counts[wid] = keep
                 w.see("end")
                 w.configure(state="disabled")
             except (tk.TclError, RuntimeError):
@@ -503,8 +552,6 @@ class Application(ttkb.Window):
             set_custom_adb_path(self.config["adb_path"])
 
         self.bot = None
-        self.log_queue = queue.Queue()
-        self.queue_check_interval = 100
         self._notify_lock = threading.Lock()
         self._notify_last_ts = 0.0
         self._notify_last_signature = ""
@@ -535,7 +582,7 @@ class Application(ttkb.Window):
         self.setup_mini_ui()
 
         self.container_main.pack(fill=BOTH, expand=True)
-        self.after(self.queue_check_interval, self.process_log_queue)
+        self.after(100, self.process_log_queue)
         self.after(60000, self._periodic_stats_report_tick)
         self.after(30000, self._periodic_coin_remind_tick)
 
@@ -978,9 +1025,26 @@ class Application(ttkb.Window):
             }
 
         import csv
+        # 30 秒缓存 — 避免每秒读磁盘阻塞主线程
+        now = time.time()
+        cache = getattr(self, "_csv_cache", None)
+        if cache and now - cache.get("_ts", 0) < 30:
+            return cache.get("data", {})
+        if cache is None:
+            self._csv_cache = {"_ts": 0, "data": {}}
+            cache = self._csv_cache
+
         _base = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else os.path.dirname(os.path.abspath(__file__))
         csv_path = os.path.join(_base, STATS_FILE)
         today = datetime.datetime.now().strftime("%Y-%m-%d")
+        result = {
+            "runtime": "当前未运行",
+            "approach": 0,
+            "depart": 0,
+            "stand_count": 0,
+            "stand_staff": 0,
+            "source": "empty",
+        }
         if os.path.isfile(csv_path):
             try:
                 with open(csv_path, "r", encoding="utf-8-sig") as f:
@@ -989,7 +1053,7 @@ class Application(ttkb.Window):
                         if i == 0 and row and row[0].strip().lower() == "date":
                             continue
                         if len(row) >= 5 and row[0] == today:
-                            return {
+                            result = {
                                 "runtime": "当前未运行",
                                 "approach": int(row[1]),
                                 "depart": int(row[2]),
@@ -997,17 +1061,12 @@ class Application(ttkb.Window):
                                 "stand_staff": int(row[4]),
                                 "source": "csv",
                             }
+                            break
             except Exception:
                 pass
-
-        return {
-            "runtime": "当前未运行",
-            "approach": 0,
-            "depart": 0,
-            "stand_count": 0,
-            "stand_staff": 0,
-            "source": "empty",
-        }
+        self._csv_cache["_ts"] = now
+        self._csv_cache["data"] = result
+        return result
 
     def _send_stats_report(self, manual=False):
         hours = self._normalize_stats_report_hours(self.var_stats_report_hours.get())
@@ -3272,9 +3331,7 @@ class Application(ttkb.Window):
             _apply_update()
 
     def log_to_queue(self, msg):
-        self.log_queue.put(msg)
         self._check_error_and_notify(msg)
-        # 实时错误计数
         if self._runtime_start_time is not None:
             text = str(msg or "")
             if any(kw in text for kw in ("❌", "错误", "失败", "严重", "运行出错", "异常", "卡死", "超时")):
