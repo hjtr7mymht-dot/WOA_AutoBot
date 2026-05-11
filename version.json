@@ -1,14 +1,14 @@
 {
-  "version": "1.2.4",
+  "version": "1.2.5",
   "package_urls": [
     {
       "name": "GitHub Release",
-      "url": "https://github.com/hjtr7mymht-dot/WOA_AutoBot/releases/download/1.2.4/WOA_AutoBot.zip"
+      "url": "https://github.com/hjtr7mymht-dot/WOA_AutoBot/releases/download/1.2.5/WOA_AutoBot.zip"
     },
     {
       "name": "ghproxy Release",
-      "url": "https://ghproxy.cn/https://github.com/hjtr7mymht-dot/WOA_AutoBot/releases/download/1.2.4/WOA_AutoBot.zip"
+      "url": "https://ghproxy.cn/https://github.com/hjtr7mymht-dot/WOA_AutoBot/releases/download/1.2.5/WOA_AutoBot.zip"
     }
   ],
-  "notes": "1.2.4：航空冰蓝 UI 全面重写（三栏居中布局+卡片仪表盘）；不起飞模式策略缓存防 OCR 抖动；塔台全部延时按钮统一；新增金币领取提醒（8:00/12:00/24:00+周一推送）。"
+  "notes": "1.2.5：长时间运行 UI 卡顿修复（日志队列硬上限+自适应批处理+空闲减速轮询）；日志控件 3000 行硬上限防内存泄漏；塔台全部延时按钮统一+不起飞模式策略缓存。"
 }

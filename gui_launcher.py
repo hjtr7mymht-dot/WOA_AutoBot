@@ -243,9 +243,9 @@ class MultiTextRedirector(object):
             widgets = []
         self.widgets = widgets
         self.tag = tag
-        self.log_buffer = collections.deque(maxlen=200)
+        self.log_buffer = collections.deque(maxlen=100)
         self.closing = False
-        self._queue = queue.Queue()
+        self._queue = queue.Queue(maxsize=2000)  # 硬上限防止内存泄漏
 
     def add_widget(self, widget):
         if widget not in self.widgets:
@@ -293,13 +293,22 @@ class MultiTextRedirector(object):
     def _insert_to_all(self, txt1, tag1, txt2=None, tag2=None):
         if self.closing:
             return
-        self._queue.put((txt1, tag1, txt2, tag2))
+        try:
+            self._queue.put_nowait((txt1, tag1, txt2, tag2))
+        except queue.Full:
+            pass  # 队列满时丢弃，防止阻塞主线程
 
     def _flush_queue(self):
-        """在主线程中调用，将队列中的日志写入 tkinter 控件"""
+        batch_size = 50
+        qd = self._queue.qsize()
+        if qd > 500:
+            batch_size = 200
+        elif qd > 200:
+            batch_size = 100
+
         count = 0
         batch = []
-        while not self._queue.empty() and count < 50:
+        while not self._queue.empty() and count < batch_size:
             try:
                 batch.append(self._queue.get_nowait())
             except queue.Empty:
@@ -307,6 +316,8 @@ class MultiTextRedirector(object):
             count += 1
         if not batch:
             return
+
+        MAX_LINES = 3000
         for w in self.widgets:
             try:
                 if not w.winfo_exists():
@@ -316,11 +327,13 @@ class MultiTextRedirector(object):
                     w.insert("end", txt1, (tag1,))
                     if txt2:
                         w.insert("end", txt2, (tag2,))
-                    try:
-                        if int(w.index('end-1c').split('.')[0]) > 1000:
-                            w.delete("1.0", "2.0")
-                    except Exception:
-                        pass
+                try:
+                    total = int(w.index('end-1c').split('.')[0])
+                    if total > MAX_LINES:
+                        keep = MAX_LINES // 2
+                        w.delete("1.0", f"{total - keep}.0")
+                except Exception:
+                    pass
                 w.see("end")
                 w.configure(state="disabled")
             except (tk.TclError, RuntimeError):
@@ -370,7 +383,7 @@ class Application(ttkb.Window):
         if IS_WINDOWS:
             try:
                 import ctypes
-                myappid = 'woabot.launcher.v1.2.4'
+                myappid = 'woabot.launcher.v1.2.5'
                 ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
             except Exception:
                 pass
@@ -770,7 +783,8 @@ class Application(ttkb.Window):
         }.get(snap.get('source'), '当前未运行')
         self.var_stats_source.set(source_label)
 
-        self.after(1000, self._update_runtime_stats)
+        # 空闲时降低轮询频率（5s），运行时每 1s 更新
+        self.after(5000 if self._runtime_start_time is None else 1000, self._update_runtime_stats)
 
     def _parse_public_adb_targets(self, raw_text=None):
         raw = str(self.var_public_adb_targets.get() if raw_text is None else raw_text or "")
@@ -3268,7 +3282,15 @@ class Application(ttkb.Window):
 
     def process_log_queue(self):
         self.redirector._flush_queue()
-        self.after(self.queue_check_interval, self.process_log_queue)
+        # 自适应轮询：队列有积压时加快，空闲时减慢
+        qd = self.redirector._queue.qsize()
+        if qd > 100:
+            interval = 50
+        elif qd > 20:
+            interval = 100
+        else:
+            interval = 250  # 空闲时降低 CPU 占用
+        self.after(interval, self.process_log_queue)
 
 
 if __name__ == "__main__":

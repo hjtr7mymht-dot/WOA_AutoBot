@@ -89,8 +89,8 @@ app = BUNDLE(
     info_plist={
         'CFBundleName': 'WOA AutoBot',
         'CFBundleDisplayName': 'WOA AutoBot',
-        'CFBundleVersion': '1.2.4',
-        'CFBundleShortVersionString': '1.2.4',
+        'CFBundleVersion': '1.2.5',
+        'CFBundleShortVersionString': '1.2.5',
         'CFBundlePackageType': 'APPL',
         'CFBundleInfoDictionaryVersion': '6.0',
         'LSMinimumSystemVersion': '11.0',
