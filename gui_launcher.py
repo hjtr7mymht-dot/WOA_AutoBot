@@ -279,8 +279,7 @@ class MultiTextRedirector(object):
         if "-> 执行动作:" in str_val:
             return
         if str_val == "\n":
-            self._insert("", "normal", scan_fold=False)
-            return
+            return  # print() 已自带 \n，不重复插入空行
 
         # ── 重复消息折叠 ──
         raw_clean = str_val.strip()
@@ -297,7 +296,7 @@ class MultiTextRedirector(object):
             # 消息变化：如果之前有折叠，先输出折叠摘要
             if self._repeat_count >= self.FOLD_THRESHOLD:
                 fold_msg = f"    ↳ 以上重复 {self._repeat_count} 次"
-                self._insert(fold_msg, "fold", scan_fold=False)
+                self._insert((fold_msg, "", "fold"))
             self._repeat_count = 0 if not is_dup else 1
 
         now_str = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-4]
@@ -318,22 +317,24 @@ class MultiTextRedirector(object):
             tag = "method"
 
         self.log_buffer.append(f"{time_prefix}{str_val}")
-        self._insert(f"{time_prefix}{str_val}", tag)
+        # 每条日志作为一个完整条目入队：时间戳(time标签)+正文(内容标签)，正文末尾补 \n 确保换行
+        body = str_val if str_val.endswith("\n") else str_val + "\n"
+        self._insert((time_prefix, body, tag))
 
-    def _insert(self, text, tag, scan_fold=True):
+    def _insert(self, item, scan_fold=True):
         if self.closing:
             return
         try:
-            self._queue.put_nowait((text, tag))
+            self._queue.put_nowait(item)
         except queue.Full:
             pass
 
     # ── 向后兼容（旧调用方用 _insert_to_all） ──
     def _insert_to_all(self, txt1, tag1, txt2=None, tag2=None):
-        if txt1:
-            self._insert(txt1, tag1)
-        if txt2:
-            self._insert(txt2, tag2)
+        if txt1 and not txt2:
+            self._insert((txt1, "", tag1))
+        elif txt1 and txt2:
+            self._insert((txt1, txt2, tag2))
 
     def _flush_queue(self):
         """自适应批处理：30~200 条。严重积压（>1000）丢弃旧条目，批量插入用一次 w.index() 检查行数。"""
@@ -373,8 +374,11 @@ class MultiTextRedirector(object):
                 if not w.winfo_exists():
                     continue
                 w.configure(state="normal")
-                for text, tag in batch:
-                    w.insert("end", text, (tag,))
+                for item in batch:
+                    txt1, txt2, tag = item[0], item[1], item[2]
+                    w.insert("end", txt1, ("time",))
+                    if txt2:
+                        w.insert("end", txt2, (tag,))
                 # 批量后一次性检查行数（而不是每条都 w.index()）
                 wid = id(w)
                 lc = self._line_counts.get(wid, 0) + len(batch)
