@@ -50,8 +50,7 @@ from ttkbootstrap.widgets import ToolTip  # type: ignore[import-untyped]
 # === 引入 PIL 以修复图标显示 ===
 from PIL import Image, ImageTk
 
-# Bot 子进程代理（彻底解决 Win Not Responding）
-from bot import ProcessProxy
+# Bot 后台线程模式 — 主线程纯 UI，Bot 全在后台线程
 
 # 引入后端逻辑
 from adb_controller import set_custom_adb_path, AdbController, CURRENT_ADB_PATH, close_all_and_kill_server, get_woa_debug_dir, ensure_local_platform_tools
@@ -546,8 +545,7 @@ class Application(ttkb.Window):
             set_custom_adb_path(self.config["adb_path"])
 
         self.bot = None
-        self._proc_proxy = None       # ProcessProxy 子进程管理器
-        self._proc_stats_cache = {}   # 子进程推送的最新统计
+        self._bot_stats_cache = {}   # 后台线程推送的最新统计
         self._notify_lock = threading.Lock()
         self._notify_last_ts = 0.0
         self._notify_last_signature = ""
@@ -615,17 +613,7 @@ class Application(ttkb.Window):
 
         self.redirector.closing = True
 
-        # 关闭子进程 Bot
-        pp = getattr(self, "_proc_proxy", None)
-        if pp:
-            try:
-                pp.shutdown()
-            except Exception:
-                pass
-        self._proc_proxy = None
-
-        # 兼容旧 thread 模式
-        bot = getattr(self, "bot", None)
+        bot = self.bot
         if bot:
             bot.running = False
             worker = getattr(bot, '_worker_thread', None)
@@ -813,20 +801,16 @@ class Application(ttkb.Window):
         # 错误计数
         self.var_error_count.set(str(self._runtime_error_count))
 
-        # 塔台信息（从子进程 stats 缓存读取）
-        cache = getattr(self, "_proc_stats_cache", {})
-        delay = cache.get("delay_left")
-        active = cache.get("tower_active")
-        if delay is not None:
-            self.var_tower_delay_left.set(str(delay))
-            if active:
-                slots = ",".join(str(i+1) for i, a in enumerate(active) if a)
+        # 塔台信息（从 bot 实例直接读）
+        bot = self.bot
+        if bot and getattr(bot, "running", False):
+            self.var_tower_delay_left.set(str(getattr(bot, "auto_delay_count", 0)))
+            active_slots = getattr(bot, "_tower_active_slots", [False]*4)
+            if any(active_slots):
+                slots = ",".join(str(i+1) for i, a in enumerate(active_slots) if a)
                 self.var_tower_active.set(slots if slots else "无")
             else:
                 self.var_tower_active.set("无")
-        elif self._proc_proxy and getattr(self._proc_proxy, "running", False):
-            self.var_tower_delay_left.set("...")
-            self.var_tower_active.set("...")
         else:
             self.var_tower_delay_left.set("—")
             self.var_tower_active.set("—")
@@ -1011,19 +995,7 @@ class Application(ttkb.Window):
         return iv
 
     def _get_runtime_stats_snapshot(self):
-        # 优先从子进程缓存读取
-        cache = getattr(self, "_proc_stats_cache", {})
-        if cache:
-            return {
-                "approach": cache.get("approach", 0),
-                "depart": cache.get("depart", 0),
-                "stand_count": cache.get("stand_count", 0),
-                "stand_staff": cache.get("stand_staff", 0),
-                "runtime": "运行中",
-                "source": "session",
-            }
-        # 回退：检查 thread 模式的 bot（兼容旧代码）
-        bot = getattr(self, "bot", None)
+        bot = self.bot
         if bot and getattr(bot, "running", False):
             a = int(getattr(bot, "_stat_session_approach", getattr(bot, "_stat_approach", 0)) or 0)
             d = int(getattr(bot, "_stat_session_depart", getattr(bot, "_stat_depart", 0)) or 0)
@@ -1342,7 +1314,7 @@ class Application(ttkb.Window):
             self.attributes('-topmost', self.var_mini_top.get())
 
     def launch_new_instance(self):
-        if self.bot and self.bot.running:
+        if self._bot_is_running():
             messagebox.showwarning("多开模式", "建议先确认当前实例已稳定运行，再开启新实例。", parent=self)
         try:
             creation_flags = CREATE_NO_WINDOW
@@ -1545,6 +1517,9 @@ class Application(ttkb.Window):
             print(f">>> [扫描异常] {e}")
             devs = []
         self._apply_scan_result(devs)
+
+    def _bot_is_running(self):
+        return self.bot is not None and getattr(self.bot, "running", False)
 
     def _apply_scan_result(self, devs):
         """在主线程更新扫描结果"""
@@ -1822,7 +1797,7 @@ class Application(ttkb.Window):
                     self._set_online_validation_state(False, detail=error)
                     self.var_online_status.set("离线模式")
                     self.var_online_detail.set("在线验证失败，离线模式运行中")
-                    if self.bot and self.bot.running:
+                    if self._bot_is_running():
                         self._lockdown_runtime("运行期间在线验证失败，已自动停止")
                     if not silent:
                         messagebox.showerror(
@@ -3148,7 +3123,7 @@ class Application(ttkb.Window):
             return
         device = self.combo_devices.get()
         if not device: messagebox.showwarning("提示", "请先选择设备"); return
-        if self._proc_proxy and self._proc_proxy.running: return
+        if self.bot and getattr(self.bot, "running", False): return
         self.var_runtime_status.set("准备启动")
         self.save_config()
         self._connect_public_adb_targets(debug=False)
@@ -3158,18 +3133,14 @@ class Application(ttkb.Window):
         for btn in [self.btn_main_stop, self.btn_mini_stop]:
             btn.configure(state="normal")
         self.combo_devices.configure(state="disabled")
-        # 子进程模式：通过 ProcessProxy 启动独立 Bot 进程
-        self._proc_stats_cache = {}
-        self._proc_proxy = ProcessProxy(
-            log_callback=self.log_to_queue,
-            stats_callback=self._on_proc_stats,
-            stopped_callback=self._on_proc_stopped,
-            error_callback=self._on_proc_error,
-            config_callback=self.on_bot_config_update,
-            instance_id=INSTANCE_ID,
-        )
-        self._proc_proxy.launch()
-        self._proc_proxy.start(device, self.config)
+        self._bot_stats_cache = {}
+        # 后台线程模式：WoaBot 在 daemon 线程运行，主线程纯 UI
+        from main_adb import WoaBot
+        self.bot = WoaBot(log_callback=self.log_to_queue, config_callback=self.on_bot_config_update,
+                          instance_id=INSTANCE_ID)
+        self.bot.set_device(device)
+        self._apply_all_config_to_bot()
+        self.bot.start()
         self._stats_report_anchor_ts = time.time()
         self._runtime_start_time = time.time()
         self._runtime_error_count = 0
@@ -3186,21 +3157,45 @@ class Application(ttkb.Window):
         self.after(1000, self._update_runtime_stats)
         self.var_runtime_status.set("运行中")
 
-    def _on_proc_stats(self, snap):
-        self._proc_stats_cache = snap
+    def _apply_all_config_to_bot(self):
+        """全量同步 UI 配置到 bot 实例"""
+        if not self.bot:
+            return
+        b = self.bot
+        b.set_bonus_staff_feature(self.var_bonus_staff.get())
+        b.set_vehicle_buy_feature(self.var_vehicle_buy.get())
+        b.set_speed_mode(self.var_speed_mode.get())
+        b.set_skip_staff_verify(self.var_skip_staff.get())
+        b.set_delay_bribe(self.var_delay_bribe.get())
+        b.set_auto_delay(int(self.var_delay_count.get() or 0))
+        b.set_random_task_mode(self.var_random_task.get(), log_change=False)
+        b.set_no_takeoff_mode(self.var_no_takeoff_mode.get())
+        b.set_no_takeoff_switch_interval(self.config.get("no_takeoff_switch_interval", 15))
+        b.set_no_takeoff_auto_logout_interval(self.config.get("no_takeoff_auto_logout_interval", 30))
+        b.set_standalone_logout_interval(self.config.get("standalone_logout_interval", 30))
+        b.set_standalone_logout_enabled(self.config.get("no_takeoff_logout_enabled", False))
+        b.set_cancel_stand_filter_when_tower_off(self.var_cancel_stand_filter.get())
+        b.set_filter_stand_only_when_tower_open(self.var_tower_open_stand_only.get())
+        anti = int(self.config.get("anti_stuck_threshold", 6))
+        b.set_anti_stuck_config(self.var_anti_stuck_enabled.get(), anti, log_change=False)
+        b.set_control_method(self.config.get("control_method", "adb"))
+        b.set_screenshot_method(self.config.get("screenshot_method", "nemu_ipc"))
+        b.set_mumu_path(self.config.get("mumu_path", ""))
 
-    def _on_proc_stopped(self, reason):
-        self.after(0, lambda r=reason: self._handle_bot_stopped(str(r)))
-
-    def _on_proc_error(self, msg):
-        print(f"🛑 [Bot进程] {msg}")
-
-    def _handle_bot_stopped(self, reason=""):
-        self._proc_proxy = None
-        self._proc_stats_cache = {}
+    def stop_bot(self):
+        """停止 Bot 后台线程并重置 UI 状态"""
+        bot = self.bot
+        if bot:
+            bot.running = False
+            try:
+                bot.stop()
+            except Exception:
+                pass
+        self._bot_stats_cache = {}
         self._stats_report_anchor_ts = 0.0
         self._runtime_start_time = None
         self._runtime_error_count = 0
+        self.bot = None
         self.var_runtime_status.set("已停止")
         self.var_approach.set("0")
         self.var_depart.set("0")
@@ -3217,13 +3212,7 @@ class Application(ttkb.Window):
             for btn in [self.btn_main_stop, self.btn_mini_stop]:
                 btn.configure(state="disabled")
             self.combo_devices.configure(state="readonly")
-        print(f">>> [子进程] Bot 已停止: {reason}")
-
-    def stop_bot(self):
-        if self._proc_proxy:
-            self._proc_proxy.stop()
-            self._proc_proxy.close()
-        self._proc_stats_cache = {}
+        print(">>> 脚本已停止")
 
     def on_confirm_tower_delay(self):
         if not self._enforce_online_guard("应用挂机节奏", interactive=True):
@@ -3271,12 +3260,7 @@ class Application(ttkb.Window):
         self.config["anti_stuck_enabled"] = self.var_anti_stuck_enabled.get()
         self.config["anti_stuck_threshold"] = anti_stuck_threshold
         self.save_config()
-        # 子进程模式下配置已在启动时全量发送，运行时仅同步关键项
-        if self._proc_proxy and self._proc_proxy.running:
-            self._proc_proxy.update_config("auto_delay_count", cnt)
-            self._proc_proxy.update_config("anti_stuck_enabled", self.var_anti_stuck_enabled.get())
-            return
-        # 兼容旧 thread 模式
+        # 线程模式：直接调用 bot 方法同步
         if self.bot:
             self.bot.set_bonus_staff_feature(self.var_bonus_staff.get())
             self.bot.set_vehicle_buy_feature(self.var_vehicle_buy.get())
@@ -3312,8 +3296,8 @@ class Application(ttkb.Window):
                 self.config["mumu_path"] = value
                 self.save_config()
             elif key == "bot_stopped":
-                self._proc_proxy = None
-                self._proc_stats_cache = {}
+                self.bot = None
+                self._bot_stats_cache = {}
                 self.var_runtime_status.set("已停止")
                 for btn in [self.btn_main_start, self.btn_mini_start]:
                     btn.configure(state="normal", text="▶ 启动脚本")
@@ -3354,8 +3338,9 @@ if __name__ == "__main__":
     try:
         app = Application()
         app.mainloop()
+    except KeyboardInterrupt:
+        pass  # Ctrl+C / 窗口关闭，正常退出
     except Exception:
-        # 捕获 mainloop 中的异常并手动调用异常处理钩子
         if sys.excepthook:
             sys.excepthook(*sys.exc_info())
         else:

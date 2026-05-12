@@ -67,12 +67,13 @@ python gui_launcher.py
 ## 最近更新
 
 ### v1.2.6 (2026-05-12)
-- 🏗️ **Bot 子进程架构重构**：引擎从 `threading.Thread` 迁移到 `subprocess.Popen` 独立进程，彻底解决 Windows "Not Responding" 无响应
-- 📡 **JSON 行协议通信**：GUI ↔ Bot 通过 stdin/stdout 单行 JSON 通信，主线程专用于 UI 刷新
-- 🆕 **bot/protocol.py**：消息编解码；**bot/worker.py**：子进程入口；**bot/process_proxy.py**：进程生命周期管理
-- 💾 **子进程实时统计推送**：每 1.5s 通过 stdout 推送进场/离场/地勤/塔台数据到 GUI 仪表盘
+- 🔁 **回退到稳定线程模式**：放弃子进程架构（ProcessProxy + worker.py），Bot 以 daemon 后台线程运行
+- 🐛 **修复 stop_bot 重复定义**：消除两个 `stop_bot` 方法覆盖导致的 UI 状态不重置 Bug
+- ✅ **全量配置同步**：新增 `_apply_all_config_to_bot()` 方法，启动时确保所有 UI 开关同步到 Bot
+- 🧹 **清理孤墨子进程模块**：移除 `bot/process_proxy.py`、`bot/worker.py`、`bot/protocol.py` 引用
+- ⚡ **启动/停止响应优化**：合并重复逻辑，按钮状态切换更可靠
 
-### v1.2.5.1 (2026-05-12)
+### v1.2.6 (2026-05-12)
 - 🧠 **多开内存泄漏修复**：模板缓存 LRU 淘汰（上限 40）+ 定期清理
 - 🪟 **Windows UI 无响应修复**：轮询 120ms + update_idletasks
 - ⚰️ **日志行数收紧**：MAX_LINES=2000

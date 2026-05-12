@@ -3,12 +3,12 @@
   "package_urls": [
     {
       "name": "GitHub Release",
-      "url": "https://github.com/hjtr7mymht-dot/WOA_AutoBot/releases/download/1.2.6/WOA_AutoBot.zip"
+      "url": "https://github.com/hjtr7mymht-dot/WOA_AutoBot/releases/download/1.2.7/WOA_AutoBot.zip"
     },
     {
       "name": "ghproxy Release",
-      "url": "https://ghproxy.cn/https://github.com/hjtr7mymht-dot/WOA_AutoBot/releases/download/1.2.6/WOA_AutoBot.zip"
+      "url": "https://ghproxy.cn/https://github.com/hjtr7mymht-dot/WOA_AutoBot/releases/download/1.2.7/WOA_AutoBot.zip"
     }
   ],
-  "notes": "1.2.6：Bot 引擎从 Thread 迁移到独立 Subprocess 架构，彻底解决 Windows Not Responding 无响应问题；JSON 行协议 stdin/stdout 通信；GUI 主线程专用于 UI 刷新。"
+  "notes": "1.2.6：回退到稳定线程模式，放弃子进程架构；修复 stop_bot 重复定义导致的 UI 不重置；Bot 后台 daemon 线程稳定运行。"
 }
