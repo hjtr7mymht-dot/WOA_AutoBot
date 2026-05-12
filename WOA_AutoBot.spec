@@ -10,7 +10,7 @@ datas = [
     ('version.json', '.'),
     # 核心模块（重构后）
     ('core', 'core'),
-    # Bot 引擎 Mixin 模块
+    # Bot 引擎 Mixin 模块 & 子进程协议
     ('bot', 'bot'),
 ]
 

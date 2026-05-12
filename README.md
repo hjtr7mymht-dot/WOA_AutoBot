@@ -66,11 +66,16 @@ python gui_launcher.py
 
 ## 最近更新
 
+### v1.2.6 (2026-05-12)
+- 🏗️ **Bot 子进程架构重构**：引擎从 `threading.Thread` 迁移到 `subprocess.Popen` 独立进程，彻底解决 Windows "Not Responding" 无响应
+- 📡 **JSON 行协议通信**：GUI ↔ Bot 通过 stdin/stdout 单行 JSON 通信，主线程专用于 UI 刷新
+- 🆕 **bot/protocol.py**：消息编解码；**bot/worker.py**：子进程入口；**bot/process_proxy.py**：进程生命周期管理
+- 💾 **子进程实时统计推送**：每 1.5s 通过 stdout 推送进场/离场/地勤/塔台数据到 GUI 仪表盘
+
 ### v1.2.5.1 (2026-05-12)
-- 🧠 **多开内存泄漏修复**：模板缓存 `_template_cache` 加入 LRU 淘汰（上限 40 图标），定期清理 120s 未访问模板
-- 🗑️ **垃圾回收加强**：主循环 GC 间隔从 120 次→60 次，约每 3s 回收一次
-- 🪟 **Windows UI 无响应修复**：日志轮询最大间隔从 250ms→120ms；批量写入后调用 `update_idletasks()` 防止 Windows 判定无响应
-- ⚰️ **日志行数收紧**：`MAX_LINES=3000→2000`，减少多实例文本内存
+- 🧠 **多开内存泄漏修复**：模板缓存 LRU 淘汰（上限 40）+ 定期清理
+- 🪟 **Windows UI 无响应修复**：轮询 120ms + update_idletasks
+- ⚰️ **日志行数收紧**：MAX_LINES=2000
 
 ### v1.2.5 (2026-05-11)
 - ⚡ **长时间运行卡顿修复**：日志队列硬上限 `maxsize=2000` 防内存泄漏；文本控件 3000 行硬上限自动裁剪；自适应批处理（50/100/200 条）；空闲轮询自动减速（100ms→250ms）、面板刷新 1s→5s
