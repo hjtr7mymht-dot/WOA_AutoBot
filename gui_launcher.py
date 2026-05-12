@@ -241,7 +241,7 @@ class MultiTextRedirector(object):
     """输出重定向器：将 print 写入 tkinter 控件。
     自适应批处理 + 队列溢出保护 + 重复消息折叠 + 行数内存上限。"""
 
-    MAX_LINES = 3000
+    MAX_LINES = 2000
     FOLD_THRESHOLD = 5  # 连续重复消息 > 阈值时折叠
 
     def __init__(self, widgets=None, tag="stdout"):
@@ -393,6 +393,12 @@ class MultiTextRedirector(object):
                 pass
             except Exception:
                 pass
+        # 每批处理完后让 tkinter 有机会处理事件队列，避免 Windows 判定"无响应"
+        try:
+            if self.widgets:
+                self.widgets[0].update_idletasks()
+        except Exception:
+            pass
 
     def flush(self):
         pass
@@ -436,7 +442,7 @@ class Application(ttkb.Window):
         if IS_WINDOWS:
             try:
                 import ctypes
-                myappid = 'woabot.launcher.v1.2.5'
+                myappid = 'woabot.launcher.v1.2.5.1'
                 ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
             except Exception:
                 pass
@@ -1448,7 +1454,7 @@ class Application(ttkb.Window):
             r = ttkb.Frame(p)
             r.pack(fill=X, pady=1)
             ttkb.Checkbutton(r, text=txt, variable=var, bootstyle="success-round-toggle",
-                             command=lambda: None).pack(side=LEFT)
+                             command=self.sync_all_configs_to_bot).pack(side=LEFT)
             self.create_info_icon(r, tip).pack(side=LEFT, padx=4)
 
         def _entry(p, lbl, var, btn, cmd, tip, w=5):
@@ -3277,15 +3283,16 @@ class Application(ttkb.Window):
 
     def process_log_queue(self):
         self.redirector._flush_queue()
-        # 自适应轮询：队列有积压时加快，空闲时减慢
+        # 保持高频轮询以保证 UI 响应，Windows 上 max 间隔 120ms
         qd = self.redirector._queue.qsize()
-        if qd > 100:
-            interval = 50
-        elif qd > 20:
-            interval = 100
-        else:
-            interval = 250  # 空闲时降低 CPU 占用
-        self.after(interval, self.process_log_queue)
+        if qd > 100:    interval = 40
+        elif qd > 20:   interval = 60
+        elif qd > 5:    interval = 80
+        else:           interval = 120
+        try:
+            self.after(interval, self.process_log_queue)
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

@@ -1407,6 +1407,7 @@ class WoaBot(ConfigMixin, TowerMixin, FilterMixin):
         self.log("[DEBUG] 主循环线程已启动")
         self.sleep(0.3)
         self.last_periodic_check_time = 0
+        _last_gc = time.time()
         if self.enable_no_takeoff_mode:
             self._no_takeoff_cycle_side = 'landing'
             self._no_takeoff_cycle_next_switch_time = time.time() + self._no_takeoff_switch_interval
@@ -1466,9 +1467,14 @@ class WoaBot(ConfigMixin, TowerMixin, FilterMixin):
                         self.sleep(0.08)
                         idle_count = 0
                 gc_counter += 1
-                if gc_counter > 120:
+                if gc_counter > 60:
                     gc.collect()
                     gc_counter = 0
+                    # 定期收缩模板缓存（多开时释放未用模板）
+                    try:
+                        AdbController._template_cache_clear_stale()
+                    except Exception:
+                        pass
             except StopSignal:
                 self.log(">>> [系统] 停止指令，终止...")
                 break
@@ -1792,11 +1798,11 @@ class WoaBot(ConfigMixin, TowerMixin, FilterMixin):
                 # ROI: (32,271) 到 (90,327)
                 roi = screen[271:327, 32:90]
                 tpl_path = self.icon_path + 'tower_1.png'
-                tpl = self.adb._template_cache.get(tpl_path)
+                tpl = AdbController._template_cache_get(tpl_path)
                 if tpl is None:
                     tpl = self.adb._read_image_safe(tpl_path)
                     if tpl is not None:
-                        self.adb._template_cache[tpl_path] = tpl
+                        AdbController._template_cache_put(tpl_path, tpl)
                 if tpl is not None:
                     result = cv2.matchTemplate(roi, tpl, cv2.TM_CCOEFF_NORMED)
                     _, max_val, _, _ = cv2.minMaxLoc(result)

@@ -1,14 +1,14 @@
 {
-  "version": "1.2.5",
+  "version": "1.2.5.1",
   "package_urls": [
     {
       "name": "GitHub Release",
-      "url": "https://github.com/hjtr7mymht-dot/WOA_AutoBot/releases/download/1.2.5/WOA_AutoBot.zip"
+      "url": "https://github.com/hjtr7mymht-dot/WOA_AutoBot/releases/download/1.2.5.1/WOA_AutoBot.zip"
     },
     {
       "name": "ghproxy Release",
-      "url": "https://ghproxy.cn/https://github.com/hjtr7mymht-dot/WOA_AutoBot/releases/download/1.2.5/WOA_AutoBot.zip"
+      "url": "https://ghproxy.cn/https://github.com/hjtr7mymht-dot/WOA_AutoBot/releases/download/1.2.5.1/WOA_AutoBot.zip"
     }
   ],
-  "notes": "1.2.5：长时间运行 UI 卡顿修复（日志队列硬上限+自适应批处理+空闲减速轮询）；日志控件 3000 行硬上限防内存泄漏；塔台全部延时按钮统一+不起飞模式策略缓存。"
+  "notes": "1.2.5.1：多开内存泄漏修复（模板缓存 LRU 淘汰+定期 GC）；Windows UI 无响应修复（轮询间隔收紧至 120ms+update_idletasks）；日志行数上限 3000→2000 减少内存占用。"
 }

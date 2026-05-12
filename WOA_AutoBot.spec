@@ -40,14 +40,18 @@ hiddenimports += [
     'orjson', 'cachetools',
 
     # ADB / 模拟器控制
-    'uiautomator2', 'uiautomator2cache', 'adbutils',
+    'uiautomator2', 'uiautomator2.core', 'uiautomator2cache', 'adbutils',
 
-    # 网络 / XML
+    # 网络 / XML / 编码
     'lxml', 'lxml.etree',
-    'requests',
+    'requests', 'urllib3', 'charset_normalizer',
+    'idna', 'encodings',
 
     # SSL 证书
     'certifi', 'ssl',
+
+    # 崩溃转储（Windows segfault 日志）
+    'faulthandler',
 ]
 
 a = Analysis(
