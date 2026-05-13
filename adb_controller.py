@@ -913,6 +913,8 @@ class AdbController:
         finally:
             if acquired:
                 self.shell_lock.release()
+        # 清理模板缓存，释放内存
+        self._template_cache.clear()
 
     def _write_shell_cmd(self, cmd_str):
         """通过长连接快速写入命令"""
@@ -1810,38 +1812,15 @@ class AdbController:
         return read_image_safe(path)
 
     _template_cache = {}
-    _template_cache_max = 40  # LRU 上限，超出时淘汰最久未用的模板
-    _template_access = {}     # path → timestamp
+    _template_cache_max = 60  # 上限防止多开时内存无限制增长
 
-    @classmethod
-    def _template_cache_put(cls, path, img):
-        if len(cls._template_cache) >= cls._template_cache_max:
-            oldest = min(cls._template_access, key=cls._template_access.get)
-            cls._template_cache.pop(oldest, None)
-            cls._template_access.pop(oldest, None)
-        cls._template_cache[path] = img
-        cls._template_access[path] = time.time()
-
-    @classmethod
-    def _template_cache_get(cls, path):
-        template = cls._template_cache.get(path)
-        if template is not None:
-            cls._template_access[path] = time.time()
-        return template
-
-    @classmethod
-    def _template_cache_clear(cls):
-        cls._template_cache.clear()
-        cls._template_access.clear()
-
-    @classmethod
-    def _template_cache_clear_stale(cls, ttl=120):
-        """清理超过 ttl 秒未访问的模板（多开时定期调用释放内存）"""
-        now = time.time()
-        stale = [p for p, last in cls._template_access.items() if now - last > ttl]
-        for p in stale:
-            cls._template_cache.pop(p, None)
-            cls._template_access.pop(p, None)
+    def _cache_template(self, template_path, template):
+        """将模板放入缓存，当缓存超限时清理最旧的条目"""
+        if len(self._template_cache) >= self._template_cache_max:
+            # 删除最早插入的条目（字典保持插入顺序 Python 3.7+）
+            oldest_key = next(iter(self._template_cache))
+            del self._template_cache[oldest_key]
+        self._template_cache[template_path] = template
 
     def locate_image(self, template_path, confidence=0.8, screen_image=None):
         import cv2
@@ -1850,11 +1829,11 @@ class AdbController:
         else:
             screen = self.get_screenshot()
         if screen is None: return None
-        template = AdbController._template_cache_get(template_path)
+        template = self._template_cache.get(template_path)
         if template is None:
             template = self._read_image_safe(template_path)
             if template is None: return None
-            AdbController._template_cache_put(template_path, template)
+            self._cache_template(template_path, template)
         result = cv2.matchTemplate(screen, template, cv2.TM_CCOEFF_NORMED)
         min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(result)
         if max_val >= confidence:
@@ -1870,11 +1849,11 @@ class AdbController:
         else:
             screen = self.get_screenshot()
         if screen is None: return []
-        template = AdbController._template_cache_get(template_path)
+        template = self._template_cache.get(template_path)
         if template is None:
             template = self._read_image_safe(template_path)
             if template is None: return []
-            AdbController._template_cache_put(template_path, template)
+            self._cache_template(template_path, template)
         result = cv2.matchTemplate(screen, template, cv2.TM_CCOEFF_NORMED)
         h, w = template.shape[:2]
         loc = np.where(result >= confidence)

@@ -3,12 +3,12 @@
   "package_urls": [
     {
       "name": "GitHub Release",
-      "url": "https://github.com/hjtr7mymht-dot/WOA_AutoBot/releases/download/1.2.7/WOA_AutoBot.zip"
+      "url": "https://github.com/hjtr7mymht-dot/WOA_AutoBot/releases/download/1.2.6/WOA_AutoBot.zip"
     },
     {
       "name": "ghproxy Release",
-      "url": "https://ghproxy.cn/https://github.com/hjtr7mymht-dot/WOA_AutoBot/releases/download/1.2.7/WOA_AutoBot.zip"
+      "url": "https://ghproxy.cn/https://github.com/hjtr7mymht-dot/WOA_AutoBot/releases/download/1.2.6/WOA_AutoBot.zip"
     }
   ],
-  "notes": "1.2.6：回退到稳定线程模式，放弃子进程架构；修复 stop_bot 重复定义导致的 UI 不重置；Bot 后台 daemon 线程稳定运行。"
+  "notes": "1.2.6：引入 BackgroundWorker 后台线程池；配置写入/ADB扫描/TeeToFile 全部异步化，主线程专注 GUI 刷新；定时任务统一由后台线程驱动。"
 }

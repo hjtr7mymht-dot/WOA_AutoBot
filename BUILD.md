@@ -1,4 +1,4 @@
-WOA AutoBot v1.2.6 打包指南
+WOA AutoBot v1.2.4 打包指南
 ===========================
 
 Windows 打包
@@ -28,7 +28,7 @@ xattr -rc dist/WOA_AutoBot.app
 codesign --remove-signature dist/WOA_AutoBot.app 2>/dev/null
 codesign --deep --force --sign - dist/WOA_AutoBot.app
 # 制作 DMG
-hdiutil create -volname "WOA AutoBot v1.2.2" -srcfolder dist/WOA_AutoBot.app -ov -format UDZO dist/WOA_AutoBot_macOS.dmg
+hdiutil create -volname "WOA AutoBot v1.2.4" -srcfolder dist/WOA_AutoBot.app -ov -format UDZO dist/WOA_AutoBot_macOS.dmg
 ```
 
 注意

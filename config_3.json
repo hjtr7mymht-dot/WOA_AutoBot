@@ -1,10 +1,9 @@
 {
-  "adb_path": "c:\\Users\\wsnbb\\Desktop\\WOA_AutoBot\\adb_tools\\adb.exe",
+  "adb_path": "/Users/drtotm/Desktop/WOA/WOA_AutoBot/adb_tools/adb",
   "anti_stuck_enabled": true,
   "anti_stuck_threshold": 6,
   "auto_delay_count": 0,
   "bonus_staff": false,
-  "coin_remind_enabled": false,
   "delay_bribe": false,
   "initial_device_paths_detected": true,
   "mobile_notify_enabled": false,

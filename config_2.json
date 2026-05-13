@@ -5,7 +5,6 @@
   "approach_depart_ratio": "0",
   "auto_delay_count": 0,
   "bonus_staff": false,
-  "coin_remind_enabled": false,
   "delay_bribe": false,
   "initial_device_paths_detected": true,
   "mobile_notify_enabled": false,

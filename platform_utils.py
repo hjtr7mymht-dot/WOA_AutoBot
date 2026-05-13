@@ -88,85 +88,24 @@ def get_adb_bundled_path(base_dir=None):
 
 
 def safe_subprocess_run(args, **kwargs):
-    """跨平台安全的 subprocess.run 包装，自动处理 creationflags。
-    在 PyInstaller 冻结环境中避免 communicate()/select() GIL 崩溃。"""
+    """跨平台安全的 subprocess.run 包装，自动处理 creationflags。"""
     import subprocess as sp
-    import sys as _sys
-    import threading as _threading
-    import time as _time
     if IS_WINDOWS and "creationflags" not in kwargs:
         kwargs["creationflags"] = CREATE_NO_WINDOW
-
-    frozen = bool(getattr(_sys, 'frozen', False))
-    # 冻结环境 + macOS：避免 communicate()/select() GIL 崩溃
-    if frozen and not IS_WINDOWS and kwargs.get('stdout') == sp.PIPE:
-        timeout_val = kwargs.pop('timeout', None)
-        proc = sp.Popen(args, **kwargs)
-        # 在线程中读取 stdout/stderr，避免 select() GIL 崩溃
-        _out, _err = [], []
-        _out_lock = _threading.Lock()
-        _err_lock = _threading.Lock()
-
-        def _read_stdout():
-            try:
-                while True:
-                    chunk = os.read(proc.stdout.fileno(), 65536)
-                    if not chunk:
-                        break
-                    with _out_lock:
-                        _out.append(chunk)
-            except Exception:
-                pass
-
-        def _read_stderr():
-            try:
-                while True:
-                    chunk = os.read(proc.stderr.fileno(), 65536)
-                    if not chunk:
-                        break
-                    with _err_lock:
-                        _err.append(chunk)
-            except Exception:
-                pass
-
-        t_out = _threading.Thread(target=_read_stdout, daemon=True)
-        t_err = _threading.Thread(target=_read_stderr, daemon=True)
-        t_out.start()
-        t_err.start()
-
-        try:
-            deadline = _time.time() + timeout_val if timeout_val else None
-            while proc.poll() is None:
-                if deadline and _time.time() >= deadline:
-                    proc.kill()
-                    raise sp.TimeoutExpired(args, timeout_val)
-                _time.sleep(0.02)
-            t_out.join(timeout=1.0)
-            t_err.join(timeout=1.0)
-        except sp.TimeoutExpired:
-            proc.kill()
-            raise
-        with _out_lock:
-            stdout = b''.join(_out)
-        with _err_lock:
-            stderr = b''.join(_err)
-        return sp.CompletedProcess(args, proc.returncode, stdout=stdout, stderr=stderr)
-
     return sp.run(args, **kwargs)
 
 
 def safe_popen_wait(proc, timeout=None):
-    """在冻结环境中安全地等待子进程结束，避免 Popen.wait() 的 GIL 崩溃。
-    使用轮询方式检查进程状态。"""
-    import time
+    """安全等待子进程结束。"""
     import subprocess as sp
-    frozen = bool(getattr(__import__('sys'), 'frozen', False))
-    if frozen and not IS_WINDOWS:
-        deadline = time.time() + timeout if timeout else None
-        while proc.poll() is None:
-            if deadline and time.time() >= deadline:
-                raise sp.TimeoutExpired(proc.args, timeout)
-            time.sleep(0.02)
-        return proc.returncode
-    else:
+    if timeout is None:
+        return proc.wait()
+    try:
         return proc.wait(timeout=timeout)
+    except sp.TimeoutExpired:
+        proc.terminate()
+        try:
+            return proc.wait(timeout=2)
+        except sp.TimeoutExpired:
+            proc.kill()
+            return proc.wait()

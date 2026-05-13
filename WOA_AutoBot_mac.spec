@@ -12,6 +12,17 @@ ADB = 'adb'  # macOS 平台
 
 block_cipher = None
 
+# ── 收集 ttkbootstrap 主题资源 ──
+ttkbootstrap_datas = []
+try:
+    import ttkbootstrap
+    ttkb_root = os.path.dirname(ttkbootstrap.__file__)
+    themes_dir = os.path.join(ttkb_root, 'themes')
+    if os.path.isdir(themes_dir):
+        ttkbootstrap_datas = [(themes_dir, os.path.join('ttkbootstrap', 'themes'))]
+except Exception:
+    pass
+
 a = Analysis(
     ['gui_launcher.py'],
     pathex=[_dir],
@@ -23,17 +34,45 @@ a = Analysis(
         ('platform-tools', 'platform-tools'),
         ('config.json', '.'),
         ('version.json', '.'),
-    ],
+        ('icon/digits', 'icon/digits'),
+        ('icon/digits/global', 'icon/digits/global'),
+        ('icon/digits/task', 'icon/digits/task'),
+        ('docs', 'docs'),
+    ] + ttkbootstrap_datas,
     hiddenimports=[
-        'tkinter', 'tkinter.scrolledtext', 'tkinter.filedialog', 'tkinter.messagebox',
-        'PIL', 'PIL._tkinter_finder',
+        # tkinter 全套
+        'tkinter', 'tkinter.scrolledtext', 'tkinter.filedialog',
+        'tkinter.messagebox', 'tkinter.ttk', 'tkinter.constants',
+        # ttkbootstrap
+        'ttkbootstrap', 'ttkbootstrap.constants', 'ttkbootstrap.style',
+        'ttkbootstrap.widgets', 'ttkbootstrap.themes',
+        # PIL 图像处理
+        'PIL', 'PIL.Image', 'PIL.ImageTk', 'PIL.ImageDraw',
+        'PIL.ImageFont', 'PIL.ImageFilter', 'PIL.ImageOps',
+        'PIL._tkinter_finder', 'PIL._imagingtk',
+        # cv2 / numpy
         'cv2', 'numpy',
-        'orjson', 'cachetools',
-        'uiautomator2', 'adbutils',
+        # JSON 加速
+        'orjson',
+        # 缓存工具
+        'cachetools',
+        # uiautomator2
+        'uiautomator2', 'uiautomator2._funcs',
+        'adbutils', 'adbutils._adb',
+        # lxml
         'lxml', 'lxml.etree',
-        'requests', 'pystray',
+        # 网络请求与通知
+        'requests', 'urllib3',
+        'pystray',
+        # SSL
         'certifi', 'ssl',
-        'PIL.Image', 'PIL.ImageTk', 'PIL.ImageDraw',
+        # 项目内部模块
+        'adb_controller', 'simple_ocr', 'gui_launcher',
+        'main_adb', 'nemu_ipc', 'platform_utils',
+        'woa_debug', 'emulator_discovery',
+        'core', 'core.constants', 'core.platform',
+        'core.resources', 'core.debug',
+        'bot', 'bot.config', 'bot.tower', 'bot.filter',
     ],
     hookspath=[],
     hooksconfig={},
@@ -43,6 +82,9 @@ a = Analysis(
         'matplotlib', 'scipy', 'pandas',
         'jupyter', 'notebook', 'ipykernel',
         'tensorflow', 'torch', 'keras',
+        'wx', 'wxPython',
+        'test', 'tests', 'unittest',
+        'pydoc', 'doctest',
     ],
     noarchive=False,
     optimize=0,
