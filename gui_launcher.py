@@ -480,10 +480,16 @@ class TeeToFile:
 
 class BackgroundWorker:
     """后台工作线程池：统一执行 I/O 操作和耗时任务（ADB 扫描、配置写入、通知等）。
-    通过 tkinter `after` 将结果投递回主线程，确保主线程仅负责 GUI 刷新。"""
+    通过线程安全的 event_generate 将结果投递回主线程，确保主线程仅负责 GUI 刷新。
+    
+    注意：Tkinter/Tcl 不是线程安全的。严禁在工作线程中调用任何 tkinter API
+    （包括 after/event_generate 以外的方法）。回调通过线程安全队列 + 
+    event_generate 投递到主线程执行。"""
 
-    def __init__(self, app_instance):
+    def __init__(self, app_instance, callback_queue, notify_main_thread):
         self._app = app_instance  # Application 实例引用
+        self._callback_queue = callback_queue  # 线程安全队列，用于投递回调到主线程
+        self._notify_main = notify_main_thread  # callable: 通知主线程处理回调队列
         self._task_queue = queue.Queue()
         self._shutdown = threading.Event()
         self._worker_thread = threading.Thread(target=self._run, daemon=True, name="BgWorker")
@@ -503,7 +509,10 @@ class BackgroundWorker:
                     result = ex
                 if callback:
                     try:
-                        self._app.after(0, callback, result)
+                        # 线程安全：通过队列 + event_generate 投递回调到主线程
+                        # 严禁在此线程中直接调用 tkinter API（如 after）
+                        self._callback_queue.put_nowait((callback, result))
+                        self._notify_main()
                     except Exception:
                         pass
             except queue.Empty:
@@ -674,8 +683,19 @@ class Application(ttkb.Window):
         self._notify_last_signature = ""
         self._stats_report_anchor_ts = 0.0
 
+        # 后台工作线程回调队列（线程安全）：BgWorker 将回调投递到此队列，
+        # 主线程通过 <<BgCallback>> 虚拟事件处理，避免跨线程调用 tkinter API
+        self._bg_callback_queue = queue.Queue()
+
+        # 绑定虚拟事件：当 BgWorker 生成 <<BgCallback>> 事件时，主线程处理回调
+        self.bind("<<BgCallback>>", self._process_bg_callbacks)
+
         # 后台工作线程：统一处理 I/O 和耗时任务（配置写入、ADB扫描等）
-        self._bg_worker = BackgroundWorker(self)
+        self._bg_worker = BackgroundWorker(
+            self,
+            callback_queue=self._bg_callback_queue,
+            notify_main_thread=lambda: self.event_generate("<<BgCallback>>", when="tail"),
+        )
 
         self.redirector = MultiTextRedirector()
         self._log_tee = None
@@ -711,6 +731,23 @@ class Application(ttkb.Window):
         """每 30 秒在后台线程执行一次定时检查（统计汇报/金币提醒），结果通过 after 回主线程。"""
         self._bg_worker.submit(self._do_bg_tick, callback=self._on_bg_tick_done)
         self.after(30000, self._schedule_bg_tick)
+
+    def _process_bg_callbacks(self, event=None):
+        """主线程事件处理器：从线程安全队列中取出回调并在主线程执行。
+        
+        由 BgWorker 生成的 <<BgCallback>> 虚拟事件触发。
+        此方法确保所有 tkinter/Tcl 操作仅在主线程中发生，避免跨线程 SIGSEGV 崩溃。"""
+        q = self._bg_callback_queue
+        # 批量处理：一次清空队列中所有待处理的回调
+        for _ in range(q.qsize()):
+            try:
+                cb, result = q.get_nowait()
+                try:
+                    cb(result)
+                except Exception:
+                    pass
+            except queue.Empty:
+                break
 
     def _do_bg_tick(self):
         """在后台线程中执行定时逻辑（不在主线程，避免阻塞 GUI）。"""
@@ -852,6 +889,12 @@ class Application(ttkb.Window):
         try:
             if hasattr(self, '_bg_worker'):
                 self._bg_worker.shutdown()
+        except Exception:
+            pass
+        # 清空 BgWorker 回调队列中残余项（主线程安全处理）
+        try:
+            if hasattr(self, '_bg_callback_queue'):
+                self._process_bg_callbacks()
         except Exception:
             pass
         # 释放实例锁文件

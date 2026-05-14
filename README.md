@@ -66,6 +66,11 @@ python gui_launcher.py
 
 ## 最近更新
 
+### v1.2.7 (2026-05-14)
+- 🛡️ **修复 BgWorker 线程安全崩溃**：`BackgroundWorker._run()` 不再从工作线程直接调用 Tkinter 的 `.after()`，改用线程安全队列 + `event_generate` 虚拟事件投递回调到主线程执行，彻底消除 `EXC_BAD_ACCESS (SIGSEGV)` 崩溃（Tcl 非线程安全导致）
+- 🔄 **新增 `_process_bg_callbacks` 主线程处理器**：批量处理后台回调队列，确保所有 Tkinter/Tcl 操作始终在主线程发生
+- 🧹 **关闭时清空回调队列**：窗口关闭前清理 BgWorker 回调队列中的残余项，防止漏处理
+
 ### v1.2.6 (2026-05-12)
 - 🧵 **引入 BackgroundWorker 后台线程池**：新增独立工作线程，统一执行所有 I/O 操作和耗时任务
 - 💾 **配置写入异步化**：`save_config()` 将 JSON 文件写入委派给后台线程，不再阻塞主线程
