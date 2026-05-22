@@ -1616,6 +1616,9 @@ class Application(ttkb.Window):
         # 状态徽章
         cap_frame = ttkb.Frame(header)
         cap_frame.pack(side=RIGHT)
+        # 作者网站链接
+        ttkb.Button(cap_frame, text="🌐 作者网站", bootstyle="outline-info",
+                    command=self.open_personal_website, padding=(4, 0)).pack(side=LEFT, padx=(4, 0))
         for label, var, color in (
             ("运行", self.var_runtime_status, "info"),
             ("设备", self.var_device_status, "info"),
@@ -2165,6 +2168,9 @@ class Application(ttkb.Window):
 
         threading.Thread(target=_worker, daemon=True).start()
 
+    def open_personal_website(self):
+        webbrowser.open("https://hjtr7mymht-dot.github.io/")
+
     def open_official_repo(self):
         webbrowser.open(OFFICIAL_REPO_URL)
 
@@ -2342,6 +2348,7 @@ class Application(ttkb.Window):
 - 此脚本为开源免费项目，如您是从任何渠道，例如淘宝、闲鱼、拼多多购买的，请立即退款并举报！
 - 获取更新和反馈问题请加入QQ群1067076460。
 - 官方仓库地址：https://github.com/hjtr7mymht-dot/WOA_AutoBot
+- 作者网站：https://hjtr7mymht-dot.github.io/（个人博客与最新动态）
 - 如遇任何问题或bug，请在QQ群内或github上进行反馈。
 - 脚本尚不稳定，如果造成账号内游戏币损失，本人概不负责！使用辅助工具有风险，请自行评估，如造成账号封禁，与作者无关！
 
@@ -2712,6 +2719,7 @@ class Application(ttkb.Window):
         ttkb.Button(online_btn_row, text="立即在线验证", bootstyle="success-outline", command=self.run_online_validation).pack(side=LEFT)
         ttkb.Button(online_btn_row, text="国内网络方案", bootstyle="warning-outline", command=self.show_cn_network_help).pack(side=LEFT, padx=8)
         ttkb.Button(online_btn_row, text="官方仓库", bootstyle="primary-outline", command=self.open_official_repo).pack(side=LEFT)
+        ttkb.Button(online_btn_row, text="作者网站", bootstyle="info-outline", command=self.open_personal_website).pack(side=LEFT, padx=8)
 
         notebook = ttkb.Notebook(body, bootstyle="primary")
         notebook.pack(fill=BOTH, expand=True, pady=(0, 12))
