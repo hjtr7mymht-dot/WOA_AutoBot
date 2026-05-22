@@ -1,14 +1,14 @@
 {
-  "version": "1.2.1",
+  "version": "1.2.6",
   "package_urls": [
     {
       "name": "GitHub Release",
-      "url": "https://github.com/hjtr7mymht-dot/WOA_AutoBot/releases/download/1.2.1/WOA_AutoBot.zip"
+      "url": "https://github.com/hjtr7mymht-dot/WOA_AutoBot/releases/download/1.2.6/WOA_AutoBot.zip"
     },
     {
       "name": "ghproxy Release",
-      "url": "https://ghproxy.cn/https://github.com/hjtr7mymht-dot/WOA_AutoBot/releases/download/1.2.1/WOA_AutoBot.zip"
+      "url": "https://ghproxy.cn/https://github.com/hjtr7mymht-dot/WOA_AutoBot/releases/download/1.2.6/WOA_AutoBot.zip"
     }
   ],
-  "notes": "1.2.1：塔台延时全面优化，全开时一键全部续费，部分开启时逐控制器精准续费；修复延时确认点击失败问题；离线模式完整可用；默认筛选模式改为全部勾选。"
+  "notes": "1.2.6：引入 BackgroundWorker 后台线程池；配置写入/ADB扫描/TeeToFile 全部异步化，主线程专注 GUI 刷新；定时任务统一由后台线程驱动。"
 }

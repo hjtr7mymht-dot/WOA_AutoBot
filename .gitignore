@@ -35,6 +35,7 @@ __pycache__/
 *.py[cod]
 .venv/
 .venv-312/
+.venv-312-fresh/
 venv/
 .vscode/
 .idea/

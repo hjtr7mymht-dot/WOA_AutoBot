@@ -8,7 +8,6 @@
 import os
 import sys
 import subprocess as sp
-import threading
 import time
 
 # ─── 条件导入 ───────────────────────────────────────────
@@ -85,61 +84,10 @@ def get_app_data_dir():
 
 # ─── 子进程安全包装 ──────────────────────────────────────
 def safe_subprocess_run(args, **kwargs):
-    """跨平台安全的 subprocess.run 包装，自动处理 creationflags。
-    在 PyInstaller 冻结环境中避免 communicate()/select() GIL 崩溃。"""
+    """跨平台安全的 subprocess.run 包装，自动处理 creationflags。"""
     if IS_WINDOWS and "creationflags" not in kwargs:
         kwargs["creationflags"] = CREATE_NO_WINDOW
-
-    frozen = bool(getattr(sys, "frozen", False))
-    if frozen and not IS_WINDOWS and kwargs.get("stdout") == sp.PIPE:
-        timeout_val = kwargs.pop("timeout", None)
-        proc = sp.Popen(args, **kwargs)
-        _out, _err = [], []
-        _out_lock = threading.Lock()
-        _err_lock = threading.Lock()
-
-        def _read_stdout():
-            try:
-                while True:
-                    chunk = os.read(proc.stdout.fileno(), 65536)
-                    if not chunk:
-                        break
-                    with _out_lock:
-                        _out.append(chunk)
-            except Exception:
-                pass
-
-        def _read_stderr():
-            try:
-                while True:
-                    chunk = os.read(proc.stderr.fileno(), 65536)
-                    if not chunk:
-                        break
-                    with _err_lock:
-                        _err.append(chunk)
-            except Exception:
-                pass
-
-        t1 = threading.Thread(target=_read_stdout, daemon=True)
-        t2 = threading.Thread(target=_read_stderr, daemon=True)
-        t1.start()
-        t2.start()
-        try:
-            proc.wait(timeout=timeout_val)
-        except sp.TimeoutExpired:
-            proc.kill()
-            proc.wait()
-        t1.join(timeout=1)
-        t2.join(timeout=1)
-        result = sp.CompletedProcess(
-            args=args,
-            returncode=proc.returncode,
-            stdout=b"".join(_out),
-            stderr=b"".join(_err),
-        )
-        return result
-    else:
-        return sp.run(args, **kwargs)
+    return sp.run(args, **kwargs)
 
 
 def safe_popen_wait(proc, timeout=None):
