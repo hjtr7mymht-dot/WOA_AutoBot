@@ -6,10 +6,12 @@ WOA AutoBot - 全局常量 (消除在 4 个文件中重复定义的魔法值)
 from core.platform import IS_WINDOWS, IS_MAC
 
 # ─── 版本与仓库 ──────────────────────────────────────────
-LOCAL_VERSION = "1.2.7"
+LOCAL_VERSION = "1.2.8"
 OFFICIAL_REPO_URL = "https://github.com/hjtr7mymht-dot/WOA_AutoBot"
 OFFICIAL_REPO_NAME = "hjtr7mymht-dot/WOA_AutoBot"
 ONLINE_VERSION_PATH = "version.json"
+ARPA_REPO_URL = "https://github.com/hjtr7mymht-dot/ARPA-FOR-WOA"
+ARPA_REPO_NAME = "hjtr7mymht-dot/ARPA-FOR-WOA"
 
 # ─── 功能完整性守卫标记 ──────────────────────────────────
 FEATURE_GUARD_TOKEN = "WOA_DONATE_GUARD_V1"
