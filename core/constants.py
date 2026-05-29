@@ -13,20 +13,20 @@ ONLINE_VERSION_PATH = "version.json"
 ARPA_REPO_URL = "https://github.com/hjtr7mymht-dot/ARPA-FOR-WOA"
 ARPA_REPO_NAME = "hjtr7mymht-dot/ARPA-FOR-WOA"
 
-# ─── 右侧类别栏按钮（图像识别匹配，分辨率自适应） ──────
-# 使用 icon/ 目录下的模板图片匹配定位，不再依赖固定坐标
+# ─── 右侧类别栏按钮（图像识别 + 坐标回退） ─────────────
+# 优先使用 icon/ 下的模板图片匹配，匹配失败时回退到坐标点击
 # 搜索区域：游戏右侧竖排类别按钮区域 (x, y, w, h)
-SIDEBAR_SEARCH_ROI = (1530, 390, 80, 660)
+SIDEBAR_SEARCH_ROI = (1520, 400, 90, 680)
 
 SIDEBAR_CATEGORIES = [
-    {"key": "favorites",   "label": "❤️ 喜爱/合约",   "icon": "love.png"},
+    {"key": "favorites", "label": "❤️ 喜爱/合约",   "icon": "love.png",         "fallback_pos": (1555, 510)},
     # 第2个按钮是"待处理全部"（不需要处理，跳过）
-    {"key": "fleet",       "label": "⚠️ 机队",       "icon": "myairbase.png"},
-    {"key": "players",     "label": "🟢 其他玩家",   "icon": "otherairbase.png"},
-    {"key": "event",       "label": "🔵 活动飞机",   "icon": "spairbase.png"},
+    {"key": "fleet",     "label": "⚠️ 机队",       "icon": "myairbase.png",    "fallback_pos": (1555, 740)},
+    {"key": "players",   "label": "🟢 其他玩家",   "icon": "otherairbase.png", "fallback_pos": (1555, 855)},
+    {"key": "event",     "label": "🔵 活动飞机",   "icon": "spairbase.png",    "fallback_pos": (1555, 970)},
 ]
 
-# 类别轮换间隔（秒）：在当前类别下扫描多少次后轮换到下个类别
+# 类别轮换间隔（秒）
 CATEGORY_CYCLE_INTERVAL = 15.0
 
 # ─── 功能完整性守卫标记 ──────────────────────────────────

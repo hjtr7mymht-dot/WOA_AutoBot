@@ -102,8 +102,6 @@ class ConfigMixin:
             enabled_keys = [c["label"] for c in SIDEBAR_CATEGORIES if self.category_selection.get(c["key"], False)]
             if enabled_keys:
                 self.log(f">>> [配置] 类别栏处理已开启: {', '.join(enabled_keys)}")
-                # 初始化轮换
-                import time
                 self._current_category_index = -1
                 self._next_category_switch_time = time.time() + 0.5
             else:

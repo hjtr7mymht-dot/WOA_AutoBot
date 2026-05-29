@@ -8,7 +8,7 @@
   "category_selection": {
     "event": false,
     "favorites": false,
-    "fleet": false,
+    "fleet": true,
     "players": false
   },
   "control_method": "uiautomator2",

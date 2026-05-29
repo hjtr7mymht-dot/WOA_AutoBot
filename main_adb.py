@@ -567,66 +567,54 @@ class WoaBot(ConfigMixin, TowerMixin, FilterMixin):
     def _click_filter_point(self, x, y):
         self.adb.click(x, y, random_offset=5)
 
-    # ─── 右侧类别栏切换（图像识别，分辨率自适应） ──────────
-    def _locate_category_button(self, cat):
-        """使用模板匹配在右侧类别栏搜索区域中定位按钮。
-        返回 (x, y) 中心坐标，找不到返回 None。"""
+    # ─── 右侧类别栏切换（图像识别优先 + 坐标回退）──────
+    def _click_category(self, cat, debug_label):
+        """定位并点击类别按钮：先尝试图像识别，失败则用坐标回退。
+        返回 True 表示至少尝试了点击。"""
+        # 方式1：图像识别
         icon_name = cat.get("icon", "")
-        if not icon_name:
-            return None
-        icon_path = self.icon_path + icon_name
-        if not os.path.exists(icon_path):
-            self.log(f"📂 [类别] ⚠️ 图标文件不存在: {icon_path}")
-            return None
-        screen = self.adb.get_screenshot()
-        if screen is None:
-            return None
-        # 在侧边栏搜索区域中匹配
-        sx, sy, sw, sh = SIDEBAR_SEARCH_ROI
-        roi = screen[sy:sy + sh, sx:sx + sw]
-        result = self.adb.locate_image(icon_path, confidence=0.75, screen_image=roi)
-        if result:
-            # 返回全局坐标
-            return result[0] + sx, result[1] + sy
-        return None
+        if icon_name:
+            icon_path = self.icon_path + icon_name
+            if os.path.exists(icon_path):
+                screen = self.adb.get_screenshot()
+                if screen is not None:
+                    sx, sy, sw, sh = SIDEBAR_SEARCH_ROI
+                    if screen.shape[0] > sy + sh and screen.shape[1] > sx + sw:
+                        roi = screen[sy:sy + sh, sx:sx + sw]
+                        result = self.adb.locate_image(icon_path, confidence=0.65, screen_image=roi)
+                        if result:
+                            cx, cy = result[0] + sx, result[1] + sy
+                            self.adb.click(cx, cy, random_offset=4)
+                            return True
 
-    def _click_category_if_found(self, cat):
-        """定位并点击类别按钮，返回是否成功。"""
-        pos = self._locate_category_button(cat)
-        if pos:
-            self.adb.click(pos[0], pos[1], random_offset=3)
+        # 方式2：坐标回退
+        fb = cat.get("fallback_pos")
+        if fb:
+            self.adb.click(fb[0], fb[1], random_offset=5)
             return True
-        else:
-            self.log(f"📂 [类别] ⚠️ 未找到按钮: {cat['label']} ({cat.get('icon','')})")
-            return False
+
+        self.log(f"📂 [类别] ⚠️ {debug_label}：无可用定位方式")
+        return False
 
     def _switch_to_category(self, category_index):
-        """点击右侧类别栏按钮切换当前筛选类别。
-        category_index: 0-based index into SIDEBAR_CATEGORIES，-1 表示"全部"（取消所有筛选）。
-        使用图像识别定位按钮，分辨率自适应。"""
-        # 1. 先取消当前选中的类别
+        """点击右侧类别栏按钮，互斥切换。
+        category_index: 0-based index into SIDEBAR_CATEGORIES，-1=全部。"""
+        # 1. 取消旧类别
         if self._current_category_index >= 0 and self._current_category_index < len(SIDEBAR_CATEGORIES):
             old_cat = SIDEBAR_CATEGORIES[self._current_category_index]
-            self.log(f"📂 [类别] 取消选中: {old_cat['label']}")
-            if not self._click_category_if_found(old_cat):
-                return  # 找不到旧按钮就不乱点
+            self._click_category(old_cat, f"取消 {old_cat['label']}")
             self.sleep(0.35)
 
-        # 2. 如果目标是"全部"，只需要取消当前
-        if category_index < 0:
+        # 2. 全部模式 = 取消后就结束
+        if category_index < 0 or category_index >= len(SIDEBAR_CATEGORIES):
             self._current_category_index = -1
-            self.log(f"📂 [类别] 已切换至 → 全部")
             return
 
         # 3. 选中新类别
-        if category_index >= len(SIDEBAR_CATEGORIES):
-            return
         cat = SIDEBAR_CATEGORIES[category_index]
-        self.log(f"📂 [类别] 选中: {cat['label']}")
-        if not self._click_category_if_found(cat):
-            return
-        self.sleep(0.4)
-        self._current_category_index = category_index
+        if self._click_category(cat, f"选中 {cat['label']}"):
+            self.sleep(0.4)
+            self._current_category_index = category_index
 
     def _cycle_to_next_category(self):
         """轮换到下一个已启用的类别。返回 (category_index, label)，-1 表示无可用类别。"""
@@ -1518,6 +1506,17 @@ class WoaBot(ConfigMixin, TowerMixin, FilterMixin):
                 if self._handle_server_error_popup():
                     idle_count = 0
                     continue
+
+                # ── 类别轮换（最高优先级，每轮主循环都检查）──
+                now_ts = time.time()
+                if self.enable_category_processing:
+                    any_enabled = any(self.category_selection.get(c["key"], False) for c in SIDEBAR_CATEGORIES)
+                    if any_enabled and now_ts >= self._next_category_switch_time:
+                        idx, label = self._cycle_to_next_category()
+                        self._next_category_switch_time = now_ts + self.category_cycle_interval
+                        self.log(f"📂 [类别] 切换处理类别 → {label}")
+                    elif not any_enabled:
+                        self._current_category_index = -1
                 now_date = time.strftime("%Y-%m-%d")
                 if self._stat_date and now_date != self._stat_date:
                     a, d, sc, ss = self._stat_approach, self._stat_depart, self._stat_stand_count, self._stat_stand_staff
@@ -1559,16 +1558,6 @@ class WoaBot(ConfigMixin, TowerMixin, FilterMixin):
                     if self._check_tower_countdown():
                         idle_count = 0
                         continue
-                    # 右侧类别栏轮换处理
-                    if self.enable_category_processing:
-                        any_enabled = any(self.category_selection.get(c["key"], False) for c in SIDEBAR_CATEGORIES)
-                        if any_enabled:
-                            if now_ts >= self._next_category_switch_time:
-                                idx, label = self._cycle_to_next_category()
-                                self._next_category_switch_time = now_ts + self.category_cycle_interval
-                                self.log(f"📂 [类别] 切换处理类别 → {label}")
-                        else:
-                            self._current_category_index = -1
                 did_work = self.scan_and_process() if self._is_module_enabled('scanner') else False
                 if did_work:
                     self.sleep(0.03)
