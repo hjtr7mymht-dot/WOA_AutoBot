@@ -1045,12 +1045,6 @@ class Application(ttkb.Window):
         except Exception:
             self.config["standalone_logout_interval"] = 30.0
         self.config["category_processing_enabled"] = bool(self.var_category_processing.get())
-        cat_sel = {}
-        for cat in SIDEBAR_CATEGORIES:
-            key = cat["key"]
-            cat_sel[key] = bool(getattr(self.var_category_selection, {}).get(key, tk.BooleanVar(value=False)).get())
-            # 安全获取：从 dict 中取 var 再 .get()
-        # 重新读取以兼容 tkinter 变量引用
         cat_sel = {c["key"]: bool(self.var_category_selection[c["key"]].get()) for c in SIDEBAR_CATEGORIES}
         self.config["category_selection"] = cat_sel
         self.config["online_verified_once"] = bool(getattr(self, "_online_verified_once", False))
