@@ -1,14 +1,14 @@
 {
-  "version": "1.2.8",
+  "version": "1.2.9",
   "package_urls": [
     {
       "name": "GitHub Release",
-      "url": "https://github.com/hjtr7mymht-dot/WOA_AutoBot/releases/download/1.2.8/WOA_AutoBot.zip"
+      "url": "https://github.com/hjtr7mymht-dot/WOA_AutoBot/releases/download/1.2.9/WOA_AutoBot.zip"
     },
     {
       "name": "ghproxy Release",
-      "url": "https://ghproxy.cn/https://github.com/hjtr7mymht-dot/WOA_AutoBot/releases/download/1.2.8/WOA_AutoBot.zip"
+      "url": "https://ghproxy.cn/https://github.com/hjtr7mymht-dot/WOA_AutoBot/releases/download/1.2.9/WOA_AutoBot.zip"
     }
   ],
-  "notes": "1.2.8：新增 ARPA-FOR-WOA 路线查找器链接入口；帮助文档添加路线查找器说明。"
+  "notes": "1.2.9：新增右侧类别栏处理功能，用户可选择喜爱/机队/其他玩家/活动飞机等类别轮换处理。"
 }

@@ -89,6 +89,30 @@ class ConfigMixin:
             self._request_switch_mode1 = True
         self.log(f">>> [配置] 塔台全开时仅停机位待处理: {'已开启' if enabled else '已关闭'}")
 
+    # ─── 右侧类别栏处理 ──────────────────────────────────
+    def set_category_processing(self, enabled, selection=None):
+        """启用/禁用右侧类别栏处理，selection 为 {key: bool} 字典"""
+        from core.constants import SIDEBAR_CATEGORIES
+        self.enable_category_processing = bool(enabled)
+        if selection is not None and isinstance(selection, dict):
+            for c in SIDEBAR_CATEGORIES:
+                key = c["key"]
+                self.category_selection[key] = bool(selection.get(key, False))
+        if self.enable_category_processing:
+            enabled_keys = [c["label"] for c in SIDEBAR_CATEGORIES if self.category_selection.get(c["key"], False)]
+            if enabled_keys:
+                self.log(f">>> [配置] 类别栏处理已开启: {', '.join(enabled_keys)}")
+                # 初始化轮换
+                import time
+                self._current_category_index = -1
+                self._next_category_switch_time = time.time() + 0.5
+            else:
+                self.log(f">>> [配置] 类别栏处理已开启，但未选择任何类别，等待配置")
+                self._current_category_index = -1
+        else:
+            self.log(f">>> [配置] 类别栏处理已关闭")
+            self._current_category_index = -1
+
     # ─── 速度优化 ──────────────────────────────────────
     def set_bonus_staff_feature(self, enabled):
         self.enable_bonus_staff = enabled

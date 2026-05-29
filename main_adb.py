@@ -11,7 +11,7 @@ from adb_controller import AdbController, woa_debug_set_runtime_started, save_im
 from simple_ocr import StopSignal, SimpleOCR
 
 # 核心共享模块 - 消除重复定义
-from core import FEATURE_GUARD_TOKEN, get_resource_path
+from core import FEATURE_GUARD_TOKEN, get_resource_path, SIDEBAR_CATEGORIES
 
 # Bot 引擎 Mixin（配置 / 塔台 / 筛选 已模块化到 bot/ 包）
 from bot import ConfigMixin, TowerMixin, FilterMixin
@@ -140,6 +140,12 @@ class WoaBot(ConfigMixin, TowerMixin, FilterMixin):
         self.enable_standalone_logout = False
         self.enable_cancel_stand_filter = False
         self.enable_filter_stand_only_when_tower_open = False
+        # 右侧类别栏处理开关
+        self.enable_category_processing = False
+        self.category_selection = {c["key"]: False for c in SIDEBAR_CATEGORIES}
+        self.category_cycle_interval = 15.0
+        self._current_category_index = -1
+        self._next_category_switch_time = 0.0
         # 塔台全部开启像素稳定性确认
         self.TOWER_STABLE_CONFIRM_COUNT = 4      # 连续确认次数
         self._tower_all_open_stable_count = 0    # 当前连续全开计数
@@ -560,6 +566,42 @@ class WoaBot(ConfigMixin, TowerMixin, FilterMixin):
 
     def _click_filter_point(self, x, y):
         self.adb.click(x, y, random_offset=5)
+
+    # ─── 右侧类别栏切换 ──────────────────────────────────
+    def _switch_to_category(self, category_index):
+        """点击右侧类别栏按钮切换当前筛选类别。
+        category_index: 0-based index into SIDEBAR_CATEGORIES，-1 表示"全部"（不筛选类别）。"""
+        if category_index < 0:
+            # 切回"全部"：再次点击当前选中的类别按钮取消选择
+            if self._current_category_index >= 0:
+                cat = SIDEBAR_CATEGORIES[self._current_category_index]
+                self.adb.click(cat["pos"][0], cat["pos"][1], random_offset=3)
+                self.sleep(0.3)
+            self._current_category_index = -1
+            return
+        if category_index >= len(SIDEBAR_CATEGORIES):
+            return
+        cat = SIDEBAR_CATEGORIES[category_index]
+        self.adb.click(cat["pos"][0], cat["pos"][1], random_offset=3)
+        self.sleep(0.4)
+        self._current_category_index = category_index
+
+    def _cycle_to_next_category(self):
+        """轮换到下一个已启用的类别。返回 (category_index, label)，-1 表示无可用类别。"""
+        enabled = [i for i, c in enumerate(SIDEBAR_CATEGORIES) if self.category_selection.get(c["key"], False)]
+        if not enabled:
+            self._current_category_index = -1
+            return -1, "无"
+        # 找到当前索引在 enabled 列表中的位置，取下一个
+        try:
+            cur_pos = enabled.index(self._current_category_index) if self._current_category_index in enabled else -1
+        except ValueError:
+            cur_pos = -1
+        next_pos = (cur_pos + 1) % len(enabled)
+        next_index = enabled[next_pos]
+        self._switch_to_category(next_index)
+        label = SIDEBAR_CATEGORIES[next_index]["label"]
+        return next_index, label
 
     def _periodic_15s_check(self, force_initial_filter_check=False):
         if not hasattr(self, 'last_periodic_check_time'):
@@ -1475,6 +1517,16 @@ class WoaBot(ConfigMixin, TowerMixin, FilterMixin):
                     if self._check_tower_countdown():
                         idle_count = 0
                         continue
+                    # 右侧类别栏轮换处理
+                    if self.enable_category_processing:
+                        any_enabled = any(self.category_selection.get(c["key"], False) for c in SIDEBAR_CATEGORIES)
+                        if any_enabled:
+                            if now_ts >= self._next_category_switch_time:
+                                idx, label = self._cycle_to_next_category()
+                                self._next_category_switch_time = now_ts + self.category_cycle_interval
+                                self.log(f"📂 [类别] 切换处理类别 → {label}")
+                        else:
+                            self._current_category_index = -1
                 did_work = self.scan_and_process() if self._is_module_enabled('scanner') else False
                 if did_work:
                     self.sleep(0.03)

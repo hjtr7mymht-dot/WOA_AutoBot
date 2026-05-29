@@ -28,6 +28,7 @@ from core import (
     FEATURE_GUARD_TOKEN, LOCAL_VERSION, MAX_INSTANCES,
     OFFICIAL_REPO_URL, OFFICIAL_REPO_NAME, ONLINE_VERSION_PATH,
     ARPA_REPO_URL,
+    SIDEBAR_CATEGORIES,
     REQUIRED_GUARD_MODULES,
     DEFAULT_FONT, MONO_FONT, MUMU_PORTS,
 )
@@ -635,6 +636,13 @@ class Application(ttkb.Window):
         self._gold_remind_last_daily_hour = self.config.get("gold_remind_last_daily_hour", -1)
         self._gold_remind_last_weekly_week = self.config.get("gold_remind_last_weekly_week", -1)
         self.var_public_adb_targets = tk.StringVar(value=str(self.config.get("public_adb_targets", "")))
+        # 右侧类别栏处理开关
+        self.var_category_processing = tk.BooleanVar(value=bool(self.config.get("category_processing_enabled", False)))
+        self.var_category_selection = {}
+        for cat in SIDEBAR_CATEGORIES:
+            key = cat["key"]
+            self.var_category_selection[key] = tk.BooleanVar(
+                value=bool(self.config.get("category_selection", {}).get(key, False)))
         for legacy_key in (
             "auto_exit_time", "auto_exit_enabled", "auto_exit_rest_time", "auto_exit_rest_enabled",
             "auto_exit_loop_count", "auto_exit_loop_infinite", "restart_game_icon_file",
@@ -1036,6 +1044,15 @@ class Application(ttkb.Window):
             self.config["standalone_logout_interval"] = max(1.0, min(120.0, float(self.var_standalone_logout_interval.get())))
         except Exception:
             self.config["standalone_logout_interval"] = 30.0
+        self.config["category_processing_enabled"] = bool(self.var_category_processing.get())
+        cat_sel = {}
+        for cat in SIDEBAR_CATEGORIES:
+            key = cat["key"]
+            cat_sel[key] = bool(getattr(self.var_category_selection, {}).get(key, tk.BooleanVar(value=False)).get())
+            # 安全获取：从 dict 中取 var 再 .get()
+        # 重新读取以兼容 tkinter 变量引用
+        cat_sel = {c["key"]: bool(self.var_category_selection[c["key"]].get()) for c in SIDEBAR_CATEGORIES}
+        self.config["category_selection"] = cat_sel
         self.config["online_verified_once"] = bool(getattr(self, "_online_verified_once", False))
         self.config["initial_device_paths_detected"] = bool(self.config.get("initial_device_paths_detected", False))
         try:
@@ -1595,6 +1612,12 @@ class Application(ttkb.Window):
         state = "开启" if v.get() else "关闭"
         print(f">>> [功能状态] {t}: 已{state}")
 
+    def _on_category_toggle(self):
+        """类别勾选变化时自动同步到 bot"""
+        if getattr(self, 'bot', None) and self.bot.running:
+            self.sync_all_configs_to_bot()
+        self.save_config()
+
     def setup_main_ui(self):
         # ── 外层容器：居中 95% 宽度，玻璃拟态 ──
         wrapper = ttkb.Frame(self.container_main, padding=6)
@@ -1803,6 +1826,26 @@ class Application(ttkb.Window):
         _toggle(tab1, "🎲 任务处理顺序随机化", self.var_random_task, "随机打乱任务顺序")
         _toggle(tab1, "🔒 塔台全开仅停机位", self.var_tower_open_stand_only, "塔台全部开启时只处理停机位")
         _toggle(tab1, "⚙️ 塔台关闭时处理全部任务", self.var_cancel_stand_filter, "塔台关闭时取消停机位过滤")
+
+        # ── 右侧类别栏处理 ──
+        ttkb.Separator(tab1, bootstyle="info").pack(fill=X, pady=5)
+        _section_label(tab1, "📂 右侧类别栏选择")
+        category_frame = ttkb.Frame(tab1)
+        category_frame.pack(fill=X)
+        ttkb.Label(category_frame, text="按类别处理飞机（多选）：", font=(DEFAULT_FONT, 8),
+                   bootstyle="secondary").pack(anchor="w", pady=(0, 4))
+        for cat in SIDEBAR_CATEGORIES:
+            key = cat["key"]
+            var = self.var_category_selection[key]
+            r = ttkb.Frame(tab1)
+            r.pack(fill=X, pady=1)
+            cb = ttkb.Checkbutton(r, text=cat["label"], variable=var, bootstyle="success-round-toggle")
+            cb.pack(side=LEFT)
+            cb.configure(command=lambda v=var: self._on_category_toggle())
+            self.create_info_icon(r, cat.get("tip", "")).pack(side=LEFT, padx=4)
+        ttkb.Separator(tab1, bootstyle="secondary").pack(fill=X, pady=4)
+        _toggle(tab1, "🔄 启用类别轮换处理", self.var_category_processing,
+                "开启后脚本按时间间隔轮换已选的类别\n每个类别处理一段时间后自动切到下一个\n当前类别在右侧类别栏按钮亮起")
 
         # [Tab 2] 挂机与防检测
         tab2 = ttkb.Frame(notebook, padding=6)
@@ -3616,6 +3659,9 @@ class Application(ttkb.Window):
             self.bot.set_standalone_logout_enabled(self.config.get("no_takeoff_logout_enabled", False))
             self.bot.set_cancel_stand_filter_when_tower_off(self.var_cancel_stand_filter.get())
             self.bot.set_filter_stand_only_when_tower_open(self.var_tower_open_stand_only.get())
+            self.bot.set_category_processing(
+                self.var_category_processing.get(),
+                selection={c["key"]: self.var_category_selection[c["key"]].get() for c in SIDEBAR_CATEGORIES})
             self.bot.set_anti_stuck_config(self.var_anti_stuck_enabled.get(), anti_stuck_threshold, log_change=not no_log)
             self.bot.set_control_method(self.config.get("control_method", "adb"))
             self.bot.set_screenshot_method(self.config.get("screenshot_method", "nemu_ipc"))
