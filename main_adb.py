@@ -11,7 +11,7 @@ from adb_controller import AdbController, woa_debug_set_runtime_started, save_im
 from simple_ocr import StopSignal, SimpleOCR
 
 # 核心共享模块 - 消除重复定义
-from core import FEATURE_GUARD_TOKEN, get_resource_path, SIDEBAR_CATEGORIES
+from core import FEATURE_GUARD_TOKEN, get_resource_path, SIDEBAR_CATEGORIES, SIDEBAR_SEARCH_ROI
 
 # Bot 引擎 Mixin（配置 / 塔台 / 筛选 已模块化到 bot/ 包）
 from bot import ConfigMixin, TowerMixin, FilterMixin
@@ -567,19 +567,52 @@ class WoaBot(ConfigMixin, TowerMixin, FilterMixin):
     def _click_filter_point(self, x, y):
         self.adb.click(x, y, random_offset=5)
 
-    # ─── 右侧类别栏切换 ──────────────────────────────────
+    # ─── 右侧类别栏切换（图像识别，分辨率自适应） ──────────
+    def _locate_category_button(self, cat):
+        """使用模板匹配在右侧类别栏搜索区域中定位按钮。
+        返回 (x, y) 中心坐标，找不到返回 None。"""
+        icon_name = cat.get("icon", "")
+        if not icon_name:
+            return None
+        icon_path = self.icon_path + icon_name
+        if not os.path.exists(icon_path):
+            self.log(f"📂 [类别] ⚠️ 图标文件不存在: {icon_path}")
+            return None
+        screen = self.adb.get_screenshot()
+        if screen is None:
+            return None
+        # 在侧边栏搜索区域中匹配
+        sx, sy, sw, sh = SIDEBAR_SEARCH_ROI
+        roi = screen[sy:sy + sh, sx:sx + sw]
+        result = self.adb.locate_image(icon_path, confidence=0.75, screen_image=roi)
+        if result:
+            # 返回全局坐标
+            return result[0] + sx, result[1] + sy
+        return None
+
+    def _click_category_if_found(self, cat):
+        """定位并点击类别按钮，返回是否成功。"""
+        pos = self._locate_category_button(cat)
+        if pos:
+            self.adb.click(pos[0], pos[1], random_offset=3)
+            return True
+        else:
+            self.log(f"📂 [类别] ⚠️ 未找到按钮: {cat['label']} ({cat.get('icon','')})")
+            return False
+
     def _switch_to_category(self, category_index):
         """点击右侧类别栏按钮切换当前筛选类别。
-        category_index: 0-based index into SIDEBAR_CATEGORIES，-1 表示"全部"（不筛选类别）。
-        重要：先取消当前选中的类别，再选中新类别，确保互斥。"""
-        # 1. 先取消当前选中的类别（如果已有选中的）
+        category_index: 0-based index into SIDEBAR_CATEGORIES，-1 表示"全部"（取消所有筛选）。
+        使用图像识别定位按钮，分辨率自适应。"""
+        # 1. 先取消当前选中的类别
         if self._current_category_index >= 0 and self._current_category_index < len(SIDEBAR_CATEGORIES):
             old_cat = SIDEBAR_CATEGORIES[self._current_category_index]
-            self.log(f"📂 [类别] 取消选中: {old_cat['label']} ({old_cat['pos'][0]},{old_cat['pos'][1]})")
-            self.adb.click(old_cat["pos"][0], old_cat["pos"][1], random_offset=5)
+            self.log(f"📂 [类别] 取消选中: {old_cat['label']}")
+            if not self._click_category_if_found(old_cat):
+                return  # 找不到旧按钮就不乱点
             self.sleep(0.35)
 
-        # 2. 如果目标是"全部"（category_index < 0），只需取消当前就完成
+        # 2. 如果目标是"全部"，只需要取消当前
         if category_index < 0:
             self._current_category_index = -1
             self.log(f"📂 [类别] 已切换至 → 全部")
@@ -589,8 +622,9 @@ class WoaBot(ConfigMixin, TowerMixin, FilterMixin):
         if category_index >= len(SIDEBAR_CATEGORIES):
             return
         cat = SIDEBAR_CATEGORIES[category_index]
-        self.log(f"📂 [类别] 选中: {cat['label']} ({cat['pos'][0]},{cat['pos'][1]})")
-        self.adb.click(cat["pos"][0], cat["pos"][1], random_offset=5)
+        self.log(f"📂 [类别] 选中: {cat['label']}")
+        if not self._click_category_if_found(cat):
+            return
         self.sleep(0.4)
         self._current_category_index = category_index
 

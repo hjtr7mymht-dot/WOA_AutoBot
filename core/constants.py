@@ -13,14 +13,17 @@ ONLINE_VERSION_PATH = "version.json"
 ARPA_REPO_URL = "https://github.com/hjtr7mymht-dot/ARPA-FOR-WOA"
 ARPA_REPO_NAME = "hjtr7mymht-dot/ARPA-FOR-WOA"
 
-# ─── 右侧类别栏按钮坐标 (1920x1080 逻辑分辨率) ──────────
-# 游戏右侧竖排圆形图标，点击可筛选不同类别的飞机
-# x 坐标为按钮中心，y 坐标从上到下依次排列
+# ─── 右侧类别栏按钮（图像识别匹配，分辨率自适应） ──────
+# 使用 icon/ 目录下的模板图片匹配定位，不再依赖固定坐标
+# 搜索区域：游戏右侧竖排类别按钮区域 (x, y, w, h)
+SIDEBAR_SEARCH_ROI = (1530, 390, 80, 660)
+
 SIDEBAR_CATEGORIES = [
-    {"key": "favorites",   "label": "❤️ 喜爱/合约",   "pos": (1555, 510), "tip": "仅处理收藏或合约航空公司的飞机"},
-    {"key": "fleet",       "label": "⚠️ 机队",       "pos": (1555, 740), "tip": "仅处理您自己机队的飞机"},
-    {"key": "players",     "label": "🟢 其他玩家",   "pos": (1555, 855), "tip": "仅处理其他玩家的飞机"},
-    {"key": "event",       "label": "🔵 活动飞机",   "pos": (1555, 970), "tip": "仅处理活动/特殊事件的飞机"},
+    {"key": "favorites",   "label": "❤️ 喜爱/合约",   "icon": "love.png"},
+    # 第2个按钮是"待处理全部"（不需要处理，跳过）
+    {"key": "fleet",       "label": "⚠️ 机队",       "icon": "myairbase.png"},
+    {"key": "players",     "label": "🟢 其他玩家",   "icon": "otherairbase.png"},
+    {"key": "event",       "label": "🔵 活动飞机",   "icon": "spairbase.png"},
 ]
 
 # 类别轮换间隔（秒）：在当前类别下扫描多少次后轮换到下个类别
