@@ -570,19 +570,27 @@ class WoaBot(ConfigMixin, TowerMixin, FilterMixin):
     # ─── 右侧类别栏切换 ──────────────────────────────────
     def _switch_to_category(self, category_index):
         """点击右侧类别栏按钮切换当前筛选类别。
-        category_index: 0-based index into SIDEBAR_CATEGORIES，-1 表示"全部"（不筛选类别）。"""
+        category_index: 0-based index into SIDEBAR_CATEGORIES，-1 表示"全部"（不筛选类别）。
+        重要：先取消当前选中的类别，再选中新类别，确保互斥。"""
+        # 1. 先取消当前选中的类别（如果已有选中的）
+        if self._current_category_index >= 0 and self._current_category_index < len(SIDEBAR_CATEGORIES):
+            old_cat = SIDEBAR_CATEGORIES[self._current_category_index]
+            self.log(f"📂 [类别] 取消选中: {old_cat['label']} ({old_cat['pos'][0]},{old_cat['pos'][1]})")
+            self.adb.click(old_cat["pos"][0], old_cat["pos"][1], random_offset=5)
+            self.sleep(0.35)
+
+        # 2. 如果目标是"全部"（category_index < 0），只需取消当前就完成
         if category_index < 0:
-            # 切回"全部"：再次点击当前选中的类别按钮取消选择
-            if self._current_category_index >= 0:
-                cat = SIDEBAR_CATEGORIES[self._current_category_index]
-                self.adb.click(cat["pos"][0], cat["pos"][1], random_offset=3)
-                self.sleep(0.3)
             self._current_category_index = -1
+            self.log(f"📂 [类别] 已切换至 → 全部")
             return
+
+        # 3. 选中新类别
         if category_index >= len(SIDEBAR_CATEGORIES):
             return
         cat = SIDEBAR_CATEGORIES[category_index]
-        self.adb.click(cat["pos"][0], cat["pos"][1], random_offset=3)
+        self.log(f"📂 [类别] 选中: {cat['label']} ({cat['pos'][0]},{cat['pos'][1]})")
+        self.adb.click(cat["pos"][0], cat["pos"][1], random_offset=5)
         self.sleep(0.4)
         self._current_category_index = category_index
 

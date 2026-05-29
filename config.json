@@ -4,6 +4,13 @@
   "auto_delay_count": 0,
   "bonus_staff": false,
   "cancel_stand_filter": true,
+  "category_processing_enabled": false,
+  "category_selection": {
+    "event": false,
+    "favorites": false,
+    "fleet": false,
+    "players": false
+  },
   "control_method": "uiautomator2",
   "delay_bribe": true,
   "gold_remind_enabled": false,
