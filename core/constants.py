@@ -14,19 +14,29 @@ ARPA_REPO_URL = "https://github.com/hjtr7mymht-dot/ARPA-FOR-WOA"
 ARPA_REPO_NAME = "hjtr7mymht-dot/ARPA-FOR-WOA"
 
 # ─── 右侧类别栏按钮（图像识别 + 坐标回退） ─────────────
-# 优先使用 icon/ 下的模板图片匹配，匹配失败时回退到坐标点击
-# 搜索区域：游戏右侧竖排类别按钮区域 (x, y, w, h)
+# 所有坐标以 1600×900 归一化分辨率为基准（REF_WIDTH × REF_HEIGHT）
+# 运行时根据设备实际分辨率自动缩放
+REF_WIDTH = 1600
+REF_HEIGHT = 900
+
+# 搜索区域：游戏右侧竖排类别按钮区域 (x, y, w, h) — 归一化空间
 SIDEBAR_SEARCH_ROI = (1520, 400, 90, 680)
 
 SIDEBAR_CATEGORIES = [
-    {"key": "favorites", "label": "❤️ 喜爱/合约",   "icon": "love.png",         "fallback_pos": (1555, 510)},
+    # verify_pos: 像素验证坐标 (x, y)，用于判断按钮是否高亮选中
+    # 选中时该位置像素为浅色(light)，未选中时为深色(dark)
+    # 所有坐标均为 1600×900 归一化空间参考值
+    {"key": "favorites", "label": "❤️ 喜爱/合约",   "icon": "love.png",
+     "fallback_pos": (1537, 400), "verify_pos": (1537, 400)},
     # 第2个按钮是"待处理全部"（不需要处理，跳过）
-    {"key": "fleet",     "label": "⚠️ 机队",       "icon": "myairbase.png",    "fallback_pos": (1555, 740)},
-    {"key": "players",   "label": "🟢 其他玩家",   "icon": "otherairbase.png", "fallback_pos": (1555, 855)},
-    {"key": "event",     "label": "🔵 活动飞机",   "icon": "spairbase.png",    "fallback_pos": (1555, 970)},
+    {"key": "fleet",     "label": "⚠️ 机队",       "icon": "myairbase.png",
+     "fallback_pos": (1537, 546), "verify_pos": (1537, 546)},
+    {"key": "players",   "label": "🟢 其他玩家",   "icon": "otherairbase.png",
+     "fallback_pos": (1537, 619), "verify_pos": (1537, 619)},
+    {"key": "event",     "label": "🔵 活动飞机",   "icon": "spairbase.png",
+     "fallback_pos": (1537, 689), "verify_pos": (1537, 689)},
 ]
 
-# 类别轮换间隔（秒）
 CATEGORY_CYCLE_INTERVAL = 15.0
 
 # ─── 功能完整性守卫标记 ──────────────────────────────────

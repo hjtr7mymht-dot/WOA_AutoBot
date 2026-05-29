@@ -2,13 +2,13 @@
   "anti_stuck_enabled": true,
   "anti_stuck_threshold": 6,
   "auto_delay_count": 0,
-  "bonus_staff": false,
+  "bonus_staff": true,
   "cancel_stand_filter": true,
   "category_processing_enabled": false,
   "category_selection": {
     "event": false,
     "favorites": false,
-    "fleet": true,
+    "fleet": false,
     "players": false
   },
   "control_method": "uiautomator2",
@@ -38,6 +38,6 @@
   "speed_mode": false,
   "standalone_logout_interval": 30.0,
   "thinking_mode": 0,
-  "tower_open_stand_only": false,
+  "tower_open_stand_only": true,
   "vehicle_buy": true
 }

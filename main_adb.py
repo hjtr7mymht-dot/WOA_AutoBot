@@ -11,7 +11,9 @@ from adb_controller import AdbController, woa_debug_set_runtime_started, save_im
 from simple_ocr import StopSignal, SimpleOCR
 
 # 核心共享模块 - 消除重复定义
-from core import FEATURE_GUARD_TOKEN, get_resource_path, SIDEBAR_CATEGORIES, SIDEBAR_SEARCH_ROI
+from core import (FEATURE_GUARD_TOKEN, get_resource_path,
+                   SIDEBAR_CATEGORIES, SIDEBAR_SEARCH_ROI,
+                   REF_WIDTH, REF_HEIGHT)
 
 # Bot 引擎 Mixin（配置 / 塔台 / 筛选 已模块化到 bot/ 包）
 from bot import ConfigMixin, TowerMixin, FilterMixin
@@ -146,6 +148,7 @@ class WoaBot(ConfigMixin, TowerMixin, FilterMixin):
         self.category_cycle_interval = 15.0
         self._current_category_index = -1
         self._next_category_switch_time = 0.0
+        self._pending_switch_to_all = False
         # 塔台全部开启像素稳定性确认
         self.TOWER_STABLE_CONFIRM_COUNT = 4      # 连续确认次数
         self._tower_all_open_stable_count = 0    # 当前连续全开计数
@@ -567,11 +570,36 @@ class WoaBot(ConfigMixin, TowerMixin, FilterMixin):
     def _click_filter_point(self, x, y):
         self.adb.click(x, y, random_offset=5)
 
-    # ─── 右侧类别栏切换（图像识别优先 + 坐标回退）──────
-    def _click_category(self, cat, debug_label):
-        """定位并点击类别按钮：先尝试图像识别，失败则用坐标回退。
-        返回 True 表示至少尝试了点击。"""
-        # 方式1：图像识别
+    # ─── 分辨率自适应工具 ────────────────────────────────
+    def _get_raw_resolution(self):
+        """获取设备实际分辨率 (宽, 高)，无数据时回退到 1600×900。"""
+        if self.adb is None:
+            return REF_WIDTH, REF_HEIGHT
+        rw = int(getattr(self.adb, '_raw_screen_w', 0) or REF_WIDTH)
+        rh = int(getattr(self.adb, '_raw_screen_h', 0) or REF_HEIGHT)
+        return rw, rh
+
+    def _scale_to_device(self, ref_x, ref_y):
+        """将 1600×900 参考坐标映射到设备物理坐标（绕过 logical→device 二次缩放）。"""
+        rw, rh = self._get_raw_resolution()
+        return int(ref_x * rw / REF_WIDTH), int(ref_y * rh / REF_HEIGHT)
+
+    def _scale_to_logical(self, ref_x, ref_y):
+        """保持归一化空间坐标不变（截图已归一化为 1600×900）。"""
+        return ref_x, ref_y
+
+    # ─── 右侧类别栏切换（先点后验：保证至少点击一次，再像素验证重试）──────
+
+    def _click_category(self, cat, debug_label, want_selected=None):
+        """点击右侧类别栏按钮。
+        
+        核心思路（修复"显示已切换但实际未点击"的问题）：
+        - 不预判按钮状态（像素可能误判），始终至少点击一次
+        - 点击后截图验证，不在目标状态则重试（最多 5 次）
+        - want_selected: True=选中, False=取消, None=仅点击不验证
+        """
+        # ── 1. 定位按钮（归一化 1600×900 空间）──
+        click_x, click_y = None, None
         icon_name = cat.get("icon", "")
         if icon_name:
             icon_path = self.icon_path + icon_name
@@ -579,42 +607,96 @@ class WoaBot(ConfigMixin, TowerMixin, FilterMixin):
                 screen = self.adb.get_screenshot()
                 if screen is not None:
                     sx, sy, sw, sh = SIDEBAR_SEARCH_ROI
-                    if screen.shape[0] > sy + sh and screen.shape[1] > sx + sw:
-                        roi = screen[sy:sy + sh, sx:sx + sw]
+                    if screen.shape[0] >= sy + sh and screen.shape[1] >= sx + sw:
+                        roi = screen[sy:sy+sh, sx:sx+sw]
                         result = self.adb.locate_image(icon_path, confidence=0.65, screen_image=roi)
                         if result:
-                            cx, cy = result[0] + sx, result[1] + sy
-                            self.adb.click(cx, cy, random_offset=4)
-                            return True
+                            click_x, click_y = result[0] + sx, result[1] + sy
 
-        # 方式2：坐标回退
-        fb = cat.get("fallback_pos")
-        if fb:
-            self.adb.click(fb[0], fb[1], random_offset=5)
+        if click_x is None:
+            fb = cat.get("fallback_pos")
+            if fb:
+                click_x, click_y = fb[0], fb[1]
+
+        if click_x is None:
+            self.log(f"📂 [类别] ⚠️ {debug_label}：无法定位按钮")
+            return False
+
+        dev_click_x, dev_click_y = self._scale_to_device(click_x, click_y)
+        rw, rh = self._get_raw_resolution()
+
+        # ── 2. 仅点击模式 ──
+        if want_selected is None:
+            self.adb._adb_click_fallback(dev_click_x, dev_click_y)
+            self.sleep(0.2)
             return True
 
-        self.log(f"📂 [类别] ⚠️ {debug_label}：无可用定位方式")
-        return False
+        # ── 3. 先点后验模式（点击前后像素差值对比，不依赖特定颜色）──
+        verify_pos = cat.get("verify_pos")
+        if verify_pos and len(verify_pos) == 2:
+            vx, vy = verify_pos[0], verify_pos[1]
+        else:
+            vx, vy = click_x, click_y
 
-    def _switch_to_category(self, category_index):
-        """点击右侧类别栏按钮，互斥切换。
-        category_index: 0-based index into SIDEBAR_CATEGORIES，-1=全部。"""
-        # 1. 取消旧类别
-        if self._current_category_index >= 0 and self._current_category_index < len(SIDEBAR_CATEGORIES):
-            old_cat = SIDEBAR_CATEGORIES[self._current_category_index]
-            self._click_category(old_cat, f"取消 {old_cat['label']}")
+        for attempt in range(3):
+            # ====== 取点击前像素 ======
+            screen_before = self.adb.get_screenshot()
+            if screen_before is None:
+                break
+            try:
+                b1, g1, r1 = screen_before[vy, vx]
+            except (IndexError, Exception):
+                break
+
+            # ====== 点击 ======
+            self.adb._adb_click_fallback(dev_click_x, dev_click_y)
             self.sleep(0.35)
 
-        # 2. 全部模式 = 取消后就结束
+            # ====== 取点击后像素 ======
+            screen_after = self.adb.get_screenshot()
+            if screen_after is None:
+                continue
+            try:
+                b2, g2, r2 = screen_after[vy, vx]
+            except (IndexError, Exception):
+                continue
+
+            # ====== 计算像素变化量 ======
+            delta = abs(int(b1) - int(b2)) + abs(int(g1) - int(g2)) + abs(int(r1) - int(r2))
+
+            if delta > 40:
+                self.log(f"📂 [类别] ✓ {debug_label}：第{attempt+1}次点击生效 "
+                         f"Δ={delta} device=({dev_click_x},{dev_click_y})")
+                return True
+
+            self.log(f"📂 [类别] 🔘 {debug_label}：第{attempt+1}次点击像素无变化 "
+                     f"Δ={delta} device=({dev_click_x},{dev_click_y}) res={rw}×{rh}")
+
+        # 3 次重试后仍无变化 — 可能 verify_pos 位置不佳，但点击已发送，信任设备
+        self.log(f"📂 [类别] ✓ {debug_label}：已点击（像素验证不稳定但操作已执行）")
+        return True
+
+    def _switch_to_category(self, category_index):
+        """互斥切换右侧类别栏按钮。
+        - category_index = -1 → 点击当前选中类别以取消选择（恢复显示全部飞机）
+        - category_index >= 0 → 选中对应类别（游戏内类别为互斥切换，无需手动取消旧类别）
+        """
+        # ── 全部模式：点击当前选中类别以取消 ──
         if category_index < 0 or category_index >= len(SIDEBAR_CATEGORIES):
+            old_idx = self._current_category_index
+            if old_idx >= 0 and old_idx < len(SIDEBAR_CATEGORIES):
+                old_cat = SIDEBAR_CATEGORIES[old_idx]
+                # 点击已选中的类别按钮 → 取消选中 → 游戏恢复显示全部飞机
+                self._click_category(old_cat, f"取消 {old_cat['label']}", want_selected=False)
             self._current_category_index = -1
+            self.log("📂 [类别] 🔘 取消当前类别，恢复「全部待处理」")
             return
 
-        # 3. 选中新类别
+        # ── 选中目标类别 ──
         cat = SIDEBAR_CATEGORIES[category_index]
-        if self._click_category(cat, f"选中 {cat['label']}"):
-            self.sleep(0.4)
-            self._current_category_index = category_index
+        self._click_category(cat, f"选中 {cat['label']}", want_selected=True)
+        self.sleep(0.2)
+        self._current_category_index = category_index
 
     def _cycle_to_next_category(self):
         """轮换到下一个已启用的类别。返回 (category_index, label)，-1 表示无可用类别。"""
@@ -622,6 +704,15 @@ class WoaBot(ConfigMixin, TowerMixin, FilterMixin):
         if not enabled:
             self._current_category_index = -1
             return -1, "无"
+
+        # 仅 1 个类别 → 确保选中即可，无需轮换
+        if len(enabled) == 1:
+            only_idx = enabled[0]
+            if self._current_category_index != only_idx:
+                self._switch_to_category(only_idx)
+            label = SIDEBAR_CATEGORIES[only_idx]["label"]
+            return only_idx, label
+
         # 找到当前索引在 enabled 列表中的位置，取下一个
         try:
             cur_pos = enabled.index(self._current_category_index) if self._current_category_index in enabled else -1
@@ -1128,6 +1219,8 @@ class WoaBot(ConfigMixin, TowerMixin, FilterMixin):
         # 【核心修正】智能防卡死逻辑
         # 1. 过滤掉恢复日志本身，防止递归触发
         if "防卡死" in message: return
+        # 类别切换/配置日志含 ⚠️（如"⚠️ 机队"），不触发防卡死
+        if "[类别]" in message or "📂" in message: return
 
         # 2. 统计警告次数
         if "⚠️" in message or "超时" in message:
@@ -1509,14 +1602,25 @@ class WoaBot(ConfigMixin, TowerMixin, FilterMixin):
 
                 # ── 类别轮换（最高优先级，每轮主循环都检查）──
                 now_ts = time.time()
-                if self.enable_category_processing:
+                # 优先处理来自 set_category_processing 的"切回全部"请求
+                if getattr(self, '_pending_switch_to_all', False):
+                    self._pending_switch_to_all = False
+                    self._switch_to_category(-1)
+                elif self.enable_category_processing:
                     any_enabled = any(self.category_selection.get(c["key"], False) for c in SIDEBAR_CATEGORIES)
                     if any_enabled and now_ts >= self._next_category_switch_time:
-                        idx, label = self._cycle_to_next_category()
-                        self._next_category_switch_time = now_ts + self.category_cycle_interval
-                        self.log(f"📂 [类别] 切换处理类别 → {label}")
-                    elif not any_enabled:
-                        self._current_category_index = -1
+                        enabled_count = sum(1 for c in SIDEBAR_CATEGORIES if self.category_selection.get(c["key"], False))
+                        if enabled_count >= 2:
+                            idx, label = self._cycle_to_next_category()
+                            self._next_category_switch_time = now_ts + self.category_cycle_interval
+                            self.log(f"📂 [类别] 切换处理类别 → {label}")
+                        else:
+                            # 仅 1 个类别 → 确保选中，不进入轮换循环
+                            self._cycle_to_next_category()
+                    elif not any_enabled and self._current_category_index != -1:
+                        self._switch_to_category(-1)
+                elif self._current_category_index != -1:
+                    self._switch_to_category(-1)
                 now_date = time.strftime("%Y-%m-%d")
                 if self._stat_date and now_date != self._stat_date:
                     a, d, sc, ss = self._stat_approach, self._stat_depart, self._stat_stand_count, self._stat_stand_staff

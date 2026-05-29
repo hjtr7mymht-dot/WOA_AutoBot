@@ -1607,7 +1607,14 @@ class Application(ttkb.Window):
         print(f">>> [功能状态] {t}: 已{state}")
 
     def _on_category_toggle(self):
-        """类别勾选变化时自动同步到 bot"""
+        """类别勾选变化时自动同步到 bot。
+        - 选中 ≥2 个类别 → 自动开启主开关（轮换有意义）
+        - 选中 ≤1 个类别 → 自动关闭主开关（无需轮换）"""
+        checked_count = sum(1 for c in SIDEBAR_CATEGORIES if self.var_category_selection[c["key"]].get())
+        if checked_count >= 2:
+            self.var_category_processing.set(True)
+        elif checked_count <= 1:
+            self.var_category_processing.set(False)
         if getattr(self, 'bot', None) and self.bot.running:
             self.sync_all_configs_to_bot()
         self.save_config()

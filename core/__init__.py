@@ -51,6 +51,8 @@ from core.constants import (
     MONO_FONT,
     MUMU_PORTS,
     REQUIRED_GUARD_MODULES,
+    REF_WIDTH,
+    REF_HEIGHT,
 )
 
 __all__ = [
@@ -73,4 +75,5 @@ __all__ = [
     "SIDEBAR_CATEGORIES", "SIDEBAR_SEARCH_ROI", "CATEGORY_CYCLE_INTERVAL",
     "MAX_INSTANCES", "DEFAULT_FONT", "MONO_FONT",
     "MUMU_PORTS", "REQUIRED_GUARD_MODULES",
+    "REF_WIDTH", "REF_HEIGHT",
 ]
