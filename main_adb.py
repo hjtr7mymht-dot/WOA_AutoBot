@@ -15,14 +15,14 @@ from core import (FEATURE_GUARD_TOKEN, get_resource_path,
                    SIDEBAR_CATEGORIES, SIDEBAR_SEARCH_ROI,
                    REF_WIDTH, REF_HEIGHT)
 
-# Bot 引擎 Mixin（配置 / 塔台 / 筛选 已模块化到 bot/ 包）
-from bot import ConfigMixin, TowerMixin, FilterMixin
+# Bot 引擎（所有方法已内联到 WoaBot 类中，bot/ 包中的 Mixin 已归档）
+# from bot import ConfigMixin, TowerMixin  # 已移除死继承
 
 # 向后兼容别名
 WOA_FEATURE_GUARD_TOKEN = FEATURE_GUARD_TOKEN
 
 
-class WoaBot(ConfigMixin, TowerMixin, FilterMixin):
+class WoaBot:
     def _check_running(self):
         if not self.running:
             raise StopSignal()
@@ -197,6 +197,7 @@ class WoaBot(ConfigMixin, TowerMixin, FilterMixin):
         self._anti_stuck_stop_requested = False
 
         self.last_checked_avail_staff = -1
+        self.last_known_available_staff = -1
         self.last_read_success = False
         self.thinking_mode = 0
         self.thinking_range = (0, 0)
@@ -206,6 +207,15 @@ class WoaBot(ConfigMixin, TowerMixin, FilterMixin):
         self._no_operable_threshold = 3
         self._last_error_popup_check_ts = 0.0
         self._error_popup_check_interval = 1.2
+
+        # 运行时状态（统一初始化，避免 hasattr/getattr 检查）
+        self.consecutive_errors = 0
+        self._scan_screenshot_fails = 0
+        self._no_candidate_closed = False
+        self._last_thinking_desc = None
+        self.last_staff_check_time = 0
+        self.last_periodic_check_time = 0.0
+        self._run_start_time = None  # _do_main_loop 中实际赋值
 
         self.ICON_ROIS = {
             'cross_runway.png': self.REGION_BOTTOM_ROI,
@@ -386,7 +396,7 @@ class WoaBot(ConfigMixin, TowerMixin, FilterMixin):
         返回: 'stand_only' 或 'landing_stand_cycle'"""
         if screen is None:
             # 无法截图时返回当前策略保持不变
-            return getattr(self, '_no_takeoff_last_strategy', 'stand_only')
+            return self._no_takeoff_last_strategy
         if self._is_tower_all_open_by_pixels(screen):
             return 'stand_only'
         # 仅4号控制器激活？
@@ -725,8 +735,6 @@ class WoaBot(ConfigMixin, TowerMixin, FilterMixin):
         return next_index, label
 
     def _periodic_15s_check(self, force_initial_filter_check=False):
-        if not hasattr(self, 'last_periodic_check_time'):
-            self.last_periodic_check_time = 0
         now = time.time()
         if not force_initial_filter_check and now - self.last_periodic_check_time < 8.0:
             return
@@ -1032,7 +1040,7 @@ class WoaBot(ConfigMixin, TowerMixin, FilterMixin):
 
     def set_thinking_time_mode(self, mode_index, log_change=True):
         mode_index = int(mode_index)
-        if hasattr(self, 'thinking_mode') and self.thinking_mode == mode_index:
+        if self.thinking_mode == mode_index:
             return
         self.thinking_mode = mode_index
         if self.thinking_mode == 1:
@@ -1047,7 +1055,7 @@ class WoaBot(ConfigMixin, TowerMixin, FilterMixin):
         else:
             self.thinking_range = (0, 0)
             desc = "关闭"
-        prev = getattr(self, '_last_thinking_desc', None)
+        prev = self._last_thinking_desc
         if prev == desc:
             if self.adb:
                 self.adb.set_thinking_strategy(*self.thinking_range)
@@ -1096,6 +1104,30 @@ class WoaBot(ConfigMixin, TowerMixin, FilterMixin):
         self.enable_delay_bribe = enabled
         self.log(f">>> [配置] 延误飞机贿赂: {'已开启' if enabled else '已关闭'}")
 
+    # ─── 右侧类别栏处理 ──────────────────────────────────
+    def set_category_processing(self, enabled, selection=None):
+        """启用/禁用右侧类别栏处理，selection 为 {key: bool} 字典"""
+        was_processing = self.enable_category_processing or self._current_category_index >= 0
+        self.enable_category_processing = bool(enabled)
+        if selection is not None and isinstance(selection, dict):
+            for c in SIDEBAR_CATEGORIES:
+                key = c["key"]
+                self.category_selection[key] = bool(selection.get(key, False))
+        if self.enable_category_processing:
+            enabled_keys = [c["label"] for c in SIDEBAR_CATEGORIES if self.category_selection.get(c["key"], False)]
+            if enabled_keys:
+                self.log(f">>> [配置] 类别栏处理已开启: {', '.join(enabled_keys)}")
+                self._current_category_index = -1
+                self._next_category_switch_time = time.time() + 0.5
+            else:
+                self.log(f">>> [配置] 类别栏处理已开启，但未选择任何类别，等待配置")
+                if was_processing:
+                    self._pending_switch_to_all = True
+        else:
+            self.log(f">>> [配置] 类别栏处理已关闭")
+            if was_processing:
+                self._pending_switch_to_all = True
+
     def set_anti_stuck_config(self, enabled, threshold=None, log_change=True):
         enabled = bool(enabled)
         changed = (self.enable_anti_stuck != enabled)
@@ -1133,9 +1165,8 @@ class WoaBot(ConfigMixin, TowerMixin, FilterMixin):
     def set_slide_duration_range(self, min_d, max_d, log_change=True):
         min_d = int(min_d)
         max_d = int(max_d)
-        if hasattr(self, 'slide_min_duration') and hasattr(self, 'slide_max_duration'):
-            if self.slide_min_duration == min_d and self.slide_max_duration == max_d:
-                return
+        if self.slide_min_duration == min_d and self.slide_max_duration == max_d:
+            return
         self.slide_min_duration = min_d
         self.slide_max_duration = max_d
         if log_change:
@@ -1467,7 +1498,7 @@ class WoaBot(ConfigMixin, TowerMixin, FilterMixin):
         gc.collect()
 
     def _print_session_stats(self):
-        start = getattr(self, "_run_start_time", None)
+        start = self._run_start_time
         if start is not None:
             secs = max(0, int(time.time() - start))
             h, rest = divmod(secs, 3600)
@@ -1477,10 +1508,10 @@ class WoaBot(ConfigMixin, TowerMixin, FilterMixin):
             else:
                 dur = f"{m}分{s}秒"
             self.log(f"[统计] 本次运行时长: {dur}")
-        a = getattr(self, "_stat_session_approach", self._stat_approach)
-        d = getattr(self, "_stat_session_depart", self._stat_depart)
-        sc = getattr(self, "_stat_session_stand_count", self._stat_stand_count)
-        ss = getattr(self, "_stat_session_stand_staff", self._stat_stand_staff)
+        a = self._stat_session_approach
+        d = self._stat_session_depart
+        sc = self._stat_session_stand_count
+        ss = self._stat_session_stand_staff
         if a + d + sc == 0:
             return
         self.log(f"[统计] ═══════════════════════════════════")
@@ -1554,6 +1585,8 @@ class WoaBot(ConfigMixin, TowerMixin, FilterMixin):
             self._do_main_loop()
         except StopSignal:
             pass
+        except (KeyboardInterrupt, SystemExit):
+            raise
         except BaseException:
             self._write_thread_crash_report()
             traceback.print_exc()
@@ -1567,6 +1600,9 @@ class WoaBot(ConfigMixin, TowerMixin, FilterMixin):
                 path = _write_crash_report(exc_type, exc_value, exc_tb)
                 if path:
                     self.log(f"🛑 [严重错误] 脚本异常退出，日志已保存至: {path}")
+        except (ImportError, AttributeError):
+            exc_type, exc_value, _ = sys.exc_info()
+            self.log(f"🛑 [严重错误] 崩溃报告模块不可用: {exc_type.__name__ if exc_type else 'Unknown'}: {exc_value}")
         except Exception:
             traceback.print_exc()
 
@@ -1575,7 +1611,7 @@ class WoaBot(ConfigMixin, TowerMixin, FilterMixin):
         self._stat_date = time.strftime("%Y-%m-%d")
         self.log("[DEBUG] 主循环线程已启动")
         self.sleep(0.3)
-        self.last_periodic_check_time = 0
+        self.last_periodic_check_time = 0.0
         if self.enable_no_takeoff_mode:
             self._no_takeoff_cycle_side = 'landing'
             self._no_takeoff_cycle_next_switch_time = time.time() + self._no_takeoff_switch_interval
@@ -1603,7 +1639,7 @@ class WoaBot(ConfigMixin, TowerMixin, FilterMixin):
                 # ── 类别轮换（最高优先级，每轮主循环都检查）──
                 now_ts = time.time()
                 # 优先处理来自 set_category_processing 的"切回全部"请求
-                if getattr(self, '_pending_switch_to_all', False):
+                if self._pending_switch_to_all:
                     self._pending_switch_to_all = False
                     self._switch_to_category(-1)
                 elif self.enable_category_processing:
@@ -1635,7 +1671,7 @@ class WoaBot(ConfigMixin, TowerMixin, FilterMixin):
                 if self._is_module_enabled('lifecycle'):
                     now_ts = time.time()
                     # 请求切换回模式1（来自配置变更）
-                    if getattr(self, '_request_switch_mode1', False):
+                    if self._request_switch_mode1:
                         self._request_switch_mode1 = False
                         self._force_switch_filter_mode1()
                     # 不起飞模式：轮切定时切换
@@ -1691,8 +1727,6 @@ class WoaBot(ConfigMixin, TowerMixin, FilterMixin):
                 self.log(error_msg)
                 
                 # 如果连续出错，主动触发系统的异常处理逻辑（生成报告并重启或停止）
-                if not hasattr(self, 'consecutive_errors'):
-                    self.consecutive_errors = 0
                 self.consecutive_errors += 1
                 
                 if self.consecutive_errors >= 6:
@@ -1731,6 +1765,8 @@ class WoaBot(ConfigMixin, TowerMixin, FilterMixin):
             if sleep_time > 0: time.sleep(sleep_time)
 
     def close_window(self):
+        if self.adb is None:
+            return
         self.adb.double_click(self.CLOSE_X, self.CLOSE_Y, random_offset=30)
         self.last_window_close_time = time.time()
         self.sleep(0.1)
@@ -1758,12 +1794,14 @@ class WoaBot(ConfigMixin, TowerMixin, FilterMixin):
 
     def safe_locate(self, image_name, confidence=0.8, region=None):
         self._check_running()
+        if self.adb is None:
+            return None
         if region is None:
             return self.adb.locate_image(self.icon_path + image_name, confidence=confidence)
         screen = self.adb.get_screenshot()
         if screen is None: return None
         x, y, w, h = region
-        x = max(0, int(x));
+        x = max(0, int(x))
         y = max(0, int(y))
         search_img = screen[y:y + h, x:x + w]
         result = self.adb.locate_image(self.icon_path + image_name, confidence=confidence, screen_image=search_img)
@@ -2931,7 +2969,7 @@ class WoaBot(ConfigMixin, TowerMixin, FilterMixin):
             result = task['handler']()
         except (StopSignal, KeyboardInterrupt, SystemExit):
             raise
-        except Exception:
+        except TypeError:
             result = task['handler'](None)
 
         if result:
@@ -2949,8 +2987,6 @@ class WoaBot(ConfigMixin, TowerMixin, FilterMixin):
         self._cleanup_task_cooldown()
 
         if current_screen is None:
-            if not hasattr(self, '_scan_screenshot_fails'):
-                self._scan_screenshot_fails = 0
             self._scan_screenshot_fails += 1
             if self._scan_screenshot_fails >= 5:
                 self.log(f"⚠️ [连接] 截图连续{self._scan_screenshot_fails}次失败，尝试重建 ADB 连接...")
@@ -2964,7 +3000,6 @@ class WoaBot(ConfigMixin, TowerMixin, FilterMixin):
             return False
         self._scan_screenshot_fails = 0
 
-        if not hasattr(self, 'last_staff_check_time'): self.last_staff_check_time = 0
         now = time.time()
         prev_staff = self.last_checked_avail_staff
         staff_this_round = None
@@ -3036,7 +3071,7 @@ class WoaBot(ConfigMixin, TowerMixin, FilterMixin):
             if self.enable_no_takeoff_mode and no_takeoff_strategy == 'landing_stand_cycle':
                 self._toggle_no_takeoff_cycle_side(reason="当前分组无任务")
                 self._periodic_15s_check(force_initial_filter_check=True)
-            if not getattr(self, '_no_candidate_closed', False):
+            if not self._no_candidate_closed:
                 self._no_candidate_closed = True
                 n_doing = len(doing_tasks)
                 n_total = len(final_tasks)

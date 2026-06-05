@@ -8,6 +8,22 @@ import collections
 import traceback
 import importlib.util
 import tkinter as tk
+
+# ─── Python 3.14+ tkinter 兼容性补丁 ─────────────────────
+# Python 3.14 中 tkinter.Misc.__getattr__ 改为无条件委托给 self.tk，
+# 导致 command=self.method_name 形式的回调在控件创建时触发
+# AttributeError: '_tkinter.tkapp' object has no attribute 'method_name'
+# 参考: https://github.com/python/cpython/issues/ 相关 issue
+if hasattr(tk, 'Misc') and hasattr(tk.Misc, '__getattr__'):
+    _tk_misc_getattr_original = tk.Misc.__getattr__
+    def _tk_misc_getattr_safe(self, attr):
+        """先检查 Python 对象自有属性，回退到 Tcl 解释器"""
+        try:
+            return object.__getattribute__(self, attr)
+        except AttributeError:
+            return _tk_misc_getattr_original(self, attr)
+    tk.Misc.__getattr__ = _tk_misc_getattr_safe
+
 import subprocess
 import time
 import webbrowser
@@ -112,8 +128,6 @@ ONLINE_GUARD_RECHECK_SEC = 90
 OFFICIAL_REPO_URL_EXPECTED = OFFICIAL_REPO_URL
 OFFICIAL_REPO_NAME_EXPECTED = OFFICIAL_REPO_NAME
 ONLINE_VERSION_PATH_EXPECTED = ONLINE_VERSION_PATH
-OFFICIAL_REPO_NAME_EXPECTED = "hjtr7mymht-dot/WOA_AutoBot"
-ONLINE_VERSION_PATH_EXPECTED = "version.json"
 
 DONATE_IMAGE_CANDIDATES = {
     "微信支付": (
@@ -255,14 +269,26 @@ class MultiTextRedirector(object):
             self._setup_tags(widget)
 
     def _setup_tags(self, widget):
-        widget.tag_config("time", foreground="#95a5a6", font=(MONO_FONT, 8))
-        widget.tag_config("normal", foreground="#2c3e50")
-        widget.tag_config("success", foreground="#4a9e6e")
-        widget.tag_config("error", foreground="#d9544d")
-        widget.tag_config("highlight", foreground="#e8983e")
-        widget.tag_config("method", foreground="#5b9bd5")
-        widget.tag_config("update", foreground="#d9544d", font=(DEFAULT_FONT, 9, "bold"))
-        widget.tag_config("stats", foreground="#3b6e9c", font=(DEFAULT_FONT, 9, "bold"))
+        widget.tag_config("time", foreground="#858585", font=(MONO_FONT, 8))
+        widget.tag_config("normal", foreground="#d4d4d4")
+        widget.tag_config("success", foreground="#4ec9b0")
+        widget.tag_config("error", foreground="#f44747")
+        widget.tag_config("highlight", foreground="#cca700")
+        widget.tag_config("method", foreground="#569cd6")
+        widget.tag_config("update", foreground="#f44747", font=(DEFAULT_FONT, 9, "bold"))
+        widget.tag_config("stats", foreground="#569cd6", font=(DEFAULT_FONT, 9, "bold"))
+
+    def refresh_tags(self, c):
+        """主题切换时更新所有 widget 的标签颜色"""
+        for widget in self.widgets:
+            widget.tag_config("time", foreground=c["muted"], font=(MONO_FONT, 8))
+            widget.tag_config("normal", foreground=c["terminal_fg"])
+            widget.tag_config("success", foreground=c["success"])
+            widget.tag_config("error", foreground=c["danger"])
+            widget.tag_config("highlight", foreground=c["warning"])
+            widget.tag_config("method", foreground=c["primary"])
+            widget.tag_config("update", foreground=c["danger"], font=(DEFAULT_FONT, 9, "bold"))
+            widget.tag_config("stats", foreground=c["info"], font=(DEFAULT_FONT, 9, "bold"))
 
     def write(self, str_val):
         if self.closing:
@@ -549,63 +575,27 @@ class Application(ttkb.Window):
         if IS_WINDOWS:
             try:
                 import ctypes
-                myappid = 'woabot.launcher.v1.2.6'
+                myappid = f'woabot.launcher.v{LOCAL_VERSION}'
                 ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
             except Exception:
                 pass
 
-        super().__init__(themename="flatly")
+        # 提前加载配置以确定主题
+        self._config_file_exists = os.path.exists(CONFIG_FILE)
+        self.config = self.load_config()
+        self._theme_is_dark = bool(self.config.get("theme", "light") == "dark")
+        initial_theme = "darkly" if self._theme_is_dark else "flatly"
+        super().__init__(themename=initial_theme)
 
-        # === 航空驾驶舱冰蓝色主题 ===
-        self.configure(bg="#f4f7fc")
-        ice_primary   = "#3b6e9c"
-        ice_info      = "#5b9bd5"
-        ice_success   = "#4a9e6e"
-        ice_danger    = "#d9544d"
-        ice_warning   = "#e8983e"
-        ice_light     = "#f0f4fa"
-        ice_bg        = "#f4f7fc"
-        ice_card      = "#ffffff"
+        self._apply_theme_colors()
 
-        self.style.colors.primary   = ice_primary
-        self.style.colors.info      = ice_info
-        self.style.colors.success   = ice_success
-        self.style.colors.danger    = ice_danger
-        self.style.colors.warning   = ice_warning
-        self.style.colors.light     = ice_light
-        self.style.colors.dark      = "#2c3e50"
-
-        # 全局字体
-        self.style.configure(".",                font=(DEFAULT_FONT, 9))
-        self.style.configure("TLabel",           font=(DEFAULT_FONT, 9))
-        self.style.configure("TLabelframe.Label",font=(DEFAULT_FONT, 9, "bold"))
-        self.style.configure("TNotebook.Tab",    font=(DEFAULT_FONT, 9), padding=(10, 4))
-        self.style.configure("TButton",          font=(DEFAULT_FONT, 9))
-        self.style.configure("success.TButton",  font=(DEFAULT_FONT, 9, "bold"))
-        # 消除 ttkb 默认黑边框：用主题色替代
-        for color_name in ("primary", "info", "success", "warning", "danger", "light", "dark"):
-            self.style.configure(f"{color_name}.TLabelframe",  bordercolor=ice_card)
-            self.style.configure(f"{color_name}.TLabelframe.Label", background=ice_card)
-
-        # 玻璃拟态：纯白底+冰蓝细边框
-        self.style.configure("Glass.TLabelframe",         background=ice_card, relief="solid",
-                             borderwidth=1, bordercolor="#c4d4e4")
-        self.style.configure("Glass.TLabelframe.Label",   background=ice_card,
-                             font=(DEFAULT_FONT, 9, "bold"), foreground=ice_primary)
-        self.style.configure("Card.TLabelframe",          background=ice_card, relief="solid",
-                             borderwidth=1, bordercolor="#d0dce8")
-        self.style.configure("Card.TLabelframe.Label",    background=ice_card,
-                             font=(DEFAULT_FONT, 9, "bold"), foreground=ice_primary)
-
-        self.title(f"WOA AutoBot v{LOCAL_VERSION}" + (f" — 实例 {INSTANCE_ID}" if INSTANCE_ID > 1 else ""))
-        self.geometry("1280x780")
+        self.title(f"✈ WOA AutoBot v{LOCAL_VERSION}" + (f" — 实例 {INSTANCE_ID}" if INSTANCE_ID > 1 else ""))
+        self.geometry("1360x820")
         self.minsize(120, 120)
-        self.last_geometry = "1280x780"
+        self.last_geometry = "1360x820"
         self.is_mini_mode = False
         self._strict_online_guard = False  # 离线模式，不强制在线验证
 
-        self._config_file_exists = os.path.exists(CONFIG_FILE)
-        self.config = self.load_config()
         self.var_bonus_staff = tk.BooleanVar(value=self.config.get("bonus_staff", False))
         self.var_vehicle_buy = tk.BooleanVar(value=self.config.get("vehicle_buy", False))
         self.var_speed_mode = tk.BooleanVar(value=self.config.get("speed_mode", False))
@@ -740,6 +730,15 @@ class Application(ttkb.Window):
         # 后台定时任务：由 BackgroundWorker 驱动的统一 tick（每 30s 触发一次）
         self._bg_tick_counter = 0
         self._schedule_bg_tick()
+
+        # ═══════════ 窗口生命周期（仅初始化一次！不要放在定时回调中）═══════════
+        self._icon_loaded = False
+        self._help_badge = None
+        self.after(500, self.setup_window_icon)
+        self.after(800, self._auto_show_help_on_first_launch)
+        self.after(2200, self._startup_online_update_check)
+        self.bind("<Map>", self._on_window_map)
+        self.protocol("WM_DELETE_WINDOW", self._on_closing)
 
     def _schedule_bg_tick(self):
         """每 30 秒在后台线程执行一次定时检查（统计汇报/金币提醒），结果通过 after 回主线程。
@@ -884,17 +883,6 @@ class Application(ttkb.Window):
                     pass
         self.after(100, _emit_notice)
 
-        self.after(500, self.setup_window_icon)
-        # 首次启动自动弹出使用说明
-        self.after(800, self._auto_show_help_on_first_launch)
-        # 在线验证（后台静默执行，不影响使用）
-        self.after(2200, self._startup_online_update_check)
-        self.bind("<Map>", self._on_window_map)
-        self._icon_loaded = False
-        self._help_badge = None
-
-        self.protocol("WM_DELETE_WINDOW", self._on_closing)
-
     def _on_closing(self):
         """关闭窗口时停止脚本并清理资源，避免进程残留"""
         if getattr(self, "_is_closing", False):
@@ -986,28 +974,10 @@ class Application(ttkb.Window):
         try:
             icon_rel = os.path.join(ICON_DIR, "app.ico")
             icon_path = get_resource_path(icon_rel)
-            if not os.path.exists(icon_path): return
-            try:
-                self.iconbitmap(default=icon_path)
-            except:
-                pass
-            try:
-                with open(icon_path, "rb") as f:
-                    img = Image.open(f)
-                    img.load()
-                if hasattr(Image, 'Resampling'):
-                    resample = Image.Resampling.LANCZOS
-                else:
-                    resample = Image.LANCZOS
-                img16 = ImageTk.PhotoImage(img.resize((16, 16), resample))
-                img32 = ImageTk.PhotoImage(img.resize((32, 32), resample))
-                img48 = ImageTk.PhotoImage(img.resize((48, 48), resample))
-                img64 = ImageTk.PhotoImage(img.resize((64, 64), resample))
-                self.wm_iconphoto(True, img64, img48, img32, img16)
-                self._icon_refs = [img16, img32, img48, img64]
-            except:
-                pass
-        except:
+            if not os.path.exists(icon_path):
+                return
+            self.iconbitmap(default=icon_path)
+        except Exception:
             pass
 
     def load_config(self):
@@ -1018,7 +988,7 @@ class Application(ttkb.Window):
                         return orjson.loads(f.read())
                 with open(CONFIG_FILE, "r", encoding="utf-8") as f:
                     return json.load(f)
-            except:
+            except (json.JSONDecodeError, OSError, ValueError):
                 return {}
         return {}
 
@@ -1032,6 +1002,7 @@ class Application(ttkb.Window):
         self.config["tower_open_stand_only"] = self.var_tower_open_stand_only.get()
         self.config["anti_stuck_enabled"] = self.var_anti_stuck_enabled.get()
         self.config["no_takeoff_logout_enabled"] = self.var_no_takeoff_logout_enabled.get()
+        self.config["cancel_stand_filter"] = bool(self.var_cancel_stand_filter.get())
         try:
             self.config["no_takeoff_switch_interval"] = max(3.0, min(300.0, float(self.var_no_takeoff_switch_interval.get())))
         except Exception:
@@ -1051,7 +1022,7 @@ class Application(ttkb.Window):
         self.config["initial_device_paths_detected"] = bool(self.config.get("initial_device_paths_detected", False))
         try:
             self.config["auto_delay_count"] = int(self.var_delay_count.get())
-        except:
+        except (ValueError, TypeError):
             self.config["auto_delay_count"] = 0
         try:
             anti_stuck_threshold = int(self.var_anti_stuck_threshold.get())
@@ -1082,8 +1053,11 @@ class Application(ttkb.Window):
         def _bg_write():
             try:
                 if use_orjson:
+                    # orjson < 3.0.0 没有 OPT_INDENT_2 / OPT_SORT_KEYS，safe fallback
+                    indent_opt = getattr(orjson, 'OPT_INDENT_2', 0)
+                    sort_opt   = getattr(orjson, 'OPT_SORT_KEYS', 0)
                     with open(config_path, "wb") as f:
-                        f.write(orjson.dumps(config_snapshot, option=orjson.OPT_INDENT_2 | orjson.OPT_SORT_KEYS))
+                        f.write(orjson.dumps(config_snapshot, option=indent_opt | sort_opt))
                 else:
                     with open(config_path, "w", encoding="utf-8") as f:
                         json.dump(config_snapshot, f, indent=4, ensure_ascii=False)
@@ -1526,7 +1500,9 @@ class Application(ttkb.Window):
         return changed or force
 
     def create_info_icon(self, parent, text):
-        lbl = ttkb.Label(parent, text="ⓘ", font=(DEFAULT_FONT, 10), bootstyle="secondary", cursor="hand2")
+        c = self._clr
+        lbl = ttkb.Label(parent, text="ⓘ", font=(DEFAULT_FONT, 10),
+                         foreground=c["muted"], cursor="hand2")
         ToolTip(lbl, text=text, bootstyle="secondary-inverse")
         return lbl
 
@@ -1577,29 +1553,194 @@ class Application(ttkb.Window):
             messagebox.showerror("多开模式", f"启动新实例失败: {exc}", parent=self)
 
     def setup_mini_ui(self):
-        pad = 5
-        top_row = ttkb.Frame(self.container_mini)
+        c = self._clr
+        pad = 8
+        top_row = ttkb.Frame(self.container_mini, padding=4)
         top_row.pack(fill=X, padx=pad, pady=(pad, 0))
-        ttkb.Label(top_row, text=f"WOA Mini {LOCAL_VERSION}", font=(DEFAULT_FONT, 9, "bold"), bootstyle="secondary").pack(side=LEFT)
-        ttkb.Button(top_row, text="还原", bootstyle="outline-warning", command=self.toggle_mode, padding=(5, 0)).pack(
-            side=RIGHT)
-        cb_top = ttkb.Checkbutton(top_row, text="置顶", variable=self.var_mini_top, bootstyle="toolbutton-secondary",
+        ttkb.Label(top_row, text=f"✈ WOA Mini {LOCAL_VERSION}",
+                   font=(DEFAULT_FONT, 10, "bold"), bootstyle="primary").pack(side=LEFT)
+        ttkb.Button(top_row, text="⤢ 还原", bootstyle="outline-warning",
+                    command=self.toggle_mode, padding=(6, 1)).pack(side=RIGHT)
+        cb_top = ttkb.Checkbutton(top_row, text="置顶", variable=self.var_mini_top,
+                                  bootstyle="toolbutton-secondary",
                                   command=self.toggle_mini_top_state)
-        cb_top.pack(side=RIGHT, padx=5)
-        ctl_row = ttkb.Frame(self.container_mini)
-        ctl_row.pack(fill=X, padx=pad, pady=2)
-        self.btn_mini_start = ttkb.Button(ctl_row, text="▶", bootstyle="success", width=4, command=self.start_bot)
-        self.btn_mini_start.pack(side=LEFT, padx=(0, 2), fill=X, expand=True)
-        self.btn_mini_stop = ttkb.Button(ctl_row, text="■", bootstyle="danger", width=4, state="disabled",
-                                         command=self.stop_bot)
-        self.btn_mini_stop.pack(side=LEFT, padx=(2, 0), fill=X, expand=True)
-        log_frame = ttkb.Frame(self.container_mini)
-        log_frame.pack(fill=BOTH, expand=True, padx=pad, pady=pad)
-        ttkb.Label(log_frame, textvariable=self.var_online_status, anchor="w", bootstyle="secondary").pack(fill=X, pady=(0, 4))
-        self.txt_mini_log = tk.Text(log_frame, state="disabled", font=(MONO_FONT, 8),
-                                    bg="#f8fafc", fg="#1e293b", relief="flat", height=4)
+        cb_top.pack(side=RIGHT, padx=6)
+        
+        ctl_row = ttkb.Frame(self.container_mini, padding=4)
+        ctl_row.pack(fill=X, padx=pad, pady=4)
+        self.btn_mini_start = ttkb.Button(ctl_row, text="▶  启动", bootstyle="success",
+                                          width=10, command=self.start_bot)
+        self.btn_mini_start.pack(side=LEFT, padx=(0, 3), fill=X, expand=True)
+        self.btn_mini_stop = ttkb.Button(ctl_row, text="■  停止", bootstyle="danger",
+                                         width=8, state="disabled", command=self.stop_bot)
+        self.btn_mini_stop.pack(side=LEFT, padx=(3, 0), fill=X, expand=True)
+        
+        log_frame = ttkb.Frame(self.container_mini, padding=4)
+        log_frame.pack(fill=BOTH, expand=True, padx=pad, pady=(0, pad))
+        ttkb.Label(log_frame, textvariable=self.var_online_status,
+                   anchor="w", bootstyle="secondary").pack(fill=X, pady=(0, 4))
+        mini_log_bg = c["terminal_bg"]
+        mini_log_fg = c["terminal_fg"]
+        self.txt_mini_log = tk.Text(log_frame, state="disabled",
+                                    font=(MONO_FONT, 9), bg=mini_log_bg, fg=mini_log_fg,
+                                    relief="flat", height=4)
         self.txt_mini_log.pack(fill=BOTH, expand=True)
         self.redirector.add_widget(self.txt_mini_log)
+
+    # ─── 主题色彩系统 — 安静专业风格 (Refined Aviation) ───
+    # 遵循 Impeccable 设计规范：暗色模式不纯黑、强调色低饱和度、
+    # 浅色模式确保 WCAG AA (≥4.5:1) 文字对比度、60-30-10 色彩比例
+    def _apply_theme_colors(self):
+        """根据 _theme_is_dark 设置完整色彩方案 — VS Code 工具风格"""
+        is_dark = self._theme_is_dark
+        if is_dark:
+            # ═══ 暗色模式 — VS Code 中性深灰 (无蓝调底色) ═══
+            # 借鉴 VS Code Dark+: 全中性灰度层级，仅 accent 使用蓝色
+            clr_bg_deep     = "#181818"   # 最深底色 (sidebar / status bar)
+            clr_bg          = "#1e1e1e"   # 根背景 (editor bg)
+            clr_bg_header   = "#252526"   # 头部栏 / Tab
+            clr_surface     = "#2d2d30"   # 卡片面板 (panel)
+            clr_elevated    = "#383838"   # 悬浮 / 高亮 hover
+            clr_border      = "#3e3e42"   # 默认边框
+            clr_border_accent = "#474747" # 强调边框
+
+            # 强调色 — VS Code 蓝，克制使用 (10% accent 原则)
+            clr_primary     = "#007acc"   # VS Code 蓝
+            clr_primary_dim = "#005a9e"   # 深沉蓝
+            clr_info        = "#569cd6"   # 信息蓝
+            clr_success     = "#4ec9b0"   # 柔和青绿
+            clr_danger      = "#f44747"   # 柔和红
+            clr_warning     = "#cca700"   # 柔和金黄
+
+            # 文字层级 — 暗底浅字
+            clr_text        = "#cccccc"   # 主文字 (~10.5:1 on #1e1e1e)
+            clr_text_sec    = "#9d9d9d"   # 次要文字 (~6:1)
+            clr_muted       = "#858585"   # 禁用/辅助 (~4.6:1 ≥ AA)
+
+            clr_terminal_bg  = "#1e1e1e"  # 终端与主背景统一
+            clr_terminal_fg  = "#d4d4d4"  # 终端前景
+
+            # 状态药丸 — 柔和暗底 + 对应语义色
+            pill_runtime_bg  = "#1a2b1a"
+            pill_runtime_fg  = "#4ec9b0"
+            pill_device_bg   = "#1a232e"
+            pill_device_fg   = "#569cd6"
+            pill_online_bg   = "#231a30"
+            pill_online_fg   = "#c586c0"
+        else:
+            # ═══ 浅色模式 — VS Code Light+ 风格 ═══
+            clr_bg_deep     = "#f0f0f0"   # 最深底色
+            clr_bg          = "#ffffff"   # 根背景
+            clr_bg_header   = "#f3f3f3"   # 头部栏
+            clr_surface     = "#ffffff"   # 卡片面板
+            clr_elevated    = "#f8f8f8"   # 悬浮 / 高亮
+            clr_border      = "#e0e0e0"   # 默认边框
+            clr_border_accent = "#cccccc" # 强调边框
+
+            # 强调色 — 保持 VS Code 蓝 (浅色下 #007acc on #fff ≈ 4.8:1 ≥ AA)
+            clr_primary     = "#007acc"   # VS Code 蓝
+            clr_primary_dim = "#005a9e"   # 深沉蓝
+            clr_info        = "#0451a5"   # 信息蓝
+            clr_success     = "#008000"   # 成功绿
+            clr_danger      = "#cd3131"   # 危险红
+            clr_warning     = "#795e26"   # 警告金黄
+
+            # 文字层级 — 白底深字
+            clr_text        = "#1e1e1e"   # 主文字 (~21:1)
+            clr_text_sec    = "#616161"   # 次要文字 (~6.6:1)
+            clr_muted       = "#8a8a8a"   # 禁用/辅助 (~3.6:1, large text OK)
+
+            clr_terminal_bg  = "#ffffff"  # 终端与主背景统一
+            clr_terminal_fg  = "#1e1e1e"  # 终端前景
+
+            pill_runtime_bg  = "#e6ffe6"
+            pill_runtime_fg  = "#008000"
+            pill_device_bg   = "#e6f0ff"
+            pill_device_fg   = "#0451a5"
+            pill_online_bg   = "#f3e6ff"
+            pill_online_fg   = "#7b3f9b"
+
+        # 保存颜色 Token 到实例属性，供子组件使用
+        self._clr = {
+            "bg": clr_bg, "bg_deep": clr_bg_deep, "bg_header": clr_bg_header,
+            "surface": clr_surface, "elevated": clr_elevated,
+            "border": clr_border, "border_accent": clr_border_accent,
+            "primary": clr_primary, "primary_dim": clr_primary_dim,
+            "info": clr_info, "success": clr_success,
+            "danger": clr_danger, "warning": clr_warning,
+            "text": clr_text, "text_sec": clr_text_sec, "muted": clr_muted,
+            "terminal_bg": clr_terminal_bg, "terminal_fg": clr_terminal_fg,
+            "pill_runtime_bg": pill_runtime_bg, "pill_runtime_fg": pill_runtime_fg,
+            "pill_device_bg": pill_device_bg, "pill_device_fg": pill_device_fg,
+            "pill_online_bg": pill_online_bg, "pill_online_fg": pill_online_fg,
+        }
+
+        self.configure(bg=clr_bg)
+        self.style.theme_use("darkly" if is_dark else "flatly")
+
+        # ── ttkbootstrap 全局色板 ──
+        self.style.colors.primary   = clr_primary
+        self.style.colors.info      = clr_info
+        self.style.colors.success   = clr_success
+        self.style.colors.danger    = clr_danger
+        self.style.colors.warning   = clr_warning
+        self.style.colors.light     = clr_elevated if is_dark else clr_elevated
+        self.style.colors.dark      = clr_text if is_dark else clr_text
+        self.style.colors.secondary = clr_muted
+
+        # ── 全局组件样式 ──
+        self.style.configure(".",                     font=(DEFAULT_FONT, 10))
+        self.style.configure("TLabel",                font=(DEFAULT_FONT, 10), foreground=clr_text)
+        self.style.configure("TLabelframe.Label",     font=(DEFAULT_FONT, 11, "bold"), foreground=clr_primary, padding=(8, 4))
+        self.style.configure("TNotebook.Tab",         font=(DEFAULT_FONT, 10), padding=(16, 8))
+        self.style.configure("TButton",               font=(DEFAULT_FONT, 10), padding=(8, 4))
+        self.style.configure("success.TButton",       font=(DEFAULT_FONT, 10, "bold"))
+        self.style.configure("danger.TButton",        font=(DEFAULT_FONT, 10, "bold"))
+        self.style.configure("outline.TButton",       font=(DEFAULT_FONT, 10))
+        self.style.configure("TEntry",                font=(DEFAULT_FONT, 10), padding=(6, 5))
+        self.style.configure("TCombobox",             font=(DEFAULT_FONT, 10), padding=(4, 3))
+        self.style.configure("TCheckbutton",          font=(DEFAULT_FONT, 10))
+        self.style.configure("TNotebook",             background=clr_bg, borderwidth=0)
+        self.style.configure("TFrame",                background=clr_bg)
+
+        for color_name in ("primary", "info", "success", "warning", "danger", "light", "dark"):
+            self.style.configure(f"{color_name}.TLabelframe",  background=clr_surface, bordercolor=clr_border)
+            self.style.configure(f"{color_name}.TLabelframe.Label", background=clr_surface)
+
+        # 确保非自定义 TLabelframe 也有暗色背景
+        self.style.configure("TLabelframe",  background=clr_surface)
+
+        # ── 自定义卡片样式（去发光化，用微妙边框区分层级） ──
+        # Glass — 玻璃拟态面板（一级容器）
+        self.style.configure("Glass.TLabelframe",         background=clr_surface, relief="solid",
+                             borderwidth=1, bordercolor=clr_border)
+        self.style.configure("Glass.TLabelframe.Label",   background=clr_surface,
+                             font=(DEFAULT_FONT, 11, "bold"), foreground=clr_primary)
+        # Card — 标准卡片（二级容器）
+        self.style.configure("Card.TLabelframe",          background=clr_surface, relief="solid",
+                             borderwidth=1, bordercolor=clr_border)
+        self.style.configure("Card.TLabelframe.Label",    background=clr_surface,
+                             font=(DEFAULT_FONT, 10, "bold"), foreground=clr_primary)
+        # Inner — 内嵌卡片（三级容器）
+        self.style.configure("Inner.TLabelframe",         background=clr_surface, relief="solid",
+                             borderwidth=1, bordercolor=clr_border_accent)
+        self.style.configure("Inner.TLabelframe.Label",   background=clr_surface,
+                             font=(DEFAULT_FONT, 9, "bold"), foreground=clr_muted)
+
+        # 更新主题按钮图标
+        if hasattr(self, 'btn_theme'):
+            self.btn_theme.configure(text="☀️ 浅色" if is_dark else "🌙 深色")
+
+        # 刷新日志输出标签颜色（适配终端背景）
+        if hasattr(self, 'redirector'):
+            self.redirector.refresh_tags(self._clr)
+
+    def toggle_theme(self):
+        """切换深色/浅色模式"""
+        self._theme_is_dark = not self._theme_is_dark
+        self.config["theme"] = "dark" if self._theme_is_dark else "light"
+        self._apply_theme_colors()
+        self.save_config()
 
     def _toggle_functional_switch(self, t, v):
         self.sync_all_configs_to_bot()
@@ -1620,75 +1761,102 @@ class Application(ttkb.Window):
         self.save_config()
 
     def setup_main_ui(self):
-        # ── 外层容器：居中 95% 宽度，玻璃拟态 ──
-        wrapper = ttkb.Frame(self.container_main, padding=6)
+        # ── 外层容器 ──
+        wrapper = ttkb.Frame(self.container_main, padding=8)
         wrapper.pack(fill=BOTH, expand=True)
         wrapper.grid_columnconfigure(0, weight=1)
         wrapper.grid_rowconfigure(0, weight=0)  # header
         wrapper.grid_rowconfigure(1, weight=0)  # ctrl bar
         wrapper.grid_rowconfigure(2, weight=1)  # content (fills rest)
 
-        # ═══════════ 1. 标题栏 ═══════════
-        header = ttkb.Frame(wrapper, padding=(4, 2), style="Glass.TFrame")
-        header.grid(row=0, column=0, sticky="ew", pady=(0, 2))
-        ttkb.Label(header, text="✈ WOA AutoBot", font=(DEFAULT_FONT, 14, "bold"),
-                   bootstyle="primary").pack(side=LEFT)
-        ttkb.Label(header, text=f"v{LOCAL_VERSION}", font=(DEFAULT_FONT, 8),
-                   bootstyle="secondary").pack(side=LEFT, padx=(4, 0))
+        # ═══════════ 1. 标题栏 — 霓虹航空终端品牌条 ═══════════
+        c = self._clr
+        header_bar = tk.Frame(wrapper, bg=c["bg_header"], height=48, bd=0, highlightthickness=0)
+        header_bar.grid(row=0, column=0, sticky="ew", pady=(0, 4))
+        header_bar.grid_propagate(False)
+        
+        # 顶部强调线（低调用主色暗调）
+        accent_line = tk.Frame(header_bar, bg=c["primary_dim"], height=2, bd=0)
+        accent_line.pack(fill=X, side=TOP)
+        
+        brand_frame = tk.Frame(header_bar, bg=c["bg_header"], bd=0, highlightthickness=0)
+        brand_frame.pack(side=LEFT, padx=16, pady=6)
+        ttkb.Label(brand_frame, text="✈ WOA AutoBot", font=(DEFAULT_FONT, 16, "bold"),
+                   background=c["bg_header"], foreground=c["text"]).pack(side=LEFT)
+        ttkb.Label(brand_frame, text=f" v{LOCAL_VERSION}", font=(MONO_FONT, 9),
+                   background=c["bg_header"], foreground=c["text_sec"]).pack(side=LEFT, padx=(8, 0))
         if INSTANCE_ID > 1:
-            ttkb.Label(header, text=f"实例{INSTANCE_ID}", font=(DEFAULT_FONT, 8, "bold"),
-                       bootstyle="warning").pack(side=LEFT, padx=4)
-        # 状态徽章
-        cap_frame = ttkb.Frame(header)
-        cap_frame.pack(side=RIGHT)
-        # 作者网站链接
-        ttkb.Button(cap_frame, text="🌐 作者网站", bootstyle="outline-info",
-                    command=self.open_personal_website, padding=(4, 0)).pack(side=LEFT, padx=(4, 0))
-        # 路线查找器链接
-        ttkb.Button(cap_frame, text="🗺️ 路线查找", bootstyle="outline-success",
-                    command=self.open_arpa_repo, padding=(4, 0)).pack(side=LEFT, padx=(4, 0))
-        for label, var, color in (
-            ("运行", self.var_runtime_status, "info"),
-            ("设备", self.var_device_status, "info"),
-            ("云端", self.var_online_status, "success"),
-        ):
-            f = ttkb.Frame(cap_frame)
-            f.pack(side=LEFT, padx=(4, 0))
-            ttkb.Label(f, text=label, font=(DEFAULT_FONT, 7, "bold"), bootstyle="secondary").pack(side=LEFT, padx=(0, 2))
-            ttkb.Label(f, textvariable=var, padding=(4, 1), font=(DEFAULT_FONT, 7), bootstyle=f"inverse-{color}").pack(side=LEFT)
+            ttkb.Label(brand_frame, text=f" 实例 {INSTANCE_ID}", font=(DEFAULT_FONT, 8, "bold"),
+                       background=c["bg_header"], foreground=c["warning"]).pack(side=LEFT, padx=8)
+
+        # 状态药丸 — 游戏化发光徽章
+        pill_frame = tk.Frame(header_bar, bg=c["bg_header"], bd=0, highlightthickness=0)
+        pill_frame.pack(side=RIGHT, padx=10, pady=6)
+        pill_data = [
+            ("运行", self.var_runtime_status, c["pill_runtime_bg"], c["pill_runtime_fg"]),
+            ("设备", self.var_device_status, c["pill_device_bg"], c["pill_device_fg"]),
+            ("云端", self.var_online_status, c["pill_online_bg"], c["pill_online_fg"]),
+        ]
+        for label, var, pill_bg, pill_fg in pill_data:
+            pf = tk.Frame(pill_frame, bg=pill_bg, bd=0, highlightthickness=0)
+            pf.pack(side=LEFT, padx=3)
+            ttkb.Label(pf, text=f" {label} ", font=(DEFAULT_FONT, 8, "bold"),
+                       background=pill_bg, foreground=pill_fg).pack(side=LEFT)
+            setattr(self, f"_pill_lbl_{label}",
+                    ttkb.Label(pf, textvariable=var,
+                               font=(DEFAULT_FONT, 8, "bold"),
+                               background=pill_bg, foreground=pill_fg))
+            getattr(self, f"_pill_lbl_{label}").pack(side=LEFT, padx=(0, 8))
+
+        # 快捷按钮（header 右侧）
+        btn_row = tk.Frame(header_bar, bg=c["bg_header"], bd=0, highlightthickness=0)
+        btn_row.pack(side=RIGHT, padx=(0, 4), pady=6)
+        # 主题切换按钮
+        self.btn_theme = ttkb.Button(btn_row, text="🌙 深色" if not self._theme_is_dark else "☀️ 浅色",
+                                      bootstyle="outline-secondary", command=self.toggle_theme, padding=(8, 2))
+        self.btn_theme.pack(side=LEFT, padx=2)
+        for text, bootstyle, cmd in [
+            ("🌐 作者", "outline-secondary", self.open_personal_website),
+            ("🗺️ 路线", "outline-secondary", self.open_arpa_repo),
+        ]:
+            btn = ttkb.Button(btn_row, text=text, bootstyle=bootstyle, command=cmd, padding=(8, 2))
+            btn.pack(side=LEFT, padx=2)
 
         # ═══════════ 2. 控制栏 ═══════════
-        ctrl_bar = ttkb.Frame(wrapper, padding=(4, 1))
-        ctrl_bar.grid(row=1, column=0, sticky="ew", pady=(0, 2))
+        ctrl_bar = ttkb.Frame(wrapper, padding=(8, 6))
+        ctrl_bar.grid(row=1, column=0, sticky="ew", pady=(0, 6))
         ctrl_left = ttkb.Frame(ctrl_bar)
         ctrl_left.pack(side=LEFT, fill=X, expand=True)
-        ttkb.Label(ctrl_left, text="设备", font=(DEFAULT_FONT, 8, "bold"), bootstyle="secondary").pack(side=LEFT, padx=(0, 4))
-        self.combo_devices = ttkb.Combobox(ctrl_left, state="readonly", width=26, font=(DEFAULT_FONT, 9))
-        self.combo_devices.pack(side=LEFT, padx=(0, 4))
-        self.btn_scan = ttkb.Button(ctrl_left, text="🔄 刷新", bootstyle="outline-info",
-                                     command=self.refresh_devices, width=7, padding=(2, 0))
-        self.btn_scan.pack(side=LEFT, padx=(0, 6))
+        ttkb.Label(ctrl_left, text="📱 设备", font=(DEFAULT_FONT, 10, "bold"),
+                   bootstyle="secondary").pack(side=LEFT, padx=(0, 8))
+        self.combo_devices = ttkb.Combobox(ctrl_left, state="readonly", width=30, font=(DEFAULT_FONT, 10))
+        self.combo_devices.pack(side=LEFT, padx=(0, 8))
+        self.btn_scan = ttkb.Button(ctrl_left, text="🔄 刷新设备", bootstyle="outline-info",
+                                     command=self.refresh_devices, width=10, padding=(6, 3))
+        self.btn_scan.pack(side=LEFT, padx=(0, 12))
+        
+        # 控制按钮组
         ctrl_right = ttkb.Frame(ctrl_bar)
         ctrl_right.pack(side=RIGHT)
-        self.btn_main_start = ttkb.Button(ctrl_right, text="▶ 启动", bootstyle="success",
-                                           command=self.start_bot, width=8, padding=(2, 0))
-        self.btn_main_start.pack(side=LEFT, padx=1)
-        self.btn_main_stop = ttkb.Button(ctrl_right, text="■ 停止", bootstyle="danger", state="disabled",
-                                          command=self.stop_bot, width=6, padding=(2, 0))
-        self.btn_main_stop.pack(side=LEFT, padx=1)
+        self.btn_main_start = ttkb.Button(ctrl_right, text="▶  启 动", bootstyle="success",
+                                           command=self.start_bot, width=10, padding=(8, 5))
+        self.btn_main_start.pack(side=LEFT, padx=3)
+        self.btn_main_stop = ttkb.Button(ctrl_right, text="■  停 止", bootstyle="danger", state="disabled",
+                                          command=self.stop_bot, width=10, padding=(8, 5))
+        self.btn_main_stop.pack(side=LEFT, padx=3)
         ttkb.Button(ctrl_right, text="⚙ 设置", bootstyle="outline-secondary",
-                    command=self.open_settings_window, width=6, padding=(2, 0)).pack(side=LEFT, padx=1)
+                    command=self.open_settings_window, width=8, padding=(8, 5)).pack(side=LEFT, padx=3)
         ttkb.Button(ctrl_right, text="🪟 小窗", bootstyle="outline-warning",
-                    command=self.toggle_mode, width=5, padding=(2, 0)).pack(side=LEFT, padx=1)
+                    command=self.toggle_mode, width=8, padding=(8, 5)).pack(side=LEFT, padx=3)
         ttkb.Button(ctrl_right, text="➕", bootstyle="outline-primary",
-                    command=self.launch_new_instance, width=3, padding=(2, 0)).pack(side=LEFT, padx=1)
+                    command=self.launch_new_instance, width=3, padding=(8, 5)).pack(side=LEFT, padx=3)
 
-        # ═══════════ 3. 三栏主内容（左仪表盘 | 中终端 | 右菜单）═══════════
+        # ═══════════ 3. 三栏主内容 ═══════════
         content = ttkb.Frame(wrapper)
         content.grid(row=2, column=0, sticky="nsew")
-        content.grid_columnconfigure(0, weight=16)  # 左侧仪表盘 ~16%
-        content.grid_columnconfigure(1, weight=52)  # 中间终端 ~52%
-        content.grid_columnconfigure(2, weight=32)  # 右侧菜单 ~32%
+        content.grid_columnconfigure(0, weight=20)  # 左侧仪表盘 20%
+        content.grid_columnconfigure(1, weight=48)  # 中间终端 48%
+        content.grid_columnconfigure(2, weight=32)  # 右侧菜单 32%
         content.grid_rowconfigure(0, weight=1)
 
         # ── 左侧：卡片式仪表盘 ──
@@ -1711,85 +1879,130 @@ class Application(ttkb.Window):
     # ─── 子组件构建方法 ───────────────────────────────
 
     def _build_dashboard(self, parent):
-        """左侧卡片式仪表盘"""
+        """左侧仪表盘 — 安静专业的数据面板"""
+        c = self._clr
         parent.grid_rowconfigure(0, weight=1)
         parent.grid_columnconfigure(0, weight=1)
 
-        card = ttkb.Labelframe(parent, text=" 实时数据 ", padding=6, bootstyle="info", style="Card.TLabelframe")
+        card = ttkb.Labelframe(parent, text=" 实时数据 ", padding=(10, 12),
+                                bootstyle="primary", style="Card.TLabelframe")
         card.grid(row=0, column=0, sticky="nsew")
-        card.grid_columnconfigure(0, weight=1)
+        for col_i in range(2):
+            card.grid_columnconfigure(col_i, weight=1, uniform="dash_col")
 
-        # 运行时长 — 突出大字
+        # ── 运行时长 — 大字突出 ──
         dur_frame = ttkb.Frame(card)
-        dur_frame.grid(row=0, column=0, sticky="ew", pady=(0, 4))
-        ttkb.Label(dur_frame, text="⏱ 运行时长", font=(DEFAULT_FONT, 8), bootstyle="secondary").pack(side=LEFT)
+        dur_frame.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 10))
+        dur_frame.grid_columnconfigure(0, weight=1)
+        ttkb.Label(dur_frame, text="⏱ 运行时长", font=(DEFAULT_FONT, 9),
+                   foreground=c["text_sec"]).pack(side=LEFT)
         ttkb.Label(dur_frame, textvariable=self.var_runtime_duration,
-                   font=(MONO_FONT, 14, "bold"), bootstyle="primary").pack(side=RIGHT)
+                   font=(MONO_FONT, 22, "bold"), foreground=c["primary"]).pack(side=RIGHT)
+        
+        ttkb.Separator(card, bootstyle="secondary").grid(
+            row=1, column=0, columnspan=2, sticky="ew", pady=(0, 8))
 
-        ttkb.Separator(card, bootstyle="info").grid(row=1, column=0, sticky="ew", pady=2)
-
-        # 数据行 — 紧凑布局
-        rows = [
-            ("🛬 进场",  self.var_approach,        "架次"),
-            ("🛫 离场",  self.var_depart,          "架次"),
-            ("🅿️ 地勤",  self.var_stand_summary,   "架次/人次"),
-            ("📦 总操作", self.var_total_ops,       ""),
-            ("⚡ 效率",   self.var_cycle_efficiency, ""),
-            ("⏳ 平均",   self.var_avg_cycle_time,   ""),
+        # ── 指标卡片 (2×3 网格) — 去发光，用微妙边框 + 纯色侧条 ──
+        metric_colors = {
+            "approach": c["primary"], "depart": c["success"],
+            "stand": c["warning"], "ops": c["danger"],
+            "efficiency": c["info"], "cycle": c["text_sec"],
+        }
+        metrics = [
+            ("🛬 进场飞机", self.var_approach, "架次",     metric_colors["approach"]),
+            ("🛫 离场飞机", self.var_depart, "架次",     metric_colors["depart"]),
+            ("🅿️ 分配地勤", self.var_stand_summary, "",  metric_colors["stand"]),
+            ("📦 累计操作", self.var_total_ops, "",       metric_colors["ops"]),
+            ("⚡ 运行效率", self.var_cycle_efficiency, "", metric_colors["efficiency"]),
+            ("⏳ 平均周期", self.var_avg_cycle_time, "",  metric_colors["cycle"]),
         ]
-        for idx, (label, var, unit) in enumerate(rows):
-            r = ttkb.Frame(card)
-            r.grid(row=2+idx, column=0, sticky="ew", pady=1)
-            ttkb.Label(r, text=label, font=(DEFAULT_FONT, 8), bootstyle="secondary").pack(side=LEFT)
-            vf = ttkb.Frame(r)
-            vf.pack(side=RIGHT)
-            ttkb.Label(vf, textvariable=var, font=(DEFAULT_FONT, 8, "bold")).pack(side=LEFT, padx=(0, 2))
+        for idx, (icon_label, var, unit, accent) in enumerate(metrics):
+            row = 2 + idx // 2
+            col = idx % 2
+            # 指标卡片 — 左边色条 + 微妙边框
+            card_bg = c["elevated"] if self._theme_is_dark else c["surface"]
+            mf = tk.Frame(card, bg=card_bg, bd=0, highlightthickness=0)
+            mf.grid(row=row, column=col, sticky="nsew", padx=2, pady=3)
+            mf.grid_columnconfigure(1, weight=1)
+            # 左侧彩色指示条
+            accent_bar = tk.Frame(mf, bg=accent, width=3, bd=0)
+            accent_bar.grid(row=0, column=0, rowspan=2, sticky="ns")
+            # 标签行
+            ttkb.Label(mf, text=icon_label, font=(DEFAULT_FONT, 9),
+                       foreground=c["text_sec"], background=card_bg).grid(
+                row=0, column=1, sticky="w", padx=(8, 8), pady=(8, 2))
+            # 数值行
+            val_frame = tk.Frame(mf, bg=card_bg)
+            val_frame.grid(row=1, column=1, sticky="ew", padx=(8, 8), pady=(0, 6))
+            ttkb.Label(val_frame, textvariable=var, font=(MONO_FONT, 13, "bold"),
+                       foreground=accent, background=card_bg).pack(side=LEFT)
             if unit:
-                ttkb.Label(vf, text=unit, font=(DEFAULT_FONT, 7, "bold"), bootstyle="secondary").pack(side=LEFT)
+                ttkb.Label(val_frame, text=f" {unit}", font=(DEFAULT_FONT, 8),
+                           foreground=c["muted"], background=card_bg).pack(side=LEFT, padx=(2, 0))
 
-        # 底部状态行
-        row_idx = 2 + len(rows)
-        ttkb.Separator(card, bootstyle="info").grid(row=row_idx, column=0, sticky="ew", pady=2)
-        row_idx += 1
-        for label, var in [
-            ("🗼 塔台", self.var_tower_status),
-            ("📊 来源", self.var_stats_source),
-        ]:
-            r = ttkb.Frame(card)
-            r.grid(row=row_idx, column=0, sticky="ew", pady=1)
-            row_idx += 1
-            ttkb.Label(r, text=label, font=(DEFAULT_FONT, 7), bootstyle="secondary").pack(side=LEFT)
-            ttkb.Label(r, textvariable=var, font=(DEFAULT_FONT, 7, "bold"), bootstyle="inverse-info").pack(side=RIGHT)
+        # ── 底部状态行 ──
+        sep_row = 2 + (len(metrics) + 1) // 2
+        ttkb.Separator(card, bootstyle="secondary").grid(
+            row=sep_row, column=0, columnspan=2, sticky="ew", pady=(6, 6))
+
+        bottom_data = [
+            ("🗼 塔台状态", self.var_tower_status, c["info"]),
+            ("📊 数据来源", self.var_stats_source, c["primary"]),
+        ]
+        for i, (icon, var, accent) in enumerate(bottom_data):
+            row = sep_row + 1 + i
+            bot_bg = c["elevated"] if self._theme_is_dark else c["surface"]
+            mf = tk.Frame(card, bg=bot_bg, bd=0, highlightthickness=0)
+            mf.grid(row=row, column=0, columnspan=2, sticky="ew", padx=2, pady=1)
+            ttkb.Label(mf, text=icon, font=(DEFAULT_FONT, 8),
+                       foreground=c["text_sec"], background=bot_bg).pack(side=LEFT, padx=8, pady=4)
+            ttkb.Label(mf, textvariable=var, font=(DEFAULT_FONT, 8, "bold"),
+                       foreground=accent, background=bot_bg).pack(side=RIGHT, padx=8, pady=4)
 
     def _build_center_terminal(self, parent):
-        """中间：终端（玻璃拟态悬浮控制台，85% 宽度居中）"""
+        """中间：深色终端（霓虹暗色控制台）"""
+        c = self._clr
         parent.grid_rowconfigure(0, weight=1)
         parent.grid_columnconfigure(0, weight=1)
 
-        # 外层占位 frame 实现 85% 宽度居中
         spacer = ttkb.Frame(parent)
         spacer.grid(row=0, column=0, sticky="nsew")
-        spacer.grid_columnconfigure(0, weight=8, uniform="cterm")   # 左留白
-        spacer.grid_columnconfigure(1, weight=85, uniform="cterm")  # 实际终端
-        spacer.grid_columnconfigure(2, weight=7, uniform="cterm")   # 右留白
+        spacer.grid_columnconfigure(0, weight=5, uniform="cterm")
+        spacer.grid_columnconfigure(1, weight=90, uniform="cterm")
+        spacer.grid_columnconfigure(2, weight=5, uniform="cterm")
         spacer.grid_rowconfigure(0, weight=1)
 
-        console = ttkb.Labelframe(spacer, text=" 实时终端输出 ", padding=4,
-                                   bootstyle="info", style="Glass.TLabelframe")
+        console = ttkb.Labelframe(spacer, text=" 终端输出 ",
+                                   padding=(0, 0), bootstyle="primary", style="Card.TLabelframe")
         console.grid(row=0, column=1, sticky="nsew")
         console.grid_rowconfigure(0, weight=1)
         console.grid_columnconfigure(0, weight=1)
 
+        terminal_bg = c["terminal_bg"]
+        terminal_fg = c["terminal_fg"]
+        
         self.txt_main_log = ScrolledText(console, state="disabled",
-            font=(MONO_FONT, 9), bg="#f8fafc", fg="#1e293b",
-            relief="flat", insertbackground="#3b6e9c",
-            selectbackground="#d6e4f0", selectforeground="#1e293b",
-            borderwidth=0, highlightthickness=0)
+            font=(MONO_FONT, 10), bg=terminal_bg, fg=terminal_fg,
+            relief="flat", insertbackground=c["primary"],
+            selectbackground=c["border"], selectforeground=c["primary"],
+            borderwidth=0, highlightthickness=0, padx=12, pady=8)
         self.txt_main_log.grid(row=0, column=0, sticky="nsew")
         self.redirector.add_widget(self.txt_main_log)
+        
+        # 终端底部状态栏
+        status_bar_bg = c["bg_deep"] if self._theme_is_dark else c["bg_deep"]
+        status_bar = tk.Frame(console, bg=status_bar_bg, height=20)
+        status_bar.grid(row=1, column=0, sticky="ew")
+        status_bar.grid_propagate(False)
+        ttkb.Label(status_bar, text="  OUTPUT", font=(MONO_FONT, 8),
+                   foreground=c["text_sec"], background=status_bar_bg).pack(side=LEFT, padx=10)
+        ttkb.Label(status_bar, textvariable=self.var_system_status,
+                   font=(MONO_FONT, 8), foreground=c["muted"],
+                   background=status_bar_bg).pack(side=RIGHT, padx=10)
 
     def _build_right_tabs(self, parent):
-        """右侧：五个功能标签页（紧凑布局）"""
+        """右侧：五个功能标签页（游戏化视觉层级）"""
+        c = self._clr
         parent.grid_rowconfigure(0, weight=1)
         parent.grid_columnconfigure(0, weight=1)
 
@@ -1799,93 +2012,112 @@ class Application(ttkb.Window):
         # ── 辅助函数 ──
         def _toggle(parent, text, var, tip):
             r = ttkb.Frame(parent)
-            r.pack(fill=X, pady=2)
+            r.pack(fill=X, pady=3)
             cb = ttkb.Checkbutton(r, text=text, variable=var, bootstyle="success-round-toggle")
             cb.pack(side=LEFT)
             cb.configure(command=lambda t=text, v=var: self._toggle_functional_switch(t, v))
-            self.create_info_icon(r, tip).pack(side=LEFT, padx=4)
+            if tip:
+                self.create_info_icon(r, tip).pack(side=LEFT, padx=5)
 
-        def _entry_row(parent, label_text, var, btn_text, btn_cmd, tip, width=5):
+        def _entry_row(parent, label_text, var, btn_text, btn_cmd, tip, width=6):
             r = ttkb.Frame(parent)
-            r.pack(fill=X, pady=2)
-            ttkb.Label(r, text=label_text, font=(DEFAULT_FONT, 8)).pack(side=LEFT)
-            ttkb.Entry(r, textvariable=var, width=width, font=(DEFAULT_FONT, 9)).pack(side=LEFT, padx=3)
+            r.pack(fill=X, pady=3)
+            ttkb.Label(r, text=label_text, font=(DEFAULT_FONT, 9)).pack(side=LEFT)
+            ttkb.Entry(r, textvariable=var, width=width, font=(DEFAULT_FONT, 10)).pack(side=LEFT, padx=4)
             ttkb.Button(r, text=btn_text, bootstyle="outline-primary", command=btn_cmd,
-                        padding=(4, 0)).pack(side=LEFT, padx=3)
-            self.create_info_icon(r, tip).pack(side=LEFT, padx=3)
+                        padding=(5, 1)).pack(side=LEFT, padx=3)
+            if tip:
+                self.create_info_icon(r, tip).pack(side=LEFT, padx=4)
 
         def _section_label(parent, text, color="primary"):
-            ttkb.Label(parent, text=text, font=(DEFAULT_FONT, 9, "bold"),
-                       bootstyle=color).pack(anchor="w", pady=(2, 3))
+            lbl = ttkb.Label(parent, text=text, font=(DEFAULT_FONT, 10, "bold"),
+                             bootstyle=color)
+            lbl.pack(anchor="w", pady=(12, 4))
+            sep = ttkb.Frame(parent, height=2)
+            sep.pack(fill=X, pady=(0, 6))
+            sep.configure(style=f"{color}.TFrame" if color in ("primary","info","success","warning","danger") else "")
 
         # [Tab 1] 游戏策略
-        tab1 = ttkb.Frame(notebook, padding=6)
+        tab1 = ttkb.Frame(notebook, padding=(10, 8))
         notebook.add(tab1, text=" 策略 ")
-        _toggle(tab1, "✈️ 自动领取地勤人员", self.var_bonus_staff, "地勤不足时尝试领取免费地勤")
-        _toggle(tab1, "🚗 自动购买地勤车辆", self.var_vehicle_buy, "地勤车辆不足时自动购买")
-        _toggle(tab1, "💰 延误飞机自动贿赂", self.var_delay_bribe, "处理延误飞机时自动贿赂代理")
-        _toggle(tab1, "🎲 任务处理顺序随机化", self.var_random_task, "随机打乱任务顺序")
-        _toggle(tab1, "🔒 塔台全开仅停机位", self.var_tower_open_stand_only, "塔台全部开启时只处理停机位")
-        _toggle(tab1, "⚙️ 塔台关闭时处理全部任务", self.var_cancel_stand_filter, "塔台关闭时取消停机位过滤")
+        _toggle(tab1, "✈️ 自动领取地勤人员", self.var_bonus_staff,
+                "地勤不足时尝试领取免费地勤")
+        _toggle(tab1, "🚗 自动购买地勤车辆", self.var_vehicle_buy,
+                "地勤车辆不足时自动购买")
+        _toggle(tab1, "💰 延误飞机自动贿赂", self.var_delay_bribe,
+                "处理延误飞机时自动贿赂代理")
+        _toggle(tab1, "🎲 任务处理顺序随机化", self.var_random_task,
+                "随机打乱任务顺序，模拟人工操作")
+        _toggle(tab1, "🔒 塔台全开仅停机位", self.var_tower_open_stand_only,
+                "塔台全部开启时只处理停机位任务")
+        _toggle(tab1, "⚙️ 塔台关闭时处理全部任务", self.var_cancel_stand_filter,
+                "塔台关闭时不过滤，处理所有待办任务")
 
-        # ── 右侧类别栏处理 ──
-        ttkb.Separator(tab1, bootstyle="info").pack(fill=X, pady=5)
-        _section_label(tab1, "📂 右侧类别栏选择")
-        category_frame = ttkb.Frame(tab1)
-        category_frame.pack(fill=X)
-        ttkb.Label(category_frame, text="按类别处理飞机（多选）：", font=(DEFAULT_FONT, 8),
-                   bootstyle="secondary").pack(anchor="w", pady=(0, 4))
+        # ── 类别栏选择 ──
+        _section_label(tab1, "📂 右侧类别栏选择", "info")
+        ttkb.Label(tab1, text="按类别处理飞机（多选至少2个才启轮换）：",
+                   font=(DEFAULT_FONT, 8),
+                   foreground=c["text_sec"]).pack(anchor="w", pady=(0, 4))
         for cat in SIDEBAR_CATEGORIES:
             key = cat["key"]
             var = self.var_category_selection[key]
             r = ttkb.Frame(tab1)
-            r.pack(fill=X, pady=1)
-            cb = ttkb.Checkbutton(r, text=cat["label"], variable=var, bootstyle="success-round-toggle")
+            r.pack(fill=X, pady=2)
+            cb = ttkb.Checkbutton(r, text=f"  {cat['label']}", variable=var,
+                                  bootstyle="info-round-toggle")
             cb.pack(side=LEFT)
             cb.configure(command=lambda v=var: self._on_category_toggle())
-            self.create_info_icon(r, cat.get("tip", "")).pack(side=LEFT, padx=4)
-        ttkb.Separator(tab1, bootstyle="secondary").pack(fill=X, pady=4)
+            if cat.get("tip"):
+                self.create_info_icon(r, cat["tip"]).pack(side=LEFT, padx=4)
         _toggle(tab1, "🔄 启用类别轮换处理", self.var_category_processing,
-                "开启后脚本按时间间隔轮换已选的类别\n每个类别处理一段时间后自动切到下一个\n当前类别在右侧类别栏按钮亮起")
+                "开启后按时间间隔轮换已选类别\n当前类别在右侧栏按钮高亮显示")
 
         # [Tab 2] 挂机与防检测
-        tab2 = ttkb.Frame(notebook, padding=6)
+        tab2 = ttkb.Frame(notebook, padding=(10, 8))
         notebook.add(tab2, text=" 挂机 ")
         _section_label(tab2, "塔台自动延时")
-        _entry_row(tab2, "延时控制器：", self.var_delay_count, "应用", self.on_confirm_tower_delay, "0=关闭，最大144")
-        ttkb.Separator(tab2, bootstyle="info").pack(fill=X, pady=5)
-        _section_label(tab2, "挂机模式")
-        _toggle(tab2, "🛩️ 不起飞模式", self.var_no_takeoff_mode, "只接机+停机位处理，不处理起飞\n4号塔台单开时自动在待降落/停机位间轮切")
-        _toggle(tab2, "🔄 独立小退控制", self.var_no_takeoff_logout_enabled, "独立按固定间隔执行重进释放内存")
+        _entry_row(tab2, "延时控制器：", self.var_delay_count,
+                   "应用", self.on_confirm_tower_delay, "0=关闭延时，最大144次")
+        _section_label(tab2, "挂机策略", "info")
+        _toggle(tab2, "🛩️ 不起飞模式", self.var_no_takeoff_mode,
+                "只处理降落+停机位，不处理起飞\n4号塔台单开时自动在待降落/停机位间轮切")
+        _toggle(tab2, "🔄 独立小退控制", self.var_no_takeoff_logout_enabled,
+                "独立按固定间隔执行重进释放内存")
 
         # [Tab 3] 高级与性能
-        tab3 = ttkb.Frame(notebook, padding=6)
+        tab3 = ttkb.Frame(notebook, padding=(10, 8))
         notebook.add(tab3, text=" 性能 ")
-        _section_label(tab3, "识别策略 (谨慎使用)", "danger")
-        _toggle(tab3, "⚡ 跳过二次校验", self.var_speed_mode, "跳过动画二次校验（温和提速）")
-        _toggle(tab3, "🔥 跳过地勤验证", self.var_skip_staff, "跳过地勤分配验证（激进提速）")
-        ttkb.Separator(tab3, bootstyle="info").pack(fill=X, pady=5)
-        _section_label(tab3, "自动化守护")
-        _toggle(tab3, "🛡️ 启用防卡死自动恢复", self.var_anti_stuck_enabled, "自动侦测并尝试解除界面卡死")
-        _entry_row(tab3, "卡死容忍阈值：", self.var_anti_stuck_threshold, "应用", self.on_confirm_anti_stuck, "3-20，越小触发越频繁")
+        _section_label(tab3, "识别策略（谨慎使用）", "danger")
+        _toggle(tab3, "⚡ 跳过二次校验", self.var_speed_mode,
+                "跳过动画二次校验以温和提速")
+        _toggle(tab3, "🔥 跳过地勤验证", self.var_skip_staff,
+                "跳过地勤分配验证以激进提速")
+        _section_label(tab3, "自动化守护", "info")
+        _toggle(tab3, "🛡️ 启用防卡死自动恢复", self.var_anti_stuck_enabled,
+                "自动侦测并尝试解除界面卡死状态")
+        _entry_row(tab3, "卡死容忍阈值：", self.var_anti_stuck_threshold,
+                   "应用", self.on_confirm_anti_stuck,
+                   "3-20，值越小触发越频繁")
 
         # [Tab 4] 通知与统计
-        tab4 = ttkb.Frame(notebook, padding=6)
+        tab4 = ttkb.Frame(notebook, padding=(10, 8))
         notebook.add(tab4, text=" 通知 ")
         _section_label(tab4, "手机推送")
-        _toggle(tab4, "📱 手机报错提醒", self.var_notify_enabled, "严重错误时推送通知")
-        _toggle(tab4, "📊 定时统计汇报", self.var_stats_report_enabled, "按周期推送统计报表")
-        _toggle(tab4, "💰 金币领取提醒", self.var_gold_remind_enabled, "每天8:00/12:00/24:00推送每日金币，每周一早8点推送周金币")
-        ttkb.Separator(tab4, bootstyle="info").pack(fill=X, pady=5)
-        _section_label(tab4, "公网 ADB 连接")
+        _toggle(tab4, "📱 手机报错提醒", self.var_notify_enabled,
+                "严重错误时自动推送通知到手机")
+        _toggle(tab4, "📊 定时统计汇报", self.var_stats_report_enabled,
+                "按设定周期定时推送运行统计报表")
+        _toggle(tab4, "💰 金币领取提醒", self.var_gold_remind_enabled,
+                "8:00/12:00/24:00 推每日金币，周一8点推周金币")
+        _section_label(tab4, "公网 ADB 连接", "info")
         adb_frame = ttkb.Frame(tab4)
-        adb_frame.pack(fill=X)
-        ttkb.Label(adb_frame, text="地址：", font=(DEFAULT_FONT, 8)).pack(side=LEFT)
-        ttkb.Entry(adb_frame, textvariable=self.var_public_adb_targets, width=36,
-                   font=(DEFAULT_FONT, 8)).pack(side=LEFT, padx=3, fill=X, expand=True)
+        adb_frame.pack(fill=X, pady=3)
+        ttkb.Label(adb_frame, text="地址：", font=(DEFAULT_FONT, 9)).pack(side=LEFT)
+        ttkb.Entry(adb_frame, textvariable=self.var_public_adb_targets, width=34,
+                   font=(DEFAULT_FONT, 9)).pack(side=LEFT, padx=4, fill=X, expand=True)
 
         # [Tab 5] 自愿资助
-        tab5 = ttkb.Frame(notebook, padding=6)
+        tab5 = ttkb.Frame(notebook, padding=(10, 8))
         notebook.add(tab5, text=" ❤️ ")
         self._setup_donate_tab(tab5)
 
@@ -1909,7 +2141,7 @@ class Application(ttkb.Window):
             self.btn_scan.configure(text="智能扫描", state="normal")
             if not (getattr(self, 'bot', None) and self.bot.running):
                 for btn in [self.btn_main_start, self.btn_mini_start]:
-                    btn.configure(state="normal", text="▶ 启动脚本")
+                    btn.configure(state="normal", text="▶ 启动")
             self.combo_devices['values'] = devs
             if devs:
                 self.combo_devices.current(0)
@@ -2115,7 +2347,7 @@ class Application(ttkb.Window):
         if not (getattr(self, 'bot', None) and self.bot.running):
             for btn in [self.btn_main_start, self.btn_mini_start]:
                 try:
-                    btn.configure(state="normal", text="▶ 启动脚本")
+                    btn.configure(state="normal", text="▶ 启动")
                 except Exception:
                     pass
 
@@ -2266,38 +2498,42 @@ class Application(ttkb.Window):
             return ImageTk.PhotoImage(resized)
 
     def _setup_donate_tab(self, parent):
-        """在主界面「自愿资助」tab 中嵌入收款码（子标签页切换微信/支付宝）。"""
+        """在主界面「资助」tab 中嵌入收款码。"""
+        c = self._clr
         header = ttkb.Frame(parent)
-        header.pack(fill=X, pady=(0, 8))
-        ttkb.Label(header, text="自愿资助作者买杯咖啡", font=(DEFAULT_FONT, 13, "bold"), bootstyle="primary").pack(side=LEFT)
-        ttkb.Label(header, text="完全自愿，无任何功能限制；感谢支持项目持续维护。",
-                   bootstyle="secondary").pack(side=LEFT, padx=(12, 0))
+        header.pack(fill=X, pady=(0, 10))
+        ttkb.Label(header, text="☕ 自愿资助作者", font=(DEFAULT_FONT, 14, "bold"),
+                   foreground=c["primary"]).pack(side=LEFT)
+        ttkb.Label(header, text="完全自愿，无任何功能限制",
+                   font=(DEFAULT_FONT, 9),
+                   foreground=c["text_sec"]).pack(side=LEFT, padx=(12, 0))
 
-        # 子标签页：微信支付 / 支付宝
-        sub_nb = ttkb.Notebook(parent, bootstyle="info")
+        sub_nb = ttkb.Notebook(parent, bootstyle="primary")
         sub_nb.pack(fill=BOTH, expand=True)
 
-        self._donate_tab_refs = []  # 保持图片引用不被 GC
+        self._donate_tab_refs = []
         for pay_type in ("微信支付", "支付宝"):
-            sub_frame = ttkb.Frame(sub_nb, padding=10)
+            sub_frame = ttkb.Frame(sub_nb, padding=12)
             sub_nb.add(sub_frame, text=f"  {pay_type}  ")
 
             abs_path, expected_rel = self._resolve_donate_image(pay_type)
             if abs_path:
                 try:
-                    photo = self._load_donate_photo(abs_path, max_width=260, max_height=400)
+                    photo = self._load_donate_photo(abs_path, max_width=250, max_height=380)
                     lbl = ttkb.Label(sub_frame, image=photo)
                     lbl.image = photo
                     lbl.pack(fill=BOTH, expand=True)
                     self._donate_tab_refs.append(photo)
                     ttkb.Label(sub_frame, text=os.path.basename(abs_path),
-                               bootstyle="secondary", font=(DEFAULT_FONT, 8)).pack(pady=(6, 0))
+                               font=(DEFAULT_FONT, 8),
+                               foreground=c["muted"]).pack(pady=(6, 0))
                 except Exception as exc:
                     ttkb.Label(sub_frame, text=f"图片加载失败: {exc}",
                                bootstyle="danger").pack(fill=BOTH, expand=True)
             else:
-                ttkb.Label(sub_frame, text=f"未找到收款码图片\n请将图片放到: {expected_rel}",
-                           bootstyle="warning", justify="center").pack(fill=BOTH, expand=True)
+                ttkb.Label(sub_frame,
+                    text=f"未找到收款码图片\n请将图片放到: {expected_rel}",
+                    bootstyle="warning", justify="center").pack(fill=BOTH, expand=True)
 
     def open_donate_window(self):
         donate_win = getattr(self, "donate_win", None)
@@ -2306,23 +2542,32 @@ class Application(ttkb.Window):
             donate_win.focus_force()
             return
 
-        parent = self.settings_win if hasattr(self, "settings_win") and self.settings_win.winfo_exists() else self
+        parent = self
+        if hasattr(self, "settings_win"):
+            try:
+                if self.settings_win.winfo_exists():
+                    parent = self.settings_win
+            except tk.TclError:
+                pass
         win = ttkb.Toplevel(self)
         self.donate_win = win
-        win.title("自愿资助")
+        win.title("❤️ 自愿资助")
         win.geometry("860x760")
         win.minsize(760, 620)
+        c = self._clr
+        win.configure(bg=c["surface"])
         win.transient(parent)
         win.grab_set()
 
-        outer = ttkb.Frame(win, padding=16)
+        outer = ttkb.Frame(win, padding=24)
         outer.pack(fill=BOTH, expand=True)
-        ttkb.Label(outer, text="自愿资助作者买杯咖啡", font=(DEFAULT_FONT, 16, "bold"), bootstyle="primary").pack(anchor="w")
-        ttkb.Label(
-            outer,
-            text="完全自愿，无任何功能限制；感谢支持项目持续维护。",
-            bootstyle="secondary",
-        ).pack(anchor="w", pady=(4, 12))
+        ttkb.Label(outer, text="☕ 自愿资助作者", font=(DEFAULT_FONT, 20, "bold"),
+                   foreground=c["primary"]).pack(anchor="w")
+        ttkb.Label(outer,
+            text="完全自愿，无任何功能限制 — 您的支持帮助我们持续维护这个项目",
+            font=(DEFAULT_FONT, 10),
+            foreground=c["text_sec"],
+        ).pack(anchor="w", pady=(6, 20))
 
         cards = ttkb.Frame(outer)
         cards.pack(fill=BOTH, expand=True)
@@ -2331,8 +2576,9 @@ class Application(ttkb.Window):
 
         self._donate_image_refs = []
         for idx, pay_type in enumerate(("微信支付", "支付宝")):
-            card = ttkb.Labelframe(cards, text=pay_type, padding=10, bootstyle="info")
-            card.grid(row=0, column=idx, sticky="nsew", padx=(0, 8) if idx == 0 else (8, 0))
+            card = ttkb.Labelframe(cards, text=f"  {pay_type}  ", padding=14,
+                                    bootstyle="primary", style="Card.TLabelframe")
+            card.grid(row=0, column=idx, sticky="nsew", padx=(0, 10) if idx == 0 else (10, 0))
 
             abs_path, expected_rel = self._resolve_donate_image(pay_type)
             if abs_path:
@@ -2342,29 +2588,29 @@ class Application(ttkb.Window):
                     img_label.image = photo
                     img_label.pack(fill=BOTH, expand=True)
                     self._donate_image_refs.append(photo)
-                    ttkb.Label(card, text=f"已加载: {os.path.basename(abs_path)}", bootstyle="secondary").pack(anchor="w", pady=(8, 0))
+                    ttkb.Label(card,
+                        text=f"已加载: {os.path.basename(abs_path)}",
+                        font=(DEFAULT_FONT, 8),
+                        foreground=c["muted"]).pack(anchor="w", pady=(8, 0))
                 except Exception as exc:
-                    ttkb.Label(card, text=f"图片加载失败: {exc}", bootstyle="danger").pack(anchor="w", pady=(8, 0))
+                    ttkb.Label(card, text=f"图片加载失败: {exc}",
+                               bootstyle="danger").pack(anchor="w", pady=(8, 0))
             else:
-                ttkb.Label(
-                    card,
-                    text=(
-                        "未找到收款码图片。\n"
-                        f"请将图片放到: {expected_rel}"
-                    ),
-                    justify="left",
-                    bootstyle="warning",
+                ttkb.Label(card,
+                    text=f"未找到收款码图片。\n请将图片放到: {expected_rel}",
+                    justify="left", bootstyle="warning",
                 ).pack(fill=BOTH, expand=True)
 
-        ttkb.Label(
-            outer,
-            text="提示: 高级设置中点击“自愿资助”按钮时才会显示本窗口。",
-            bootstyle="secondary",
-        ).pack(anchor="w", pady=(12, 8))
+        ttkb.Label(outer,
+            text="提示: 高级设置中点击「自愿资助」按钮时才会显示本窗口。",
+            font=(DEFAULT_FONT, 9),
+            foreground=c["text_sec"],
+        ).pack(anchor="w", pady=(16, 10))
 
         action_row = ttkb.Frame(outer)
         action_row.pack(fill=X)
-        ttkb.Button(action_row, text="关闭", bootstyle="secondary-outline", command=win.destroy, width=10).pack(side=RIGHT)
+        ttkb.Button(action_row, text="关闭", bootstyle="secondary-outline",
+                    command=win.destroy, width=10).pack(side=RIGHT)
 
         win.after(50, lambda: self._center_toplevel_on_parent(win))
 
@@ -2437,7 +2683,7 @@ class Application(ttkb.Window):
 2. 在线验证仅在后台静默执行版本检测，不会阻断任何操作。
 3. 如检测到新版本会弹窗提示，不会自动下载或覆盖。
 
-【已知问题和缺陷】【已知问题和缺陷】
+【已知问题和缺陷】
 1. 脚本本身支持多开，但测试并不充分，多开很可能存在未知问题。若脚本正在运行时，开启（或关闭）第二个脚本或类似软件（如ALAS），会导致脚本运行中断，请注意，尝试停止后再重新运行。
 2. 脚本很有可能被杀毒软件误杀，如您遇到类似问题，请关闭杀毒软件。
 3. 脚本处理[需要维护]的飞机时，暂无法应对绿币不足的情况，请您根据机队规模，预留充足的绿币。
@@ -2445,19 +2691,6 @@ class Application(ttkb.Window):
 5. 地勤不足时，脚本只会在可用地勤数量发生变化时尝试恢复分配，暂无法根据不同机型的需求智能分配。
 6. 脚本无法设置起降飞机的比例，如您需要处理的飞机很多，请配合塔台使用。
 """
-
-    def _show_help_badge(self):
-        if self._help_badge is not None:
-            return
-        parent = self.btn_help.master
-        try:
-            bg = ttkb.Style().lookup("TFrame", "background") or "#ffffff"
-        except Exception:
-            bg = "#ffffff"
-        dot = tk.Canvas(parent, width=10, height=10, highlightthickness=0, bd=0, bg=bg)
-        dot.create_oval(1, 1, 9, 9, fill="#e63946", outline="#e63946")
-        dot.place(relx=1.0, rely=0.0, anchor="ne", x=-2, y=2)
-        self._help_badge = dot
 
     def _hide_help_badge(self):
         if self._help_badge is not None:
@@ -2474,17 +2707,23 @@ class Application(ttkb.Window):
     def open_help_window(self):
         win = ttkb.Toplevel(self)
         win.title("使用说明")
-        win.geometry("920x820")
-        shell = ttkb.Frame(win, padding=16)
+        win.geometry("960x840")
+        c = self._clr
+        win.configure(bg=c["bg"])
+        shell = ttkb.Frame(win, padding=20)
         shell.pack(fill=BOTH, expand=True)
-        header = ttkb.Frame(shell, padding=(18, 16))
+        header = ttkb.Frame(shell, padding=(20, 18))
         header.pack(fill=X)
-        ttkb.Label(header, text="使用说明与网络方案", font=(DEFAULT_FONT, 16, "bold"), bootstyle="primary").pack(anchor="w")
-        ttkb.Label(header, text=f"版本 {LOCAL_VERSION} · 官方源 {OFFICIAL_REPO_NAME}", bootstyle="secondary").pack(anchor="w", pady=(4, 0))
-        container = ttkb.Labelframe(shell, text="离线帮助", padding=12, bootstyle="info")
-        container.pack(fill=BOTH, expand=True, pady=(14, 0))
-        text_area = tk.Text(container, font=(DEFAULT_FONT, 10), wrap="word", bg="#fcfbf7", fg="#333333",
-                            relief="flat")
+        ttkb.Label(header, text="📖 使用说明", font=(DEFAULT_FONT, 18, "bold"),
+                   foreground=c["primary"]).pack(anchor="w")
+        ttkb.Label(header, text=f"版本 {LOCAL_VERSION} · 官方源 {OFFICIAL_REPO_NAME}",
+                   font=(DEFAULT_FONT, 9),
+                   foreground=c["text_sec"]).pack(anchor="w", pady=(4, 0))
+        container = ttkb.Labelframe(shell, text=" 帮助文档 ", padding=14,
+                                     bootstyle="primary", style="Card.TLabelframe")
+        container.pack(fill=BOTH, expand=True, pady=(16, 0))
+        text_area = tk.Text(container, font=(DEFAULT_FONT, 10), wrap="word",
+                            bg=c["surface"], fg=c["text"], relief="flat")
         text_area.pack(side=LEFT, fill=BOTH, expand=True)
         scroll = ttkb.Scrollbar(container, command=text_area.yview)
         scroll.pack(side=RIGHT, fill=Y)
@@ -2546,8 +2785,10 @@ class Application(ttkb.Window):
             settings_win.grab_release()
 
         win = ttkb.Toplevel(self)
-        win.title("统计图表 (最近 30 天)")
-        win.geometry("780x760")
+        win.title("📊 统计图表 (最近 30 天)")
+        win.geometry("860x800")
+        c = self._clr
+        win.configure(bg=c["bg"])
         win.transient(self)
 
         def _on_chart_close():
@@ -2573,12 +2814,13 @@ class Application(ttkb.Window):
             all_dates.append(d.strftime("%Y-%m-%d"))
             d += timedelta(days=1)
 
-        titles = ["进场飞机 (架次)", "离场飞机 (架次)", "分配地勤 (架次)", "分配地勤 (人次)"]
-        colors = ["#2196F3", "#4CAF50", "#FF9800", "#E91E63"]
+        titles = ["🛬 进场飞机 (架次)", "🛫 离场飞机 (架次)", "🅿️ 分配地勤 (架次)", "👥 分配地勤 (人次)"]
+        c = self._clr
+        colors = [c["primary"], c["success"], c["warning"], c["danger"]]
         col_indices = [0, 1, 2, 3]
 
-        outer = ttkb.Frame(win)
-        outer.pack(fill=BOTH, expand=True, padx=10, pady=10)
+        outer = ttkb.Frame(win, padding=(12, 12))
+        outer.pack(fill=BOTH, expand=True)
 
         # 所有图表共享同一个 offset，默认显示最右侧（最新日期）
         shared_state = {"drawers": []}
@@ -2594,15 +2836,18 @@ class Application(ttkb.Window):
         win.after(50, lambda: self._center_toplevel_on_parent(win))
 
     def _draw_chart_panel(self, parent, title, labels, values, color, shared_state=None):
-        frame = ttkb.Labelframe(parent, text=title, padding=5)
-        frame.pack(fill=X, pady=4)
+        c = self._clr
+        frame = ttkb.Labelframe(parent, text=title, padding=10, bootstyle="primary",
+                                 style="Card.TLabelframe")
+        frame.pack(fill=X, pady=5)
 
-        cw, ch = 740, 140
-        margin_l, margin_r, margin_t, margin_b = 50, 15, 15, 25
+        cw, ch = 760, 150
+        margin_l, margin_r, margin_t, margin_b = 56, 20, 16, 28
         plot_w = cw - margin_l - margin_r
         plot_h = ch - margin_t - margin_b
 
-        canvas = tk.Canvas(frame, width=cw, height=ch, bg="white", highlightthickness=0)
+        canvas_bg = c["surface"]
+        canvas = tk.Canvas(frame, width=cw, height=ch, bg=canvas_bg, highlightthickness=0)
         canvas.pack()
 
         n = len(values)
@@ -2623,14 +2868,17 @@ class Application(ttkb.Window):
                     break
             v_max = step * y_ticks
 
-        canvas.create_line(margin_l, margin_t, margin_l, ch - margin_b, fill="#cccccc")
-        canvas.create_line(margin_l, ch - margin_b, cw - margin_r, ch - margin_b, fill="#cccccc")
+        grid_color = c["border"]
+        grid_dash_color = c["border"]
+        label_color = c["muted"]
+        canvas.create_line(margin_l, margin_t, margin_l, ch - margin_b, fill=grid_color)
+        canvas.create_line(margin_l, ch - margin_b, cw - margin_r, ch - margin_b, fill=grid_color)
 
         for i in range(y_ticks + 1):
             yv = int(step * i)
             yp = ch - margin_b - (yv / v_max) * plot_h
-            canvas.create_line(margin_l - 3, yp, cw - margin_r, yp, fill="#eeeeee", dash=(2, 4))
-            canvas.create_text(margin_l - 6, yp, text=str(yv), anchor="e", font=(MONO_FONT, 7), fill="#888888")
+            canvas.create_line(margin_l - 3, yp, cw - margin_r, yp, fill=grid_dash_color, dash=(2, 4))
+            canvas.create_text(margin_l - 6, yp, text=str(yv), anchor="e", font=(MONO_FONT, 7), fill=label_color)
 
         if n == 1:
             spacing = plot_w
@@ -2664,7 +2912,7 @@ class Application(ttkb.Window):
                 xp = margin_l + si * sp
                 if si % max(1, seg_n // 8) == 0 or si == seg_n - 1:
                     canvas.create_text(xp, ch - margin_b + 12, text=labels[gi],
-                                       font=(MONO_FONT, 7), fill="#888888", tags="plotdata")
+                                       font=(MONO_FONT, 7), fill=label_color, tags="plotdata")
 
             points = []
             for si, gi in enumerate(seg):
@@ -2683,7 +2931,8 @@ class Application(ttkb.Window):
                 canvas.create_line(x1, y1, x2, y2, fill=color, width=2, tags="plotdata")
 
             for xp, yp, v in points:
-                canvas.create_oval(xp - 3, yp - 3, xp + 3, yp + 3, fill=color, outline="white",
+                oval_outline = c["surface"]
+                canvas.create_oval(xp - 3, yp - 3, xp + 3, yp + 3, fill=color, outline=oval_outline,
                                    width=1, tags="plotdata")
                 if v > 0:
                     canvas.create_text(xp, yp - 10, text=str(v),
@@ -2755,17 +3004,26 @@ class Application(ttkb.Window):
         body = ttkb.Frame(win, padding=20)
         body.pack(fill=BOTH, expand=True)
 
-        header = ttkb.Frame(body, padding=(16, 14))
-        header.pack(fill=X, pady=(0, 12))
-        ttkb.Label(header, text="高级设置中心", font=(DEFAULT_FONT, 15, "bold"), bootstyle="primary").pack(anchor="w")
-        ttkb.Label(header, text="统一新版风格，保留设备、触控、防检测和在线校验相关配置。", bootstyle="secondary").pack(anchor="w", pady=(4, 0))
+        c = self._clr
+        header = ttkb.Frame(body, padding=(22, 18))
+        header.pack(fill=X, pady=(0, 18))
+        ttkb.Label(header, text="⚙ 高级设置中心", font=(DEFAULT_FONT, 20, "bold"),
+                   foreground=c["primary"]).pack(anchor="w")
+        ttkb.Label(header,
+            text="设备、触控、防检测与在线校验相关配置 — 修改后点击「保存设置」即可生效",
+            font=(DEFAULT_FONT, 10),
+            foreground=c["text_sec"]).pack(anchor="w", pady=(4, 0))
 
         top_action_row = ttkb.Frame(body)
-        top_action_row.pack(fill=X, pady=(0, 12))
+        top_action_row.pack(fill=X, pady=(0, 16))
 
-        online_frame = ttkb.Labelframe(body, text="在线验证", padding=12, bootstyle="success")
-        online_frame.pack(fill=X, pady=(0, 12))
-        ttkb.Label(online_frame, textvariable=self.var_online_detail, wraplength=470, justify="left", bootstyle="secondary").pack(anchor="w")
+        online_frame = ttkb.Labelframe(body, text=" 在线验证 ", padding=16,
+                                        bootstyle="primary", style="Card.TLabelframe")
+        online_frame.pack(fill=X, pady=(0, 14))
+        ttkb.Label(online_frame, textvariable=self.var_online_detail,
+                   wraplength=480, justify="left",
+                   font=(DEFAULT_FONT, 9),
+                   foreground=c["text_sec"]).pack(anchor="w")
         online_btn_row = ttkb.Frame(online_frame)
         online_btn_row.pack(fill=X, pady=(8, 0))
         ttkb.Button(online_btn_row, text="立即在线验证", bootstyle="success-outline", command=self.run_online_validation).pack(side=LEFT)
@@ -2911,7 +3169,7 @@ class Application(ttkb.Window):
             ttkb.Label(tab_notify_right, text=line, bootstyle="secondary", justify="left", wraplength=460).pack(anchor="w", pady=2)
 
         ttkb.Label(tab_device_left, text="手动连接", font=("bold")).pack(anchor="w")
-        f_manual = ttkb.Frame(tab_device_left);
+        f_manual = ttkb.Frame(tab_device_left)
         f_manual.pack(fill=X, pady=5)
         e_manual_ip = ttkb.Entry(f_manual)
         e_manual_ip.pack(side=LEFT, fill=X, expand=True, padx=(0, 5))
@@ -2992,7 +3250,7 @@ class Application(ttkb.Window):
 
         ttkb.Separator(tab_device_left).pack(fill=X, pady=10)
         ttkb.Label(tab_device_left, text="ADB 路径", font=("bold")).pack(anchor="w")
-        f_adb = ttkb.Frame(tab_device_left);
+        f_adb = ttkb.Frame(tab_device_left)
         f_adb.pack(fill=X, pady=5)
         e_adb = ttkb.Entry(f_adb)
         e_adb.pack(side=LEFT, fill=X, expand=True, padx=(0, 5))
@@ -3274,7 +3532,7 @@ class Application(ttkb.Window):
         ttkb.Separator(tab_runtime_right).pack(fill=X, pady=10)
         ttkb.Label(tab_runtime_right, text="防检测设置", font=("bold")).pack(anchor="w")
 
-        f_rnd = ttkb.Frame(tab_runtime_right);
+        f_rnd = ttkb.Frame(tab_runtime_right)
         f_rnd.pack(fill=X, pady=5)
         # 【颜色统一】随机任务选择 -> 绿色开关
         ttkb.Checkbutton(f_rnd, text="随机任务选择", variable=self.var_random_task,
@@ -3284,21 +3542,21 @@ class Application(ttkb.Window):
                               "开启后，脚本将在列表前3个任务中随机选择（80%概率），或从下方任务中随机选择（20%概率），以模拟真实操作。").pack(
             side=LEFT, padx=5)
 
-        f_s = ttkb.Frame(tab_runtime_right);
+        f_s = ttkb.Frame(tab_runtime_right)
         f_s.pack(fill=X, pady=5)
         ttkb.Label(f_s, text="地勤分配—拖动随机耗时(ms):").pack(side=LEFT)
-        e_min = ttkb.Entry(f_s, width=5);
+        e_min = ttkb.Entry(f_s, width=5)
         e_min.pack(side=LEFT, padx=5)
         e_min.insert(0, str(self.config.get("slide_min", 250)))
         ttkb.Label(f_s, text="-").pack(side=LEFT)
-        e_max = ttkb.Entry(f_s, width=5);
+        e_max = ttkb.Entry(f_s, width=5)
         e_max.pack(side=LEFT, padx=5)
         e_max.insert(0, str(self.config.get("slide_max", 500)))
         self.create_info_icon(f_s,
                               "控制地勤分配界面中滑块操作的持续时间。\n建议范围 200-500ms。\n若最低值小于200，可能出现地勤分配时滑动不到位的情况").pack(
             side=LEFT, padx=5)
 
-        f_t = ttkb.Frame(tab_runtime_right);
+        f_t = ttkb.Frame(tab_runtime_right)
         f_t.pack(fill=X, pady=5)
         ttkb.Label(f_t, text="随机思考时间:").pack(side=LEFT)
         c_th = ttkb.Combobox(f_t, values=("关闭", "短(0.1-0.4)", "中(0.3-1.0)", "长(0.8-2.0)"), state="readonly")
@@ -3334,14 +3592,14 @@ class Application(ttkb.Window):
             sshot = scshot_method.get().strip().lower()
             self.config["screenshot_method"] = sshot if sshot in ("adb", "nemu_ipc", "uiautomator2", "droidcast_raw") else "nemu_ipc"
             try:
-                vm = int(e_min.get());
+                vm = int(e_min.get())
                 vx = int(e_max.get())
                 if vm < 100: vm = 100
                 if vx > 2000: vx = 2000
                 if vx < vm: vx = vm
-                self.config["slide_min"] = vm;
+                self.config["slide_min"] = vm
                 self.config["slide_max"] = vx
-            except:
+            except (ValueError, TypeError):
                 messagebox.showerror("错误", "输入整数", parent=win)
                 return
             self.config["thinking_mode"] = c_th.current()
@@ -3458,12 +3716,12 @@ class Application(ttkb.Window):
             self.sync_all_configs_to_bot(from_advanced_save=True)
             win.destroy()
 
-        ttkb.Button(top_action_row, text="保存设置", bootstyle="success", width=18, command=save).pack(side=LEFT)
-        ttkb.Button(top_action_row, text="📊 统计图表", bootstyle="info-outline", width=18,
-                command=self._open_stats_chart).pack(side=LEFT, padx=(10, 0))
-        ttkb.Button(top_action_row, text="自愿资助", bootstyle="warning-outline", width=18,
-            command=self.open_donate_window).pack(side=LEFT, padx=(10, 0))
-        ttkb.Separator(body).pack(fill=X, pady=10)
+        ttkb.Button(top_action_row, text="💾 保存设置", bootstyle="success", width=18, padding=(8, 4), command=save).pack(side=LEFT)
+        ttkb.Button(top_action_row, text="📊 统计图表", bootstyle="info-outline", width=18, padding=(8, 4),
+                command=self._open_stats_chart).pack(side=LEFT, padx=(12, 0))
+        ttkb.Button(top_action_row, text="❤️ 自愿资助", bootstyle="warning-outline", width=18, padding=(8, 4),
+            command=self.open_donate_window).pack(side=LEFT, padx=(12, 0))
+        ttkb.Separator(body, bootstyle="primary").pack(fill=X, pady=12)
         win.after(50, lambda: self._center_toplevel_on_parent(win))
 
     def refresh_devices(self):
@@ -3504,7 +3762,7 @@ class Application(ttkb.Window):
             self.btn_scan.configure(text="智能扫描", state="normal")
             if not (getattr(self, 'bot', None) and self.bot.running):
                 for btn in [self.btn_main_start, self.btn_mini_start]:
-                    btn.configure(state="normal", text="▶ 启动脚本")
+                    btn.configure(state="normal", text="▶ 启动")
             if isinstance(devs, Exception):
                 print(f">>> [扫描异常] {devs}")
                 devs = []
@@ -3540,36 +3798,70 @@ class Application(ttkb.Window):
         if not self._enforce_online_guard("启动脚本", interactive=True):
             return
         device = self.combo_devices.get()
-        if not device: messagebox.showwarning("提示", "请先选择设备"); return
-        if self.bot and self.bot.running: return
+        if not device:
+            messagebox.showwarning("提示", "请先选择设备")
+            return
+        if self.bot and self.bot.running:
+            return
+
         self.var_runtime_status.set("准备启动")
         self.save_config()
-        self._connect_public_adb_targets(debug=False)
-        self._try_use_mumu_adb_for_device(device)
+
+        try:
+            self._connect_public_adb_targets(debug=False)
+            self._try_use_mumu_adb_for_device(device)
+
+            from main_adb import WoaBot
+            self.bot = WoaBot(log_callback=self.log_to_queue,
+                              config_callback=self.on_bot_config_update,
+                              instance_id=INSTANCE_ID)
+            self.bot.set_device(device)
+            self.sync_all_configs_to_bot()
+
+            # 仅当 bot 对象创建且配置同步成功后，才切换按钮状态
+            for btn in [self.btn_main_start, self.btn_mini_start]:
+                btn.configure(state="disabled", text="运行中...")
+            for btn in [self.btn_main_stop, self.btn_mini_stop]:
+                btn.configure(state="normal")
+            self.combo_devices.configure(state="disabled")
+
+            self.bot.start()
+            self._stats_report_anchor_ts = time.time()
+            self._runtime_start_time = time.time()
+            self.var_runtime_duration.set("00:00:00")
+            self.var_approach.set("0")
+            self.var_depart.set("0")
+            self.var_stand_summary.set("0 / 0")
+            self.var_total_ops.set("0 次")
+            self.var_cycle_efficiency.set("—")
+            self.var_avg_cycle_time.set("—")
+            self.var_stats_source.set("运行中")
+            self.var_tower_status.set("—")
+            self.after(1000, self._update_runtime_stats)
+            self.var_runtime_status.set("运行中")
+
+        except ImportError:
+            self._recover_from_start_failure("无法导入核心模块 main_adb.py")
+        except Exception as e:
+            self._recover_from_start_failure(f"脚本启动失败: {str(e)[:300]}")
+
+    def _recover_from_start_failure(self, reason):
+        """start_bot 失败时恢复 UI 状态，避免永久卡死。"""
+        self.var_runtime_status.set("启动失败")
+        if self.bot:
+            try:
+                self.bot.running = False
+                self.bot.stop()
+            except Exception:
+                pass
+        self.bot = None
         for btn in [self.btn_main_start, self.btn_mini_start]:
-            btn.configure(state="disabled", text="运行中...")
+            btn.configure(state="normal", text="▶ 启动")
         for btn in [self.btn_main_stop, self.btn_mini_stop]:
-            btn.configure(state="normal")
-        self.combo_devices.configure(state="disabled")
-        from main_adb import WoaBot
-        self.bot = WoaBot(log_callback=self.log_to_queue, config_callback=self.on_bot_config_update,
-                          instance_id=INSTANCE_ID)
-        self.bot.set_device(device)
-        self.sync_all_configs_to_bot()
-        self.bot.start()
-        self._stats_report_anchor_ts = time.time()
-        self._runtime_start_time = time.time()
-        self.var_runtime_duration.set("00:00:00")
-        self.var_approach.set("0")
-        self.var_depart.set("0")
-        self.var_stand_summary.set("0 / 0")
-        self.var_total_ops.set("0 次")
-        self.var_cycle_efficiency.set("—")
-        self.var_avg_cycle_time.set("—")
-        self.var_stats_source.set("运行中")
-        self.var_tower_status.set("—")
-        self.after(1000, self._update_runtime_stats)
-        self.var_runtime_status.set("运行中")
+            btn.configure(state="disabled")
+        self.combo_devices.configure(state="readonly")
+        traceback.print_exc()
+        print(f">>> [错误] {reason}")
 
     def stop_bot(self):
         bot = self.bot
@@ -3590,7 +3882,7 @@ class Application(ttkb.Window):
         self.var_tower_status.set("—")
         if not getattr(self, "_is_closing", False):
             for btn in [self.btn_main_start, self.btn_mini_start]:
-                btn.configure(state="normal", text="▶ 启动脚本")
+                btn.configure(state="normal", text="▶ 启动")
             for btn in [self.btn_main_stop, self.btn_mini_stop]:
                 btn.configure(state="disabled")
             self.combo_devices.configure(state="readonly")
@@ -3683,7 +3975,7 @@ class Application(ttkb.Window):
                 self.bot = None
                 self.var_runtime_status.set("已停止")
                 for btn in [self.btn_main_start, self.btn_mini_start]:
-                    btn.configure(state="normal", text="▶ 启动脚本")
+                    btn.configure(state="normal", text="▶ 启动")
                 for btn in [self.btn_main_stop, self.btn_mini_stop]:
                     btn.configure(state="disabled")
                 self.combo_devices.configure(state="readonly")
