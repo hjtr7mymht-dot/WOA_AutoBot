@@ -18,12 +18,18 @@ ICON_DIR = "icon"
 
 
 def get_resource_path(relative_path):
-    """获取资源路径，兼容 PyInstaller、Nuitka 与源码运行"""
+    """获取资源路径，兼容 PyInstaller、Nuitka、macOS .app bundle 与源码运行"""
     if getattr(sys, "frozen", False):
         if hasattr(sys, "_MEIPASS"):
             base = sys._MEIPASS
         else:
             base = os.path.dirname(sys.executable)
+            # macOS .app bundle: 资源在 Contents/Resources/ 下
+            if sys.platform == "darwin":
+                resources_dir = os.path.join(os.path.dirname(base), "Resources")
+                candidate = os.path.join(resources_dir, relative_path)
+                if os.path.exists(candidate):
+                    return candidate
         return os.path.join(base, relative_path)
 
     # 源码模式：尝试多个可能位置
@@ -47,12 +53,18 @@ def get_resource_path(relative_path):
 
 
 def get_bundled_resource_path(relative_path):
-    """获取打包后资源路径（兼容 PyInstaller _MEIPASS 和 Nuitka）"""
+    """获取打包后资源路径（兼容 PyInstaller _MEIPASS、Nuitka、macOS .app bundle）"""
     if getattr(sys, "frozen", False):
         if hasattr(sys, "_MEIPASS"):
             base = sys._MEIPASS
         else:
             base = os.path.dirname(sys.executable)
+            # macOS .app bundle: 资源在 Contents/Resources/ 下
+            if sys.platform == "darwin":
+                resources_dir = os.path.join(os.path.dirname(base), "Resources")
+                candidate = os.path.join(resources_dir, relative_path)
+                if os.path.exists(candidate):
+                    return candidate
         return os.path.join(base, relative_path)
     else:
         try:

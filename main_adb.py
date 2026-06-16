@@ -127,21 +127,31 @@ class WoaBot:
         self._tower_none_read_count = 0
         # 塔台监测硬预算：从触发监测到得出结果，目标压到 2s 内。
         self.TOWER_MONITOR_MAX_SEC = 2.0
+        self.FILTER_MENU_BTN = (1537, 37)
+        # 菜单按钮仍用像素检测（展开=深色，折叠=浅色）
         self.COLOR_LIGHT = (203, 191, 179)
         self.COLOR_DARK = (101, 85, 70)
-        self.FILTER_MENU_BTN = (1537, 37)
-        self.FILTER_CHECK_POINTS_MODE1 = [
-            ((1542, 190), True), ((1535, 118), True), ((1540, 261), True),
-            ((1533, 331), True), ((1537, 403), True), ((1542, 474), False)
+        # ─── 筛选按钮（识图模式）───
+        # 每个按钮: key, 中文标签, 点击坐标, 未选中模板, 选中模板
+        self.FILTER_BUTTONS = [
+            {'key': 'arrival',   'label': '进港',   'click': (1534, 119), 'tpl_off': 'filter_arrival_off.png',   'tpl_on': 'filter_arrival_on.png'},
+            {'key': 'ground',    'label': '机场内', 'click': (1534, 191), 'tpl_off': 'filter_ground_off.png',    'tpl_on': 'filter_ground_on.png'},
+            {'key': 'departure', 'label': '离港',   'click': (1537, 265), 'tpl_off': 'filter_departure_off.png', 'tpl_on': 'filter_departure_on.png'},
+            {'key': 'pending',   'label': '待处理', 'click': (1537, 479), 'tpl_off': 'filter_pending_off.png',   'tpl_on': 'filter_pending_on.png'},
         ]
-        self.FILTER_CHECK_POINTS_MODE2 = [
-            ((1542, 190), False), ((1535, 118), True), ((1540, 261), True),
-            ((1533, 331), True), ((1537, 403), True), ((1542, 474), False)
-        ]
+        # 模式定义: 各按钮期望状态 (True=选中/ON, False=未选中/OFF)
+        self.FILTER_MODE_STATES = {
+            'mode1': {'arrival': False, 'ground': False, 'departure': False, 'pending': True},
+            'mode2': {'arrival': False, 'ground': True,  'departure': False, 'pending': True},
+        }
         self.enable_no_takeoff_mode = False
         self.enable_standalone_logout = False
         self.enable_cancel_stand_filter = False
         self.enable_filter_stand_only_when_tower_open = False
+        self.enable_2d_mode = True
+        # 2D/3D 切换按钮（游戏右上角附近）
+        self.VIEW_2D_BTN = (1162, 44)
+        self.VIEW_3D_BTN = (1204, 44)
         # 右侧类别栏处理开关
         self.enable_category_processing = False
         self.category_selection = {c["key"]: False for c in SIDEBAR_CATEGORIES}
@@ -154,8 +164,6 @@ class WoaBot:
         self._tower_all_open_stable_count = 0    # 当前连续全开计数
         self._last_tower_all_open_state = False  # 上一次确认的全开状态
 
-        self.FILTER_POINT_A = (1535, 118)
-        self.FILTER_POINT_B = (1542, 190)
         self._no_takeoff_cycle_side = 'landing'
         self._no_takeoff_cycle_next_switch_time = 0.0
         self._no_takeoff_switch_interval = 15.0
@@ -183,7 +191,7 @@ class WoaBot:
         self.LIST_ROI_W = 60
         self.LIST_ROI_H = 900
         self.REGION_BOTTOM_ROI = (20, 750, 340, 130)
-        self.REGION_VACANT_ROI = (390, 690, 730, 150)
+        self.REGION_VACANT_ROI = (480, 799, 800, 220)  # 以 (489,770) 为中心
 
         # 防卡死相关
         self.enable_anti_stuck = True
@@ -237,7 +245,8 @@ class WoaBot:
             'go_repair.png': self.REGION_BOTTOM_ROI,
             'start_repair.png': self.REGION_BOTTOM_ROI,
             'ground_support_done.png': self.REGION_BOTTOM_ROI,
-            'stand_vacant.png': self.REGION_VACANT_ROI,
+            'stand_vacant_off.png': self.REGION_VACANT_ROI,
+            'stand_vacant_on.png': self.REGION_VACANT_ROI,
             'green_dot.png': self.REGION_GREEN_DOT
         }
 
@@ -335,6 +344,54 @@ class WoaBot:
             self._request_switch_mode1 = True
         self.log(f">>> [配置] 塔台全开时仅停机位待处理: {'已开启' if enabled else '已关闭'}")
 
+    def set_2d_mode(self, enabled):
+        if self.enable_2d_mode == enabled:
+            return
+        self.enable_2d_mode = enabled
+        self.log(f">>> [配置] 2D界面模式: {'已开启' if enabled else '已关闭（3D模式）'}")
+
+    def _ensure_view_mode(self):
+        """确保游戏视角为期望的2D/3D模式。使用模板匹配检测当前按钮状态并切换。"""
+        screen = self.adb.get_screenshot() if self.adb else None
+        if screen is None:
+            return
+        # 用 on/off 模板检测 2D 按钮状态
+        import cv2, os
+        def _match_btn(tpl_name, x, y, margin=20):
+            tpl_path = self.icon_path + tpl_name
+            if not os.path.exists(tpl_path):
+                return 0.0
+            tpl = cv2.imread(tpl_path)
+            if tpl is None:
+                return 0.0
+            sx = max(0, x - margin)
+            sy = max(0, y - margin)
+            sw = min(margin * 2, screen.shape[1] - sx)
+            sh = min(margin * 2, screen.shape[0] - sy)
+            if sw < tpl.shape[1] or sh < tpl.shape[0]:
+                return 0.0
+            roi = screen[sy:sy+sh, sx:sx+sw]
+            try:
+                res = cv2.matchTemplate(roi, tpl, cv2.TM_CCOEFF_NORMED)
+                return float(cv2.minMaxLoc(res)[1])
+            except Exception:
+                return 0.0
+
+        # 2D 按钮模板: 2D_on=深色=当前在2D模式, 2D_off=亮色=不在2D模式
+        vx, vy = self.VIEW_2D_BTN
+        score_2d_on = _match_btn('2D_on.png', vx, vy)
+        score_2d_off = _match_btn('2D_off.png', vx, vy)
+        is_2d = score_2d_on > score_2d_off and score_2d_on > 0.55
+
+        if self.enable_2d_mode and not is_2d:
+            self.log("🖥️ [视角] 当前为3D模式，切换至2D...")
+            self._click_filter_point(vx, vy)
+        elif not self.enable_2d_mode and is_2d:
+            self.log("🖥️ [视角] 当前为2D模式，切换至3D...")
+            # 点击3D按钮
+            v3x, v3y = self.VIEW_3D_BTN
+            self._click_filter_point(v3x, v3y)
+
     def _color_diff(self, a, b):
         return sum(abs(int(a[i]) - int(b[i])) for i in range(3))
 
@@ -420,37 +477,169 @@ class WoaBot:
         diff_gray = self._color_diff((b, g, r), self.TOWER_OFF_COLOR)
         return diff_red < 90 and diff_red <= diff_green and diff_red <= diff_gray
 
-    def _matches_filter_mode(self, screen, points_config):
-        for (x, y), want_light in points_config:
-            if want_light:
-                if not self._is_pixel_light(screen, x, y):
-                    return False
-            else:
-                if not self._is_pixel_dark(screen, x, y):
-                    return False
+    # ─── 筛选按钮识图引擎 ────────────────────────────────
+
+    def _filter_btn(self, key):
+        for btn in self.FILTER_BUTTONS:
+            if btn['key'] == key:
+                return btn
+        return None
+
+    def _match_template_score(self, screen, template_name, roi):
+        import cv2
+        tpl_path = self.icon_path + template_name
+        if not os.path.exists(tpl_path):
+            return None
+        tpl = cv2.imread(tpl_path)
+        if tpl is None:
+            return None
+        x, y, w, h = roi
+        x = max(0, int(x)); y = max(0, int(y))
+        if y + h > screen.shape[0] or x + w > screen.shape[1]:
+            return None
+        search = screen[y:y + h, x:x + w]
+        if search.shape[0] < tpl.shape[0] or search.shape[1] < tpl.shape[1]:
+            return None
+        try:
+            res = cv2.matchTemplate(search, tpl, cv2.TM_CCOEFF_NORMED)
+            _, max_val, _, _ = cv2.minMaxLoc(res)
+            return float(max_val)
+        except Exception:
+            return None
+
+    def _detect_filter_button_state(self, screen, btn):
+        """用 on/off 模板比对一个按钮的选中状态，返回 True=选中, False=未选中, None=无法判断"""
+        cx, cy = btn['click']
+        margin = 24
+        roi = (cx - margin, cy - margin, margin * 2, margin * 2)
+        score_on = self._match_template_score(screen, btn['tpl_on'], roi)
+        score_off = self._match_template_score(screen, btn['tpl_off'], roi)
+        if score_on is not None or score_off is not None:
+            if score_on is None:
+                return False
+            if score_off is None:
+                return True
+            if score_on >= score_off:
+                return True
+            if score_off - score_on > 0.08:
+                return False
+            return True
+        # ── 模板缺失/匹配失败 → 像素回退 ──
+        # 深色圆底=选中(on), 亮色圆底=未选中(off)
+        # 取 3×3 邻域均值抗锯齿
+        h, w = screen.shape[:2]
+        if cx >= w or cy >= h:
+            return None
+        samples = []
+        for ox in (-1, 0, 1):
+            for oy in (-1, 0, 1):
+                nx, ny = cx + ox, cy + oy
+                if 0 <= nx < w and 0 <= ny < h:
+                    px = screen[ny, nx]
+                    if len(px) >= 3:
+                        b, g, r = int(px[0]), int(px[1]), int(px[2])
+                    else:
+                        b = g = r = int(px[0])
+                    samples.append((b, g, r))
+        if not samples:
+            return None
+        avg_b = sum(s[0] for s in samples) / len(samples)
+        avg_g = sum(s[1] for s in samples) / len(samples)
+        avg_r = sum(s[2] for s in samples) / len(samples)
+        # 与亮色/深色参考值比较
+        # COLOR_LIGHT=(203,191,179) BGR → 亮灰圆底 → 未选中(off)
+        # COLOR_DARK=(101,85,70) BGR   → 深灰圆底 → 选中(on)
+        diff_light = abs(avg_b - self.COLOR_LIGHT[0]) + abs(avg_g - self.COLOR_LIGHT[1]) + abs(avg_r - self.COLOR_LIGHT[2])
+        diff_dark  = abs(avg_b - self.COLOR_DARK[0])  + abs(avg_g - self.COLOR_DARK[1])  + abs(avg_r - self.COLOR_DARK[2])
+        if diff_dark < diff_light and diff_dark < 80:
+            return True   # 接近深色 → 已选中(on)
+        if diff_light < diff_dark and diff_light < 80:
+            return False  # 接近亮色 → 未选中(off)
+        return None       # 无法判断，不操作
+
+    def _detect_filter_state(self, screen):
+        """返回所有按钮的当前状态 dict: {key: True/False/None}"""
+        state = {}
+        for btn in self.FILTER_BUTTONS:
+            state[btn['key']] = self._detect_filter_button_state(screen, btn)
+        return state
+
+    def _filter_state_matches(self, state, expected):
+        """检查实际状态是否匹配期望状态"""
+        for key, want_selected in expected.items():
+            current = state.get(key)
+            if current is None:
+                return False
+            if current != want_selected:
+                return False
         return True
 
+    def _ensure_filter_menu_open(self):
+        """确保筛选菜单已展开（菜单按钮深色=已展开），返回截图"""
+        for _ in range(6):
+            screen = self.adb.get_screenshot()
+            if screen is None:
+                return None
+            mx, my = self.FILTER_MENU_BTN
+            if self._is_pixel_dark(screen, mx, my):
+                return screen
+            self._click_filter_point(mx, my)
+            self.sleep(0.3)
+        return self.adb.get_screenshot()
+
+    def _apply_filter_state(self, expected_state, max_rounds=8):
+        """循环将筛选状态修正为目标状态"""
+        for _ in range(max_rounds):
+            screen = self.adb.get_screenshot()
+            if screen is None:
+                return
+            mx, my = self.FILTER_MENU_BTN
+            if self._is_pixel_light(screen, mx, my):
+                self._click_filter_point(mx, my)
+                self.sleep(0.3)
+                continue
+            all_ok = True
+            for btn in self.FILTER_BUTTONS:
+                key = btn['key']
+                want = expected_state.get(key)
+                if want is None:
+                    continue
+                current = self._detect_filter_button_state(screen, btn)
+                if current is None:
+                    # 无法判断状态 → 跳过不点，避免盲点误触
+                    continue
+                if current != want:
+                    self._click_filter_point(*btn['click'])
+                    self.sleep(0.2)
+                    all_ok = False
+                    break
+            if all_ok:
+                return
+
     def _matches_filter_mode3(self, screen):
-        """不起飞模式：菜单深色、(1542,474)深色，(1535,118)与(1542,190)有且仅有一个为深色，(1533,331)(1537,403)为浅色"""
+        """不起飞模式：菜单深色、待处理选中、离港不选，进港/机场内有且仅有一个选中"""
         mx, my = self.FILTER_MENU_BTN
         if not self._is_pixel_dark(screen, mx, my):
             return False
-        if not self._is_pixel_dark(screen, 1542, 474):
+        state = self._detect_filter_state(screen)
+        if state.get('pending') != True:
             return False
-        if not self._is_pixel_light(screen, 1533, 331):
+        if state.get('departure') != False:
             return False
-        if not self._is_pixel_light(screen, 1537, 403):
+        a = state.get('arrival')
+        b = state.get('ground')
+        if a is None or b is None:
             return False
-        a_dark = self._is_pixel_dark(screen, self.FILTER_POINT_A[0], self.FILTER_POINT_A[1])
-        b_dark = self._is_pixel_dark(screen, self.FILTER_POINT_B[0], self.FILTER_POINT_B[1])
-        return (a_dark and not b_dark) or (not a_dark and b_dark)
+        return (a and not b) or (not a and b)
 
     def _get_mode3_side(self, screen):
-        a_dark = self._is_pixel_dark(screen, self.FILTER_POINT_A[0], self.FILTER_POINT_A[1])
-        b_dark = self._is_pixel_dark(screen, self.FILTER_POINT_B[0], self.FILTER_POINT_B[1])
-        if a_dark and not b_dark:
+        """返回不起飞模式的当前侧：'landing' 或 'stand'，无法判断返回 None"""
+        state = self._detect_filter_state(screen)
+        a = state.get('arrival')
+        b = state.get('ground')
+        if a and not b:
             return 'landing'
-        if b_dark and not a_dark:
+        if b and not a:
             return 'stand'
         return None
 
@@ -503,8 +692,16 @@ class WoaBot:
             self.log("📋 [小退] 未找到主界面按钮，跳过")
             return
         self.adb.click(loc[0], loc[1], random_offset=5)
-        self.sleep(0.5)
-        if not self.find_and_click('change_airport.png', confidence=0.75, wait=0):
+        self.sleep(0.8)
+        # 重试查找更改机场按钮（等待界面过渡完成）
+        found_airport = False
+        for _ in range(5):
+            self._check_running()
+            if self.find_and_click('change_airport.png', confidence=0.75, wait=0):
+                found_airport = True
+                break
+            self.sleep(0.4)
+        if not found_airport:
             self.log("📋 [小退] 未找到更改机场按钮，跳过")
             return
         self.sleep(4.0)
@@ -541,41 +738,18 @@ class WoaBot:
         self._standalone_logout_next_time = time.time() + self._standalone_logout_interval * 60.0
 
     def _force_switch_filter_mode1(self):
-        """在主循环中强制将筛选状态切回模式1（仅待处理）"""
-        # 仅在主界面下尝试
+        """强制切换至模式1（仅待处理）- 识图版"""
         if not self.safe_locate('main_interface.png', region=self.REGION_MAIN_ANCHOR, confidence=0.8):
             return
-        screen = self.adb.get_screenshot()
+        screen = self._ensure_filter_menu_open()
         if screen is None:
             return
-        mx, my = self.FILTER_MENU_BTN
-        # 确保筛选菜单已展开
-        if self._is_pixel_light(screen, mx, my):
-            self._click_filter_point(mx, my)
-            self.sleep(0.5)
-            for _ in range(5):
-                screen = self.adb.get_screenshot()
-                if screen is None:
-                    break
-                if self._is_pixel_dark(screen, mx, my):
-                    break
-                self._click_filter_point(mx, my)
-                self.sleep(0.3)
-            screen = self.adb.get_screenshot()
-            if screen is None:
-                return
-        # 若已是模式1则不动，否则按模式1配置逐项修正
-        if self._matches_filter_mode(screen, self.FILTER_CHECK_POINTS_MODE1):
+        state = self._detect_filter_state(screen)
+        mode1 = self.FILTER_MODE_STATES['mode1']
+        if self._filter_state_matches(state, mode1):
             return
-        self.log("📋 [筛选] 关闭不起飞模式，强制切换至模式1(仅待处理)...")
-        for (x, y), want_light in self.FILTER_CHECK_POINTS_MODE1:
-            screen = self.adb.get_screenshot()
-            if screen is None:
-                break
-            is_light = self._is_pixel_light(screen, x, y)
-            if (want_light and not is_light) or (not want_light and is_light):
-                self._click_filter_point(x, y)
-                self.sleep(0.2)
+        self.log("📋 [筛选] 强制切换至模式1(仅待处理)...")
+        self._apply_filter_state(mode1)
 
     def _click_filter_point(self, x, y):
         self.adb.click(x, y, random_offset=5)
@@ -610,7 +784,8 @@ class WoaBot:
         """
         # ── 1. 定位按钮（归一化 1600×900 空间）──
         click_x, click_y = None, None
-        icon_name = cat.get("icon", "")
+        # 优先使用 icon_on（深灰选中态，模板匹配对比度更高），回退兼容旧 icon 字段
+        icon_name = cat.get("icon_on", "") or cat.get("icon", "")
         if icon_name:
             icon_path = self.icon_path + icon_name
             if os.path.exists(icon_path):
@@ -744,6 +919,9 @@ class WoaBot:
         if self.safe_locate('main_interface.png', region=self.REGION_MAIN_ANCHOR, confidence=0.8):
             self.last_seen_main_interface_time = time.time()
 
+        # 1.5 2D/3D 视角切换检测
+        self._ensure_view_mode()
+
         # 2. 中间领奖区防卡死：不论是否在主界面，均遍历寻找领奖按钮并点击直至恢复正常
         rx, ry, rw, rh = self.REGION_REWARD_RECOVERY
         for _ in range(10):
@@ -763,79 +941,19 @@ class WoaBot:
             if not clicked:
                 break
 
-        # 3. 筛选状态检查 (仅在确认在主界面时执行)
+        # 3. 筛选状态检查 - 识图版
         if not self.safe_locate('main_interface.png', region=self.REGION_MAIN_ANCHOR, confidence=0.8):
             return
-        screen = self.adb.get_screenshot()
+        screen = self._ensure_filter_menu_open()
         if screen is None:
             return
 
-        mx, my = self.FILTER_MENU_BTN
-        if self._is_pixel_light(screen, mx, my):
-            self.log("📋 [筛选] 展开筛选菜单...")
-            self._click_filter_point(mx, my)
-            self.sleep(0.5)
-            for _ in range(5):
-                screen = self.adb.get_screenshot()
-                if screen is None:
-                    break
-                if self._is_pixel_dark(screen, mx, my):
-                    break
-                self._click_filter_point(mx, my)
-                self.sleep(0.3)
-            screen = self.adb.get_screenshot()
-            if screen is None:
-                return
-
-        is_mode1 = self._matches_filter_mode(screen, self.FILTER_CHECK_POINTS_MODE1)
-        is_mode2 = self._matches_filter_mode(screen, self.FILTER_CHECK_POINTS_MODE2)
+        filter_state = self._detect_filter_state(screen)
+        mode1_state = self.FILTER_MODE_STATES['mode1']
+        mode2_state = self.FILTER_MODE_STATES['mode2']
+        is_mode1 = self._filter_state_matches(filter_state, mode1_state)
+        is_mode2 = self._filter_state_matches(filter_state, mode2_state)
         is_mode3 = self.enable_no_takeoff_mode and self._matches_filter_mode3(screen)
-
-        def apply_mode(points_config):
-            for (x, y), want_light in points_config:
-                screen = self.adb.get_screenshot()
-                if screen is None:
-                    break
-                is_light = self._is_pixel_light(screen, x, y)
-                if (want_light and not is_light) or (not want_light and is_light):
-                    self._click_filter_point(x, y)
-                    self.sleep(0.2)
-
-        def apply_mode3(target_side):
-            """确保菜单深、(1542,474)深，(1533,331)(1537,403)浅，再根据目标侧设置待降落/停机坪。"""
-            for _ in range(8):
-                screen = self.adb.get_screenshot()
-                if screen is None:
-                    return
-                if self._is_pixel_light(screen, mx, my):
-                    self._click_filter_point(mx, my)
-                    self.sleep(0.3)
-                    continue
-                if not self._is_pixel_dark(screen, 1542, 474):
-                    self._click_filter_point(1542, 474)
-                    self.sleep(0.2)
-                    continue
-                if not self._is_pixel_light(screen, 1533, 331):
-                    self._click_filter_point(1533, 331)
-                    self.sleep(0.2)
-                    continue
-                if not self._is_pixel_light(screen, 1537, 403):
-                    self._click_filter_point(1537, 403)
-                    self.sleep(0.2)
-                    continue
-                ax, ay = self.FILTER_POINT_A[0], self.FILTER_POINT_A[1]
-                bx, by = self.FILTER_POINT_B[0], self.FILTER_POINT_B[1]
-                a_dark = self._is_pixel_dark(screen, ax, ay)
-                b_dark = self._is_pixel_dark(screen, bx, by)
-                want_a_dark = target_side == 'landing'
-                if want_a_dark and not a_dark:
-                    self._click_filter_point(ax, ay)
-                    self.sleep(0.2)
-                elif not want_a_dark and not b_dark:
-                    self._click_filter_point(bx, by)
-                    self.sleep(0.2)
-                else:
-                    break
 
         if self.enable_no_takeoff_mode:
             strategy = self._get_no_takeoff_strategy()
@@ -844,42 +962,46 @@ class WoaBot:
                 if current_side != self._no_takeoff_cycle_side:
                     side_name = '待降落' if self._no_takeoff_cycle_side == 'landing' else '停机坪'
                     self.log(f"📋 [不起飞] 应用{side_name}筛选")
-                    apply_mode3(self._no_takeoff_cycle_side)
+                    want_arrival = (self._no_takeoff_cycle_side == 'landing')
+                    mode3_state = {
+                        'arrival': want_arrival, 'ground': not want_arrival,
+                        'departure': False, 'pending': True
+                    }
+                    self._apply_filter_state(mode3_state)
             else:
                 if not is_mode2:
                     self.log("📋 [不起飞] stand_only → 切换停机坪筛选")
-                    apply_mode(self.FILTER_CHECK_POINTS_MODE2)
+                    self._apply_filter_state(mode2_state)
             return
 
         if self.enable_filter_stand_only_when_tower_open and all(self._tower_active_slots):
             if not is_mode2:
                 self.log("📋 [筛选] 塔台全开，强制切换至模式2(仅停机位)...")
-                apply_mode(self.FILTER_CHECK_POINTS_MODE2)
+                self._apply_filter_state(mode2_state)
             return
 
         if (not self.enable_filter_stand_only_when_tower_open) and all(self._tower_active_slots) and is_mode2:
             self.log("📋 [筛选] 已关闭塔台全开仅停机位，恢复模式1(仅待处理)...")
-            apply_mode(self.FILTER_CHECK_POINTS_MODE1)
+            self._apply_filter_state(mode1_state)
             return
 
-        # 如果塔台状态尚未初始化（全 False），默认按仅待处理处理，避免错误锁定停机坪筛选
         if not any(self._tower_active_slots) and not self._tower_disabled:
             if is_mode2:
                 self.log("📋 [筛选] 塔台状态未初始化，默认切换至仅待处理...")
                 self._tower_disabled = True
-                apply_mode(self.FILTER_CHECK_POINTS_MODE1)
+                self._apply_filter_state(mode1_state)
             return
 
         need_mode1_only = self._tower_off_force_mode1
         if need_mode1_only and not is_mode1:
             self.log("📋 [筛选] 切换至仅待处理... (塔台已关闭)")
-            apply_mode(self.FILTER_CHECK_POINTS_MODE1)
+            self._apply_filter_state(mode1_state)
             return
 
         if is_mode1 or is_mode2:
             return
         self.log("📋 [筛选] 状态异常，默认切换至仅待处理...")
-        apply_mode(self.FILTER_CHECK_POINTS_MODE1)
+        self._apply_filter_state(mode1_state)
 
     def _nemu_ipc_debug_save_mismatch(self, nemu_img, adb_img):
         """nemu_ipc 与 ADB 截图不匹配时保存对比图，便于排查"""
@@ -1843,9 +1965,17 @@ class WoaBot:
             ('status_takeoff.png', self.handle_takeoff_task),
             ('status_taxiing.png', self.handle_taxiing_task),
             ('status_approach.png', self.handle_approach_task),
+            ('pending_approach.png', self.handle_approach_task),
             ('status_ice.png', self.handle_ice_task),
             ('status_doing.png', self.handle_vehicle_check_task)
         ]
+
+        # 构建别名：属于同一 handler 的图标互为等价
+        _handler_aliases = {}
+        for img, h in status_map:
+            _handler_aliases.setdefault(h, []).append(img)
+        _expected_aliases = _handler_aliases.get(
+            dict(status_map).get(expected_status_img), [expected_status_img])
 
         x, y, w, h = self.REGION_STATUS_TITLE
 
@@ -1857,7 +1987,8 @@ class WoaBot:
             full_screen = self.adb.get_screenshot()
             if full_screen is None: continue
             status_hits = _scan_statuses(full_screen)
-            if status_hits.get(expected_status_img):
+            # 接受期望图标或其别名
+            if any(status_hits.get(alias) for alias in _expected_aliases):
                 return True
             if attempt == 0:
                 self.sleep(0.15)
@@ -2246,28 +2377,78 @@ class WoaBot:
     # ========== 塔台延时：全部激活策略 ==========
 
     def _do_delay_all(self):
-        """点击「全部激活」按钮并确认延时弹窗。返回 True/False。"""
+        """点击「全部激活」按钮并确认延时弹窗（含二次确认）。返回 True/False。
+        流程：全部激活 → 一次确认(delay/delay_1) → 二次确认(yes.png@715,546)"""
         self.log("   🗼 点击「全部激活」按钮")
         self.adb.click(*self.TOWER_DELAY_ALL_BTN)
         self.sleep(0.5)
 
+        # ── 第一阶段：等待一次确认弹窗（delay.png / delay_1.png）──
         t0 = time.time()
+        first_ok = False
         while time.time() - t0 < 6.0:
             self._check_running()
-            # 匹配确认弹窗：delay.png / delay_1.png / yes.png
-            for btn in ('delay.png', 'delay_1.png', 'yes.png'):
+            for btn in ('delay.png', 'delay_1.png'):
                 if self.wait_and_click(btn, timeout=0.5, click_wait=0.3, random_offset=2):
-                    self.sleep(0.3)
-                    screen = self.adb.get_screenshot()
-                    if screen is not None and not self._locate_on_screen(btn, screen, confidence=0.75):
-                        return True
-            # 弹窗可能自行消失
+                    first_ok = True
+                    break
+            if first_ok:
+                break
+            self.sleep(0.15)
+        if not first_ok:
+            self.log("   🗼 ⚠️ 一次确认弹窗未出现")
+            return False
+
+        # ── 第二阶段：等待二次确认弹窗（yes.png @ 715,546）──
+        self.sleep(0.4)
+        t1 = time.time()
+        second_ok = False
+        while time.time() - t1 < 5.0:
+            self._check_running()
             screen = self.adb.get_screenshot()
             if screen is not None:
-                if not any(self._locate_on_screen(b, screen, confidence=0.75)
-                           for b in ('delay.png', 'delay_1.png', 'yes.png')):
-                    return True
-            self.sleep(0.15)
+                yes_pos = self._locate_on_screen('yes.png', screen, confidence=0.75)
+                if yes_pos:
+                    # 点击二次确认按钮（优先使用模板匹配位置，回退到固定坐标）
+                    self.log("   🗼 点击二次确认 (yes.png)")
+                    self.adb.click(yes_pos[0], yes_pos[1], random_offset=3)
+                    self.sleep(0.4)
+                    # 验证弹窗消失
+                    verify = self.adb.get_screenshot()
+                    if verify is not None and not self._locate_on_screen('yes.png', verify, confidence=0.75):
+                        second_ok = True
+                        break
+                    # 仍在，用固定坐标点击重试
+                    self.adb.click(715, 546, random_offset=3)
+                    self.sleep(0.4)
+                    verify2 = self.adb.get_screenshot()
+                    if verify2 is not None and not self._locate_on_screen('yes.png', verify2, confidence=0.75):
+                        second_ok = True
+                        break
+                else:
+                    # 模板匹配未找到，尝试固定坐标盲点
+                    self.adb.click(715, 546, random_offset=3)
+                    self.sleep(0.4)
+                    verify3 = self.adb.get_screenshot()
+                    if verify3 is not None and not self._locate_on_screen('yes.png', verify3, confidence=0.75):
+                        second_ok = True
+                        break
+            self.sleep(0.3)
+
+        if second_ok:
+            self.log("   🗼 ✅ 二次确认完成")
+            return True
+
+        # ── 兜底：检查是否弹窗已自行消失 ──
+        screen = self.adb.get_screenshot()
+        if screen is not None:
+            has_delay = any(self._locate_on_screen(b, screen, confidence=0.75)
+                           for b in ('delay.png', 'delay_1.png', 'yes.png'))
+            if not has_delay:
+                self.log("   🗼 ℹ️ 确认弹窗已自行消失，视为成功")
+                return True
+
+        self.log("   🗼 ⚠️ 二次确认超时")
         return False
 
     def _check_delay_by_ocr(self, pre_times):
@@ -2444,25 +2625,27 @@ class WoaBot:
                 self.log("   -> 🚨 发现车辆不足，准备购买")
                 self.adb.click(red_warn[0], red_warn[1], random_offset=1)
                 self.sleep(0.5)
+                bought = False
                 if self.wait_and_click('buy_vehicle.png', timeout=2.0, click_wait=1.0):
                     if self.wait_and_click('buy_vehicle_confirm.png', timeout=3.0, click_wait=0.5):
                         self.log("   -> ✅ 购买确认成功")
+                        bought = True
                     elif self.wait_and_click('back.png', timeout=3.0, click_wait=0.5, random_offset=2):
                         self.log("   -> 🛑 金钱不足，取消购买")
                         self.enable_vehicle_buy = False
                         if self.config_callback: self.config_callback("vehicle_buy", False)
                 else:
                     self.log("   -> 未找到购买按钮")
+                if not self._exit_vehicle_buy_scene():
+                    self.log("⚠️ [Doing] 购买界面未能正常退出，触发临时冷却避免循环卡死")
+                    self.doing_task_forbidden_until = time.time() + 8.0
+                    return False
+                self.close_window()
+                return True if bought else False
             else:
                 self.log("   -> 🚨 发现车辆不足但未开启购买，跳过当前任务")
                 self.close_window()
-                return True
-            if not self._exit_vehicle_buy_scene():
-                self.log("⚠️ [Doing] 购买界面未能正常退出，触发临时冷却避免循环卡死")
-                self.doing_task_forbidden_until = time.time() + 8.0
                 return False
-            self.close_window()
-            return True
         if screen is not None:
             res_done = batch_hits.get('ground_done')
             if res_done:
@@ -2503,59 +2686,114 @@ class WoaBot:
         return True
 
     def handle_approach_task(self, target_pos=None):
-        self.sleep(0.2)
-        if not self._verify_and_redirect('status_approach.png'): return True
+        self.sleep(0.15 + random.uniform(0, 0.1))
+        # _verify_and_redirect 失败时已关窗，直接退出不继续
+        if not self._verify_and_redirect('status_approach.png'):
+            return False
         self.log(">>> [任务] 处理进场...")
-        start_time = time.time()
-        approach_timeout = 1.0 if getattr(self.adb, 'screenshot_method', 'adb') in ('nemu_ipc', 'uiautomator2') else 2.0
-        while time.time() - start_time < approach_timeout:
+
+        is_fast = getattr(self.adb, 'screenshot_method', 'adb') in ('nemu_ipc', 'uiautomator2')
+        approach_deadline = time.time() + (2.0 if is_fast else 4.5) + random.uniform(0, 0.6)
+        assigned_stand = False
+
+        def _rclick(x, y, r=8):
+            """拟人点击：高斯偏移 ±r px"""
+            self.adb.click(int(random.gauss(x, r/3)), int(random.gauss(y, r/3)))
+
+        def _rwait(base, jitter=0.08):
+            """拟人等待：base + 随机抖动"""
+            self.sleep(base + random.uniform(0, jitter))
+
+        while time.time() < approach_deadline:
             self._check_running()
-            if self.find_and_click('landing_permitted.png', wait=0):
+            screen = self.adb.get_screenshot()
+            if screen is None:
+                time.sleep(random.uniform(0.06, 0.10))
+                continue
+
+            # ── 步骤 A：全屏检测机位选择界面 → 点击 ──
+            if not assigned_stand:
+                has_off = self.adb.locate_image(self.icon_path + 'stand_vacant_off.png',
+                                                confidence=0.7, screen_image=screen)
+                has_on  = self.adb.locate_image(self.icon_path + 'stand_vacant_on.png',
+                                                confidence=0.7, screen_image=screen)
+                if has_off or has_on:
+                    self.log("   -> 分配机位 @ (490,770)")
+                    _rclick(490, 770)
+                    _rwait(0.25)
+                    vfy = self.adb.get_screenshot()
+                    if vfy is not None and self.adb.locate_image(
+                        self.icon_path + 'stand_vacant_on.png', confidence=0.7, screen_image=vfy):
+                        self.log("   -> ✓ 机位已选中")
+                    assigned_stand = True
+
+            # ── 步骤 B：已分配机位 → 全屏找确认/降落按钮 ──
+            if assigned_stand:
+                # B1：全屏检查降落按钮
+                lp = self.adb.locate_image(self.icon_path + 'landing_permitted.png',
+                                           confidence=0.7, screen_image=screen)
+                if lp:
+                    _rclick(lp[0], lp[1])
+                    self._stat_approach += 1
+                    self._stat_session_approach += 1
+                    _rwait(0.05, 0.03)
+                    return True
+                lpro = self.adb.locate_image(self.icon_path + 'landing_prohibited.png',
+                                             confidence=0.65, screen_image=screen)
+                if lpro:
+                    self.log("   -> 🚫 跑道被占用，禁止降落")
+                    return True
+
+                # B2：全屏找确认按钮
+                sc = self._locate_on_screen('stand_confirm.png', screen, confidence=0.75)
+                if sc:
+                    _rclick(sc[0], sc[1])
+                    _rwait(0.2, 0.08)
+
+                # B3：全屏等待降落按钮
+                post_deadline = time.time() + (5.0 if is_fast else 8.0) + random.uniform(0, 1.5)
+                while time.time() < post_deadline:
+                    self._check_running()
+                    s2 = self.adb.get_screenshot()
+                    if s2 is None:
+                        time.sleep(random.uniform(0.08, 0.12)); continue
+                    if self._locate_on_screen('main_interface.png', s2,
+                                              confidence=0.8, region=self.REGION_MAIN_ANCHOR):
+                        self.log("   -> ℹ️ 窗口已关闭，判定为塔台接管")
+                        return True
+                    lp2 = self.adb.locate_image(self.icon_path + 'landing_permitted.png',
+                                                confidence=0.7, screen_image=s2)
+                    if lp2:
+                        _rclick(lp2[0], lp2[1])
+                        self._stat_approach += 1
+                        self._stat_session_approach += 1
+                        _rwait(0.05, 0.03)
+                        return True
+                    lpro2 = self.adb.locate_image(self.icon_path + 'landing_prohibited.png',
+                                                  confidence=0.65, screen_image=s2)
+                    if lpro2:
+                        self.log("   -> 🚫 跑道被占用，禁止降落")
+                        return True
+                    time.sleep(random.uniform(0.12, 0.18))
+                self.log("   -> ℹ️ 超时未检测到降落按钮，关闭窗口")
+                self.close_window()
+                return True
+
+            # ── 步骤 C：全屏搜 landing_permitted（飞机已有停机位）──
+            lp = self.adb.locate_image(self.icon_path + 'landing_permitted.png',
+                                       confidence=0.7, screen_image=screen)
+            if lp:
+                _rclick(lp[0], lp[1])
                 self._stat_approach += 1
                 self._stat_session_approach += 1
-                self.sleep(0.05)
+                _rwait(0.05, 0.03)
                 return True
-            screen = self.adb.get_screenshot()
-            if screen is None: continue
-            vx, vy, vw, vh = self.REGION_VACANT_ROI
-            vacant_roi = screen[vy:vy + vh, vx:vx + vw]
-            res_vacant = self.adb.locate_image(self.icon_path + 'stand_vacant.png', confidence=0.8,
-                                               screen_image=vacant_roi)
-            if res_vacant:
-                self.log("   -> 分配机位")
-                self.adb.click(res_vacant[0] + vx, res_vacant[1] + vy)
-                self.sleep(0.1)
-                stand_confirm_t = 1.0 if getattr(self.adb, 'screenshot_method', 'adb') in ('nemu_ipc', 'uiautomator2') else 1.5
-                if self.wait_and_click('stand_confirm.png', timeout=stand_confirm_t, click_wait=0):
-                    w_start = time.time()
-                    while time.time() - w_start < 2.5:
-                        self._check_running()
-                        if self.find_and_click('landing_permitted.png', wait=0):
-                            self._stat_approach += 1
-                            self._stat_session_approach += 1
-                            self.sleep(0.05)
-                            return True
 
-                        check_screen = self.adb.get_screenshot()
-                        if check_screen is not None:
-                            bx, by, bw, bh = self.REGION_BOTTOM_ROI
-                            bottom_roi = check_screen[by:by + bh, bx:bx + bw]
-                            if self.adb.locate_image(self.icon_path + 'landing_prohibited.png', confidence=0.8,
-                                                     screen_image=bottom_roi):
-                                self.sleep(0.05)
-                                return True
+            time.sleep(random.uniform(0.10, 0.15))
 
-                        time.sleep(0.1)
-                    self.sleep(0.05)
-                    return True
-                else:
-                    self.log("❌ 找不到确认按钮")
-                    self.close_window()
-                    return False
-            time.sleep(0.1)
         self.log("⚠️ 进场超时")
         self.close_window()
-        self.sleep(1.0)
+        self.sleep(1.0 + random.uniform(0, 0.3))
         return False
 
     def handle_taxiing_task(self, target_pos=None):

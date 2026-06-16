@@ -614,6 +614,7 @@ class Application(ttkb.Window):
         self.var_standalone_logout_interval = tk.StringVar(value=str(legacy_logout_interval or 30))
         self.var_cancel_stand_filter = tk.BooleanVar(value=self.config.get("cancel_stand_filter", True))
         self.var_tower_open_stand_only = tk.BooleanVar(value=self.config.get("tower_open_stand_only", False))
+        self.var_2d_mode = tk.BooleanVar(value=self.config.get("2d_mode", True))
         self.var_anti_stuck_enabled = tk.BooleanVar(value=self.config.get("anti_stuck_enabled", True))
         self.var_anti_stuck_threshold = tk.StringVar(value=str(self.config.get("anti_stuck_threshold", 6)))
         self.var_notify_enabled = tk.BooleanVar(value=bool(self.config.get("mobile_notify_enabled", False)))
@@ -974,9 +975,19 @@ class Application(ttkb.Window):
         try:
             icon_rel = os.path.join(ICON_DIR, "app.ico")
             icon_path = get_resource_path(icon_rel)
-            if not os.path.exists(icon_path):
-                return
-            self.iconbitmap(default=icon_path)
+            if os.path.exists(icon_path):
+                if IS_MAC:
+                    # macOS: iconbitmap 不支持 .ico，尝试 iconphoto + 转换为 PNG
+                    try:
+                        from PIL import Image
+                        img = Image.open(icon_path)
+                        photo = ImageTk.PhotoImage(img)
+                        self.iconphoto(True, photo)
+                        self._icon_photo_ref = photo  # 保持引用防止被 GC
+                    except Exception:
+                        pass
+                else:
+                    self.iconbitmap(default=icon_path)
         except Exception:
             pass
 
@@ -1000,6 +1011,7 @@ class Application(ttkb.Window):
         self.config["delay_bribe"] = self.var_delay_bribe.get()
         self.config["random_task_order"] = self.var_random_task.get()
         self.config["tower_open_stand_only"] = self.var_tower_open_stand_only.get()
+        self.config["2d_mode"] = bool(self.var_2d_mode.get())
         self.config["anti_stuck_enabled"] = self.var_anti_stuck_enabled.get()
         self.config["no_takeoff_logout_enabled"] = self.var_no_takeoff_logout_enabled.get()
         self.config["cancel_stand_filter"] = bool(self.var_cancel_stand_filter.get())
@@ -1523,7 +1535,8 @@ class Application(ttkb.Window):
             self.container_mini.pack_forget()
             self.geometry(self.last_geometry)
             self.attributes('-topmost', False)
-            self.overrideredirect(False)
+            if not IS_MAC:
+                self.overrideredirect(False)
             self.container_main.pack(fill=BOTH, expand=True)
             self.is_mini_mode = False
         else:
@@ -2052,6 +2065,8 @@ class Application(ttkb.Window):
                 "塔台全部开启时只处理停机位任务")
         _toggle(tab1, "⚙️ 塔台关闭时处理全部任务", self.var_cancel_stand_filter,
                 "塔台关闭时不过滤，处理所有待办任务")
+        _toggle(tab1, "🖥️ 2D界面模式", self.var_2d_mode,
+                "开启使用2D视角，关闭使用3D视角\n切换后脚本会自动点击游戏内2D/3D按钮")
 
         # ── 类别栏选择 ──
         _section_label(tab1, "📂 右侧类别栏选择", "info")
@@ -2069,7 +2084,7 @@ class Application(ttkb.Window):
             cb.configure(command=lambda v=var: self._on_category_toggle())
             if cat.get("tip"):
                 self.create_info_icon(r, cat["tip"]).pack(side=LEFT, padx=4)
-        _toggle(tab1, "🔄 启用类别轮换处理", self.var_category_processing,
+        _toggle(tab1, "🔄 启动自选", self.var_category_processing,
                 "开启后按时间间隔轮换已选类别\n当前类别在右侧栏按钮高亮显示")
 
         # [Tab 2] 挂机与防检测
@@ -2668,9 +2683,11 @@ class Application(ttkb.Window):
 【功能说明】
 1. 推荐使用 uiautomator2 + ADB 方案。脚本运行速度主要取决于[截图方案]，运行速度如下：uiautomator2 >> ADB。
 2. 使用高速方案时，由于速度很快，出错会增多，非常不建议关闭"跳过二次校验"和"跳过地勤分配验证"开关。
-3. 脚本运行时必须保持游戏右侧筛选选项中，仅筛选出带有黄色感叹号的待处理飞机。但您无需担心！脚本可以自动检测并调整筛选状态。
-4. 使用"自动延时塔台"功能前，请保证您已开启塔台，并设置好带有[延时]按钮的界面，脚本不会主动调整。
+3. 脚本运行时必须保持游戏右侧筛选选项中，仅筛选出带有黄色感叹号的待处理飞机。但您无需担心！脚本可以自动检测并调整筛选状态（支持4按钮识图+模板匹配交叉验证）。
+4. 使用"自动延时塔台"功能前，请保证您已开启塔台，并设置好带有[延时]按钮的界面，脚本不会主动调整（支持二次确认窗口）。
 5. 塔台全开时脚本会自动一键全部续费；部分开启时单独续费每个控制器。
+6. 新增 2D/3D 视角自动切换：在策略面板开启后，脚本每15秒检测并自动切换游戏视角。
+7. 右侧类别栏支持6种飞机类别：喜爱/合约、机队、其他玩家、活动飞机、客机、货机，可多选轮换。
 
 【macOS 注意事项】
 1. macOS 版以 .dmg 格式分发，双击即可安装。
@@ -3001,10 +3018,46 @@ class Application(ttkb.Window):
         win.minsize(120, 140)
         win.transient(self)
         win.grab_set()
-        body = ttkb.Frame(win, padding=20)
-        body.pack(fill=BOTH, expand=True)
 
         c = self._clr
+
+        # ── 可滚动画布容器 ──
+        canvas = tk.Canvas(win, bg=c["bg"], highlightthickness=0)
+        scrollbar = ttkb.Scrollbar(win, orient="vertical", command=canvas.yview)
+        body = ttkb.Frame(canvas, padding=20)  # body 现在是 canvas 内部的可滚动框架
+
+        body.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+        canvas_window = canvas.create_window((0, 0), window=body, anchor="nw")
+
+        # 画布宽度自适应
+        def _on_canvas_resize(event):
+            canvas.itemconfig(canvas_window, width=event.width)
+        canvas.bind("<Configure>", _on_canvas_resize)
+
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.pack(side=LEFT, fill=BOTH, expand=True)
+        scrollbar.pack(side=RIGHT, fill=Y)
+
+        # ── 鼠标滚轮滚动 ──
+        def _on_settings_mousewheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        # 绑定到 canvas 及其所有子控件，在任何位置滚轮都能滚动
+        canvas.bind("<MouseWheel>", _on_settings_mousewheel)
+        body.bind("<MouseWheel>", _on_settings_mousewheel)
+        scrollbar.bind("<MouseWheel>", _on_settings_mousewheel)
+        # 窗口关闭时解绑，防止影响其他窗口
+        def _unbind_settings_wheel(e=None):
+            try:
+                canvas.unbind("<MouseWheel>")
+                body.unbind("<MouseWheel>")
+                scrollbar.unbind("<MouseWheel>")
+            except Exception:
+                pass
+        win.bind("<Destroy>", _unbind_settings_wheel)
+
         header = ttkb.Frame(body, padding=(22, 18))
         header.pack(fill=X, pady=(0, 18))
         ttkb.Label(header, text="⚙ 高级设置中心", font=(DEFAULT_FONT, 20, "bold"),
@@ -3952,6 +4005,7 @@ class Application(ttkb.Window):
             self.bot.set_standalone_logout_enabled(self.config.get("no_takeoff_logout_enabled", False))
             self.bot.set_cancel_stand_filter_when_tower_off(self.var_cancel_stand_filter.get())
             self.bot.set_filter_stand_only_when_tower_open(self.var_tower_open_stand_only.get())
+            self.bot.set_2d_mode(self.var_2d_mode.get())
             self.bot.set_category_processing(
                 self.var_category_processing.get(),
                 selection={c["key"]: self.var_category_selection[c["key"]].get() for c in SIDEBAR_CATEGORIES})

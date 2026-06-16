@@ -1,6 +1,6 @@
 # WOA AutoBot — 项目 WIKI
 
-> 本 WIKI 由 Copilot 根据源码自动生成，版本对应 **v1.0.6**。  
+> 本 WIKI 由 Copilot 根据源码自动生成，版本对应 **v1.4.0**。  
 > 如有内容过时，欢迎提交 PR 或在 Issues 中反馈。
 
 ---

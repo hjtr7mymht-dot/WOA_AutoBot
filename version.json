@@ -1,14 +1,14 @@
 {
-  "version": "1.3.0",
+  "version": "1.4.0",
   "package_urls": [
     {
       "name": "GitHub Release",
-      "url": "https://github.com/hjtr7mymht-dot/WOA_AutoBot/releases/download/1.3.0/WOA_AutoBot.zip"
+      "url": "https://github.com/hjtr7mymht-dot/WOA_AutoBot/releases/download/1.4.0/WOA_AutoBot.zip"
     },
     {
       "name": "ghproxy Release",
-      "url": "https://ghproxy.cn/https://github.com/hjtr7mymht-dot/WOA_AutoBot/releases/download/1.3.0/WOA_AutoBot.zip"
+      "url": "https://ghproxy.cn/https://github.com/hjtr7mymht-dot/WOA_AutoBot/releases/download/1.4.0/WOA_AutoBot.zip"
     }
   ],
-  "notes": "1.2.9：新增右侧类别栏处理功能，用户可选择喜爱/机队/其他玩家/活动飞机等类别轮换处理。"
+  "notes": "1.4.0：筛选系统支持4按钮识图+模板匹配交叉验证、2D/3D视角自动切换、类别栏新增客机/货机、塔台二次确认窗口、macOS全面兼容优化。"
 }
