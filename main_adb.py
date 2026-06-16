@@ -358,45 +358,44 @@ class WoaBot:
         self.log(f">>> [配置] 2D界面模式: {'已开启' if enabled else '已关闭（3D模式）'}")
 
     def _ensure_view_mode(self):
-        """确保游戏视角为期望的2D/3D模式。使用模板匹配检测当前按钮状态并切换。"""
+        """确保游戏视角为期望的2D/3D模式。
+        模板匹配 + 亮度回退检测，防止反复切换。"""
         screen = self.adb.get_screenshot() if self.adb else None
         if screen is None:
             return
-        # 用 on/off 模板检测 2D 按钮状态
-        import cv2, os
-        def _match_btn(tpl_name, x, y, margin=20):
-            tpl_path = self.icon_path + tpl_name
-            if not os.path.exists(tpl_path):
-                return 0.0
-            tpl = cv2.imread(tpl_path)
-            if tpl is None:
-                return 0.0
-            sx = max(0, x - margin)
-            sy = max(0, y - margin)
-            sw = min(margin * 2, screen.shape[1] - sx)
-            sh = min(margin * 2, screen.shape[0] - sy)
-            if sw < tpl.shape[1] or sh < tpl.shape[0]:
-                return 0.0
-            roi = screen[sy:sy+sh, sx:sx+sw]
-            try:
-                res = cv2.matchTemplate(roi, tpl, cv2.TM_CCOEFF_NORMED)
-                return float(cv2.minMaxLoc(res)[1])
-            except Exception:
-                return 0.0
 
-        # 2D 按钮模板: 2D_on=深色=当前在2D模式, 2D_off=亮色=不在2D模式
         vx, vy = self.VIEW_2D_BTN
-        score_2d_on = _match_btn('2D_on.png', vx, vy)
-        score_2d_off = _match_btn('2D_off.png', vx, vy)
-        is_2d = score_2d_on > score_2d_off and score_2d_on > 0.55
+        v3x, v3y = self.VIEW_3D_BTN
 
-        if self.enable_2d_mode and not is_2d:
+        # 多尺度模板匹配
+        score_2d_on = self._match_template_score(screen, '2D_on.png',
+                         (vx - 24, vy - 24, 48, 48), multi_scale=True)
+        score_2d_off = self._match_template_score(screen, '2D_off.png',
+                          (vx - 24, vy - 24, 48, 48), multi_scale=True)
+        MIN_VIEW_CONF = 0.40
+
+        is_2d = False
+        if (score_2d_on is not None and score_2d_on >= MIN_VIEW_CONF) or \
+           (score_2d_off is not None and score_2d_off >= MIN_VIEW_CONF):
+            if score_2d_on is not None and score_2d_off is not None:
+                is_2d = score_2d_on > score_2d_off
+            elif score_2d_on is not None and score_2d_on >= MIN_VIEW_CONF:
+                is_2d = True
+            else:
+                is_2d = False
+        else:
+            # 模板匹配失败 → 亮度回退
+            cal = self._sample_brightness(screen, vx, vy, radius=3)
+            if cal is not None:
+                _, _, _, brightness = cal
+                is_2d = brightness < 120  # 深色=当前选中=2D模式
+
+        # 仅在确信状态不一致时才切换（防止反复切换）
+        if self.enable_2d_mode and not is_2d and (score_2d_off or 0) >= MIN_VIEW_CONF:
             self.log("🖥️ [视角] 当前为3D模式，切换至2D...")
             self._click_filter_point(vx, vy)
-        elif not self.enable_2d_mode and is_2d:
+        elif not self.enable_2d_mode and is_2d and (score_2d_on or 0) >= MIN_VIEW_CONF:
             self.log("🖥️ [视角] 当前为2D模式，切换至3D...")
-            # 点击3D按钮
-            v3x, v3y = self.VIEW_3D_BTN
             self._click_filter_point(v3x, v3y)
 
     def _color_diff(self, a, b):
@@ -707,16 +706,17 @@ class WoaBot:
 
     def _filter_state_matches(self, state, expected):
         """检查实际状态是否匹配期望状态。
-        None 状态视为「不确定」，不阻止匹配（避免因个别按钮无法识别导致整体误判）。"""
-        known_mismatch = False
+        None 状态视为「不确定」— 若有已知按钮全部匹配则返回 True，
+        若有已知按钮不匹配则返回 False，全部未知则返回 False（需要干预）。"""
+        has_known = False
         for key, want_selected in expected.items():
             current = state.get(key)
             if current is None:
-                continue  # 不确定 → 跳过，不阻止
+                continue
+            has_known = True
             if current != want_selected:
-                known_mismatch = True  # 已知不匹配
-        # 只有明确检测到不匹配时才返回 False
-        return not known_mismatch
+                return False
+        return has_known  # 至少有一个已知按钮匹配才返回 True
 
     def _ensure_filter_menu_open(self):
         """确保筛选菜单已展开（菜单按钮深色=已展开），返回截图。
