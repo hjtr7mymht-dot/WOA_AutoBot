@@ -395,56 +395,114 @@ class WoaBot:
     def _color_diff(self, a, b):
         return sum(abs(int(a[i]) - int(b[i])) for i in range(3))
 
+    def _sample_brightness(self, screen, x, y, radius=2):
+        """采样 (x,y) 周围 (2*radius+1)² 区域的 BGR 均值亮度（0~255）。
+        返回 (avg_b, avg_g, avg_r, brightness) 或 None。"""
+        try:
+            h, w = screen.shape[:2]
+            samples = []
+            for ox in range(-radius, radius + 1):
+                for oy in range(-radius, radius + 1):
+                    nx, ny = x + ox, y + oy
+                    if 0 <= nx < w and 0 <= ny < h:
+                        px = screen[ny, nx]
+                        if len(px) >= 3:
+                            samples.append((int(px[0]), int(px[1]), int(px[2])))
+                        else:
+                            v = int(px[0])
+                            samples.append((v, v, v))
+            if not samples:
+                return None
+            n = len(samples)
+            avg_b = sum(s[0] for s in samples) / n
+            avg_g = sum(s[1] for s in samples) / n
+            avg_r = sum(s[2] for s in samples) / n
+            brightness = (avg_b + avg_g + avg_r) / 3.0
+            return (avg_b, avg_g, avg_r, brightness)
+        except Exception:
+            return None
+
     def _is_pixel_light(self, screen, x, y):
+        """检测像素是否接近亮色（亮灰圆底/未选中）。
+        双通道：颜色匹配 + 亮度回退。"""
         try:
             b, g, r = screen[y, x]
-            return self._color_diff((b, g, r), self.COLOR_LIGHT) < 80
+            # 主通道：颜色匹配
+            if self._color_diff((b, g, r), self.COLOR_LIGHT) < 80:
+                return True
+            # 回退：亮度判断（亮灰圆底 > 160）
+            brightness = (int(b) + int(g) + int(r)) / 3.0
+            return brightness > 160
         except Exception:
             return False
 
     def _is_pixel_dark(self, screen, x, y):
+        """检测像素是否接近深色（深灰圆底/选中）。
+        双通道：颜色匹配 + 亮度回退。"""
         try:
             b, g, r = screen[y, x]
-            return self._color_diff((b, g, r), self.COLOR_DARK) < 80
+            # 主通道：颜色匹配
+            if self._color_diff((b, g, r), self.COLOR_DARK) < 80:
+                return True
+            # 回退：亮度判断（深灰圆底 < 120）
+            brightness = (int(b) + int(g) + int(r)) / 3.0
+            return brightness < 120
         except Exception:
             return False
 
     def _is_tower_off(self, screen):
-        """四个检测点全部为灰色才表示塔台关闭"""
+        """四个检测点全部为灰色（TOWER_OFF_COLOR）或低亮度才表示塔台关闭。
+        双通道：颜色匹配 + 亮度回退（< 140 = 灰色/关闭）。"""
         tb, tg, tr = self.TOWER_OFF_COLOR
         for (x, y) in self.TOWER_CHECK_POINTS:
             try:
                 b, g, r = screen[y, x]
-                if self._color_diff((b, g, r), (tb, tg, tr)) > 70:
-                    return False
+                bi, gi, ri = int(b), int(g), int(r)
+                if self._color_diff((bi, gi, ri), (tb, tg, tr)) <= 90:
+                    continue  # 颜色匹配 → 灰色/关闭
+                # 亮度回退：灰色塔台像素亮度约 100-140
+                if (bi + gi + ri) / 3.0 < 140:
+                    continue  # 低亮度 → 灰色/关闭
+                return False  # 非灰色 → 塔台开启
             except Exception:
                 return False
         return True
 
     def _is_tower_all_open_by_pixels(self, screen):
-        """像素兜底：判断塔台四个控制器是否全部开启（非灰色即开启）。"""
+        """判断塔台四个控制器是否全部开启（非灰色=开启）。
+        双通道：颜色匹配 + 亮度回退（> 145 = 彩色/开启）。"""
         if screen is None:
             return False
         tb, tg, tr = self.TOWER_OFF_COLOR
         for (x, y) in self.TOWER_CHECK_POINTS:
             try:
                 b, g, r = screen[y, x]
-                if self._color_diff((b, g, r), (tb, tg, tr)) <= 70:
-                    return False
+                bi, gi, ri = int(b), int(g), int(r)
+                if self._color_diff((bi, gi, ri), (tb, tg, tr)) > 90:
+                    continue  # 颜色不匹配 → 彩色/开启
+                # 亮度回退：彩色灯亮度 > 145
+                if (bi + gi + ri) / 3.0 > 145:
+                    continue  # 高亮度 → 彩色/开启
+                return False  # 灰色 → 关闭
             except Exception:
                 return False
         return True
 
     def _is_tower_slot_active_by_pixels(self, screen, slot_index):
         """像素检测单个塔台控制器是否激活（slot_index: 0-3 对应控制器1-4）。
-        非灰色即为激活。"""
+        非灰色+非低亮度即为激活。"""
         if screen is None:
             return False
         tb, tg, tr = self.TOWER_OFF_COLOR
         x, y = self.TOWER_CHECK_POINTS[slot_index]
         try:
             b, g, r = screen[y, x]
-            return self._color_diff((b, g, r), (tb, tg, tr)) > 70
+            bi, gi, ri = int(b), int(g), int(r)
+            if self._color_diff((bi, gi, ri), (tb, tg, tr)) > 90:
+                return True   # 颜色不匹配灰色 → 激活
+            if (bi + gi + ri) / 3.0 > 145:
+                return True   # 高亮度 → 彩色 → 激活
+            return False
         except Exception:
             return False
 
@@ -470,12 +528,19 @@ class WoaBot:
         return self.safe_locate('tower.png', confidence=0.8, region=self.TOWER_ICON_ROI) is not None
 
     def _is_point_red(self, b, g, r):
-        """检测点是否为红色（需延时）：R 主导，与绿/灰区分"""
+        """检测点是否为红色（需延时）：R 主导，与绿/灰区分。
+        双通道：颜色匹配 + R通道占比回退。"""
+        bi, gi, ri = int(b), int(g), int(r)
         rb, rg, rr = self.TOWER_RED_BGR
-        diff_red = self._color_diff((b, g, r), (rb, rg, rr))
-        diff_green = self._color_diff((b, g, r), self.TOWER_GREEN_BGR)
-        diff_gray = self._color_diff((b, g, r), self.TOWER_OFF_COLOR)
-        return diff_red < 90 and diff_red <= diff_green and diff_red <= diff_gray
+        diff_red = self._color_diff((bi, gi, ri), (rb, rg, rr))
+        diff_green = self._color_diff((bi, gi, ri), self.TOWER_GREEN_BGR)
+        diff_gray = self._color_diff((bi, gi, ri), self.TOWER_OFF_COLOR)
+        if diff_red < 90 and diff_red <= diff_green and diff_red <= diff_gray:
+            return True
+        # 回退：R 通道显著高于 G 和 B（红色特征）
+        if ri > gi + 30 and ri > bi + 30 and ri > 120:
+            return True
+        return False
 
     # ─── 筛选按钮识图引擎 ────────────────────────────────
 
@@ -611,76 +676,54 @@ class WoaBot:
         return True
 
     def _ensure_filter_menu_open(self):
-        """确保筛选菜单已展开，返回截图。多轮验证：菜单按钮像素/亮度 → 至少一个筛选按钮模板可匹配。"""
-        for attempt in range(8):
+        """确保筛选菜单已展开（菜单按钮深色=已展开），返回截图。
+        三层检测：像素颜色 → 模板匹配 → 相对亮度。"""
+        for _ in range(6):
             screen = self.adb.get_screenshot()
             if screen is None:
                 return None
             mx, my = self.FILTER_MENU_BTN
-
-            # ── 步骤1：菜单按钮是否深色/低亮度（表示已展开）──
-            menu_dark = self._is_pixel_dark(screen, mx, my)
-            if not menu_dark:
-                try:
-                    b, g, r = screen[my, mx]
-                    menu_dark = (int(b) + int(g) + int(r)) / 3.0 < 120
-                except Exception:
-                    pass
-
-            if not menu_dark:
-                self._click_filter_point(mx, my)
-                self.sleep(0.35)
-                continue
-
-            # ── 步骤2：验证菜单确实已打开（至少一个筛选按钮模板可匹配）──
-            import cv2, os
-            any_filter_visible = False
-            for btn in self.FILTER_BUTTONS:
-                for tpl_key in ('tpl_on', 'tpl_off'):
-                    tpl_path = self.icon_path + btn[tpl_key]
-                    if not os.path.exists(tpl_path):
-                        continue
-                    tpl = cv2.imread(tpl_path)
-                    if tpl is None:
-                        continue
-                    cx, cy = btn['click']
-                    margin = 28
-                    sx, sy = max(0, cx - margin), max(0, cy - margin)
-                    sw = min(margin * 2, screen.shape[1] - sx)
-                    sh = min(margin * 2, screen.shape[0] - sy)
-                    if sw < tpl.shape[1] or sh < tpl.shape[0]:
-                        continue
-                    roi = screen[sy:sy+sh, sx:sx+sw]
-                    try:
-                        res = cv2.matchTemplate(roi, tpl, cv2.TM_CCOEFF_NORMED)
-                        if cv2.minMaxLoc(res)[1] >= 0.5:
-                            any_filter_visible = True
-                            break
-                    except Exception:
-                        pass
-                if any_filter_visible:
-                    break
-
-            if any_filter_visible:
+            # 方法1：像素颜色检测
+            if self._is_pixel_dark(screen, mx, my):
                 return screen
-
-            # 菜单按钮看起来是深色但筛选按钮不可见 → 可能误判，再点一次确保
+            # 方法2：相对亮度检测（深色按钮→低亮度→菜单已展开）
+            try:
+                b, g, r = screen[my, mx]
+                brightness = (int(b) + int(g) + int(r)) / 3.0
+                if brightness < 120:  # 深色 → 菜单展开
+                    return screen
+            except Exception:
+                pass
+            # 方法3：模板匹配兜底
+            import cv2, os
+            tpl_path = self.icon_path + 'filter_menu_open.png'
+            if os.path.exists(tpl_path):
+                tpl = cv2.imread(tpl_path)
+                if tpl is not None:
+                    roi_x, roi_y = mx - 16, my - 16
+                    if roi_x >= 0 and roi_y >= 0:
+                        roi = screen[roi_y:roi_y+32, roi_x:roi_x+32]
+                        if roi.shape[0] >= tpl.shape[0] and roi.shape[1] >= tpl.shape[1]:
+                            try:
+                                res = cv2.matchTemplate(roi, tpl, cv2.TM_CCOEFF_NORMED)
+                                if cv2.minMaxLoc(res)[1] >= 0.7:
+                                    return screen
+                            except Exception:
+                                pass
             self._click_filter_point(mx, my)
-            self.sleep(0.35)
-
-        # 全部尝试后仍返回最后的截图（由调用方处理）
+            self.sleep(0.3)
         return self.adb.get_screenshot()
 
     def _apply_filter_state(self, expected_state, max_rounds=8):
         """循环将筛选状态修正为目标状态。
-        策略：逐按钮检测→不一致则点击→重截图验证。状态未知时强制点击(odd确保翻转)。"""
+        当按钮状态无法判断时（None），改为渐进盲点尝试切换（最多2次/按钮/轮）。"""
+        blind_attempts = {}  # key → 本轮盲点次数
         for round_idx in range(max_rounds):
             screen = self.adb.get_screenshot()
             if screen is None:
                 return
-
-            # 确保菜单展开
             mx, my = self.FILTER_MENU_BTN
+            # 检查菜单是否展开（像素+亮度双重检测）
             menu_open = self._is_pixel_dark(screen, mx, my)
             if not menu_open:
                 try:
@@ -690,9 +733,8 @@ class WoaBot:
                     pass
             if not menu_open:
                 self._click_filter_point(mx, my)
-                self.sleep(0.35)
+                self.sleep(0.3)
                 continue
-
             all_ok = True
             for btn in self.FILTER_BUTTONS:
                 key = btn['key']
@@ -700,34 +742,28 @@ class WoaBot:
                 if want is None:
                     continue
                 current = self._detect_filter_button_state(screen, btn)
-                if current == want:
-                    continue  # 状态正确，检查下一个按钮
-
-                # 状态未知或错误 → 点击1次切换
-                label = btn['label']
                 if current is None:
-                    self.log(f"📋 [筛选] ⚠️ {label} 状态未知，点击切换")
-                else:
-                    self.log(f"📋 [筛选] {label}: {'on' if current else 'off'} → {'on' if want else 'off'}")
-                self._click_filter_point(*btn['click'])
-                self.sleep(0.25)
-                all_ok = False
-                break  # 点击后重新截图验证
-
+                    # 渐进盲点：第1次点1下，第2次点2下（确保状态翻转）
+                    attempts = blind_attempts.get(key, 0)
+                    if attempts < 2:
+                        blind_attempts[key] = attempts + 1
+                        clicks = attempts + 1  # 第1次1下，第2次2下
+                        self.log(f"📋 [筛选] ⚠️ {btn['label']} 状态未知，盲点{clicks}次尝试切换")
+                        for _ in range(clicks):
+                            self._click_filter_point(*btn['click'])
+                            self.sleep(0.15)
+                        self.sleep(0.25)
+                        all_ok = False
+                        break
+                    # 已盲点2次仍无法判断 → 跳过
+                    continue
+                if current != want:
+                    self._click_filter_point(*btn['click'])
+                    self.sleep(0.2)
+                    all_ok = False
+                    break
             if all_ok:
                 return
-
-        # 超过最大轮次仍未达到目标 → 强行盲切：每个不符合的按钮点1次
-        self.log("📋 [筛选] ⚠️ 多轮未达目标，执行盲切...")
-        for btn in self.FILTER_BUTTONS:
-            key = btn['key']
-            want = expected_state.get(key)
-            if want is None:
-                continue
-            current = self._detect_filter_button_state(screen, btn)
-            if current != want:
-                self._click_filter_point(*btn['click'])
-                self.sleep(0.2)
 
     def _matches_filter_mode3(self, screen):
         """不起飞模式：菜单深色、待处理选中、离港不选，进港/机场内有且仅有一个选中"""
