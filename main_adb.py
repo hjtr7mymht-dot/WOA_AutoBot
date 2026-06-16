@@ -551,10 +551,16 @@ class WoaBot:
         # COLOR_DARK=(101,85,70) BGR   → 深灰圆底 → 选中(on)
         diff_light = abs(avg_b - self.COLOR_LIGHT[0]) + abs(avg_g - self.COLOR_LIGHT[1]) + abs(avg_r - self.COLOR_LIGHT[2])
         diff_dark  = abs(avg_b - self.COLOR_DARK[0])  + abs(avg_g - self.COLOR_DARK[1])  + abs(avg_r - self.COLOR_DARK[2])
-        if diff_dark < diff_light and diff_dark < 80:
+        # 宽松阈值：亮深差距 > 40 且有明显倾向则判定
+        if diff_dark < diff_light and diff_dark < 140:
             return True   # 接近深色 → 已选中(on)
-        if diff_light < diff_dark and diff_light < 80:
+        if diff_light < diff_dark and diff_light < 140:
             return False  # 接近亮色 → 未选中(off)
+        # 阈值不够但仍有一方明显更近（差距 > 60）→ 按较近方判定
+        if diff_dark < diff_light and (diff_light - diff_dark) > 60:
+            return True
+        if diff_light < diff_dark and (diff_dark - diff_light) > 60:
+            return False
         return None       # 无法判断，不操作
 
     def _detect_filter_state(self, screen):
@@ -575,21 +581,41 @@ class WoaBot:
         return True
 
     def _ensure_filter_menu_open(self):
-        """确保筛选菜单已展开（菜单按钮深色=已展开），返回截图"""
+        """确保筛选菜单已展开（菜单按钮深色=已展开），返回截图。
+        优先像素检测(COLOR_DARK)，失败时回退到模板匹配(filter_menu_open.png)。"""
         for _ in range(6):
             screen = self.adb.get_screenshot()
             if screen is None:
                 return None
             mx, my = self.FILTER_MENU_BTN
+            # 方法1：像素颜色检测
             if self._is_pixel_dark(screen, mx, my):
                 return screen
+            # 方法2：模板匹配兜底（部分设备像素颜色偏差时使用）
+            import cv2, os
+            tpl_path = self.icon_path + 'filter_menu_open.png'
+            if os.path.exists(tpl_path):
+                tpl = cv2.imread(tpl_path)
+                if tpl is not None:
+                    roi_x, roi_y = mx - 16, my - 16
+                    if roi_x >= 0 and roi_y >= 0:
+                        roi = screen[roi_y:roi_y+32, roi_x:roi_x+32]
+                        if roi.shape[0] >= tpl.shape[0] and roi.shape[1] >= tpl.shape[1]:
+                            try:
+                                res = cv2.matchTemplate(roi, tpl, cv2.TM_CCOEFF_NORMED)
+                                if cv2.minMaxLoc(res)[1] >= 0.7:
+                                    return screen
+                            except Exception:
+                                pass
             self._click_filter_point(mx, my)
             self.sleep(0.3)
         return self.adb.get_screenshot()
 
     def _apply_filter_state(self, expected_state, max_rounds=8):
-        """循环将筛选状态修正为目标状态"""
-        for _ in range(max_rounds):
+        """循环将筛选状态修正为目标状态。
+        当按钮状态无法判断时（None），改为盲点一次尝试切换（每按钮每轮最多盲点1次）。"""
+        blind_clicked = set()  # 本轮已盲点的按钮
+        for round_idx in range(max_rounds):
             screen = self.adb.get_screenshot()
             if screen is None:
                 return
@@ -606,7 +632,15 @@ class WoaBot:
                     continue
                 current = self._detect_filter_button_state(screen, btn)
                 if current is None:
-                    # 无法判断状态 → 跳过不点，避免盲点误触
+                    # 无法判断状态 → 盲点一次尝试切换（每按钮每轮仅1次，防止死循环）
+                    if key not in blind_clicked:
+                        blind_clicked.add(key)
+                        self.log(f"📋 [筛选] ⚠️ {btn['label']} 状态未知，盲点尝试切换")
+                        self._click_filter_point(*btn['click'])
+                        self.sleep(0.25)
+                        all_ok = False
+                        break
+                    # 已盲点过仍无法判断 → 跳过，避免无限点击
                     continue
                 if current != want:
                     self._click_filter_point(*btn['click'])
