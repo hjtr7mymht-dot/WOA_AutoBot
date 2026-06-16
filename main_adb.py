@@ -152,6 +152,9 @@ class WoaBot:
         # 2D/3D 切换按钮（游戏右上角附近）
         self.VIEW_2D_BTN = (1162, 44)
         self.VIEW_3D_BTN = (1204, 44)
+        # 自适应亮度校准缓存：{key: {'on_brightness': float, 'off_brightness': float}}
+        self._btn_calibration = {}
+        self.CALIBRATE_CONF = 0.65  # 高于此置信度才用于校准
         # 右侧类别栏处理开关
         self.enable_category_processing = False
         self.category_selection = {c["key"]: False for c in SIDEBAR_CATEGORIES}
@@ -550,7 +553,18 @@ class WoaBot:
                 return btn
         return None
 
-    def _match_template_score(self, screen, template_name, roi):
+    def _match_template_score(self, screen, template_name, roi, multi_scale=True):
+        """模板匹配得分（支持多尺度以兼容不同分辨率缩放）。
+        
+        Args:
+            screen: 游戏截图 (1600×900)
+            template_name: 模板文件名
+            roi: (x, y, w, h) 搜索区域
+            multi_scale: 是否尝试多尺度匹配 (0.92x ~ 1.08x)
+        
+        Returns:
+            float 最高置信度，或 None
+        """
         import cv2
         tpl_path = self.icon_path + template_name
         if not os.path.exists(tpl_path):
@@ -565,63 +579,90 @@ class WoaBot:
         search = screen[y:y + h, x:x + w]
         if search.shape[0] < tpl.shape[0] or search.shape[1] < tpl.shape[1]:
             return None
-        try:
-            res = cv2.matchTemplate(search, tpl, cv2.TM_CCOEFF_NORMED)
-            _, max_val, _, _ = cv2.minMaxLoc(res)
-            return float(max_val)
-        except Exception:
-            return None
+
+        best_score = None
+        scales = [0.92, 0.96, 1.0, 1.04, 1.08] if multi_scale else [1.0]
+        for scale in scales:
+            if scale == 1.0:
+                tpl_scaled = tpl
+            else:
+                new_w = max(1, int(tpl.shape[1] * scale))
+                new_h = max(1, int(tpl.shape[0] * scale))
+                if new_w > search.shape[1] or new_h > search.shape[0]:
+                    continue
+                tpl_scaled = cv2.resize(tpl, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+            try:
+                res = cv2.matchTemplate(search, tpl_scaled, cv2.TM_CCOEFF_NORMED)
+                score = float(cv2.minMaxLoc(res)[1])
+                if best_score is None or score > best_score:
+                    best_score = score
+            except Exception:
+                continue
+        return best_score
 
     def _detect_filter_button_state(self, screen, btn):
         """用 on/off 模板比对一个按钮的选中状态，返回 True=选中, False=未选中, None=无法判断。
         
-        三层策略（逐级回退）：
-        1. 模板匹配 (TM_CCOEFF_NORMED) — 最准确，需最低置信度 0.45
-        2. 绝对颜色匹配 (COLOR_LIGHT / COLOR_DARK) — 中等
-        3. 相对亮度比较 (avg(RGB)) — 最通用，不依赖具体颜色值
+        四层策略（逐级回退 + 自适应校准）：
+        1. 多尺度模板匹配 (0.92x~1.08x) — 最准确
+        2. 自适应亮度校准 — 根据历史高置信度匹配自动学习设备亮度
+        3. 绝对颜色匹配 (COLOR_LIGHT / COLOR_DARK) — 中等
+        4. 通用亮度比较 — 纯灰度，零依赖
         """
         cx, cy = btn['click']
+        key = btn['key']
         margin = 24
         roi = (cx - margin, cy - margin, margin * 2, margin * 2)
 
-        # ── 第1层：模板匹配（需最低置信度）──
-        score_on = self._match_template_score(screen, btn['tpl_on'], roi)
-        score_off = self._match_template_score(screen, btn['tpl_off'], roi)
-        MIN_CONF = 0.45
+        # ── 第1层：多尺度模板匹配 ──
+        MIN_CONF = 0.42
+        score_on = self._match_template_score(screen, btn['tpl_on'], roi, multi_scale=True)
+        score_off = self._match_template_score(screen, btn['tpl_off'], roi, multi_scale=True)
         if (score_on is not None and score_on >= MIN_CONF) or (score_off is not None and score_off >= MIN_CONF):
             if score_on is None or score_on < MIN_CONF:
-                return False if (score_off or 0) >= MIN_CONF else None
-            if score_off is None or score_off < MIN_CONF:
-                return True
-            if score_on >= score_off:
-                return True
-            if score_off - score_on > 0.08:
-                return False
-            return True
+                result = False
+            elif score_off is None or score_off < MIN_CONF:
+                result = True
+            elif score_on >= score_off:
+                result = True
+            elif score_off - score_on > 0.08:
+                result = False
+            else:
+                result = True
+            
+            # 自适应校准：高置信度时记录亮度
+            best_score = max(score_on or 0, score_off or 0)
+            if best_score >= self.CALIBRATE_CONF:
+                cal = self._sample_brightness(screen, cx, cy, radius=3)
+                if cal is not None:
+                    _, _, _, brightness = cal
+                    entry = self._btn_calibration.get(key, {})
+                    if result:
+                        entry['on_brightness'] = brightness
+                    else:
+                        entry['off_brightness'] = brightness
+                    # 仅当同时有 on 和 off 样本时才保存
+                    if 'on_brightness' in entry and 'off_brightness' in entry:
+                        self._btn_calibration[key] = entry
+            return result
 
         # ── 取 5×5 邻域像素样本 ──
-        h, w = screen.shape[:2]
-        if cx >= w or cy >= h:
+        cal = self._sample_brightness(screen, cx, cy, radius=2)
+        if cal is None:
             return None
-        samples = []
-        for ox in (-2, -1, 0, 1, 2):
-            for oy in (-2, -1, 0, 1, 2):
-                nx, ny = cx + ox, cy + oy
-                if 0 <= nx < w and 0 <= ny < h:
-                    px = screen[ny, nx]
-                    if len(px) >= 3:
-                        b, g, r = int(px[0]), int(px[1]), int(px[2])
-                    else:
-                        b = g = r = int(px[0])
-                    samples.append((b, g, r))
-        if not samples:
-            return None
-        avg_b = sum(s[0] for s in samples) / len(samples)
-        avg_g = sum(s[1] for s in samples) / len(samples)
-        avg_r = sum(s[2] for s in samples) / len(samples)
-        brightness = (avg_r + avg_g + avg_b) / 3.0
+        avg_b, avg_g, avg_r, brightness = cal
 
-        # ── 第2层：绝对颜色匹配 ──
+        # ── 第2层：自适应亮度校准 ──
+        cal_entry = self._btn_calibration.get(key)
+        if cal_entry and 'on_brightness' in cal_entry and 'off_brightness' in cal_entry:
+            diff_on = abs(brightness - cal_entry['on_brightness'])
+            diff_off = abs(brightness - cal_entry['off_brightness'])
+            if diff_on < diff_off and diff_on < 40:
+                return True
+            if diff_off < diff_on and diff_off < 40:
+                return False
+
+        # ── 第3层：绝对颜色匹配 ──
         diff_light = abs(avg_b - self.COLOR_LIGHT[0]) + abs(avg_g - self.COLOR_LIGHT[1]) + abs(avg_r - self.COLOR_LIGHT[2])
         diff_dark  = abs(avg_b - self.COLOR_DARK[0])  + abs(avg_g - self.COLOR_DARK[1])  + abs(avg_r - self.COLOR_DARK[2])
         if diff_dark < diff_light and diff_dark < 140:
@@ -633,12 +674,13 @@ class WoaBot:
         if diff_light < diff_dark and (diff_dark - diff_light) > 60:
             return False
 
-        # ── 第3层：相对亮度比较 ──
+        # ── 第4层：通用亮度比较 ──
         if brightness < 115:
-            return True   # 深色 → 选中(on)
+            return True
         if brightness > 160:
-            return False  # 亮色 → 未选中(off)
-        # 中间灰区（115~160）：偏移重采样
+            return False
+        # 中间灰区偏移重采样
+        h, w = screen.shape[:2]
         for off_x, off_y in [(8, 0), (-8, 0), (0, 8), (0, -8)]:
             sx, sy = cx + off_x, cy + off_y
             if 0 <= sx < w and 0 <= sy < h:
@@ -650,7 +692,7 @@ class WoaBot:
                 if b2_avg > 160:
                     return False
 
-        return None       # 所有方法都无法判断
+        return None
 
     def _detect_filter_state(self, screen):
         """返回所有按钮的当前状态 dict: {key: True/False/None}"""
