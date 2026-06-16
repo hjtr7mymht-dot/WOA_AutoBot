@@ -953,17 +953,34 @@ class WoaBot:
 
     # ─── 分辨率自适应工具 ────────────────────────────────
     def _get_raw_resolution(self):
-        """获取设备实际分辨率 (宽, 高)，无数据时回退到 1600×900。"""
+        """获取设备实际分辨率 (宽, 高)，无数据时回退到 1600×900。
+        优先从 adb 对象读取，确保与截图归一化使用同一数据源。"""
         if self.adb is None:
             return REF_WIDTH, REF_HEIGHT
-        rw = int(getattr(self.adb, '_raw_screen_w', 0) or REF_WIDTH)
-        rh = int(getattr(self.adb, '_raw_screen_h', 0) or REF_HEIGHT)
-        return rw, rh
+        rw = getattr(self.adb, '_raw_screen_w', 0)
+        rh = getattr(self.adb, '_raw_screen_h', 0)
+        if not rw or not rh:
+            # 尝试从截图直接获取
+            screen = self.adb.get_screenshot()
+            if screen is not None:
+                h, w = screen.shape[:2]
+                rw, rh = w, h
+            else:
+                rw, rh = REF_WIDTH, REF_HEIGHT
+        return int(rw) or REF_WIDTH, int(rh) or REF_HEIGHT
 
     def _scale_to_device(self, ref_x, ref_y):
-        """将 1600×900 参考坐标映射到设备物理坐标（绕过 logical→device 二次缩放）。"""
+        """将 1600×900 参考坐标映射到设备物理坐标（与 _logical_to_device_point 一致使用 round）。"""
         rw, rh = self._get_raw_resolution()
-        return int(ref_x * rw / REF_WIDTH), int(ref_y * rh / REF_HEIGHT)
+        return int(round(ref_x * rw / REF_WIDTH)), int(round(ref_y * rh / REF_HEIGHT))
+
+    def _get_aspect_info(self):
+        """返回分辨率信息用于日志调试。"""
+        rw, rh = self._get_raw_resolution()
+        ratio = rw / max(1, rh)
+        ref_ratio = REF_WIDTH / REF_HEIGHT
+        status = "OK" if abs(ratio - ref_ratio) < 0.02 else "⚠️非16:9"
+        return f"{rw}×{rh} (比例 {ratio:.3f}, 参考 {ref_ratio:.3f}) {status}"
 
     def _scale_to_logical(self, ref_x, ref_y):
         """保持归一化空间坐标不变（截图已归一化为 1600×900）。"""
@@ -1765,7 +1782,9 @@ class WoaBot:
             res_info = self.adb.get_resolution_info() if hasattr(self.adb, 'get_resolution_info') else None
             if res_info:
                 raw_w, raw_h = res_info.get('raw', (w, h))
-                self.log(f"✅ 画面正常，脚本启动 (设备分辨率: {raw_w}x{raw_h} -> 逻辑分辨率: {w}x{h})")
+                ar = raw_w / max(1, raw_h)
+                ar_ok = "✅" if abs(ar - 16/9) < 0.03 else "⚠️非16:9"
+                self.log(f"✅ 画面正常，脚本启动 (设备分辨率: {raw_w}x{raw_h} -> 逻辑分辨率: {w}x{h}) {ar_ok}")
             else:
                 self.log(f"✅ 画面正常，脚本启动 (逻辑分辨率: {w}x{h})")
             ctrl_map = {"adb": "ADB", "uiautomator2": "uiautomator2"}

@@ -805,7 +805,14 @@ class AdbController:
         self._raw_screen_h = int(h)
         if w == self.LOGICAL_WIDTH and h == self.LOGICAL_HEIGHT:
             return img
-        return cv2.resize(img, (self.LOGICAL_WIDTH, self.LOGICAL_HEIGHT), interpolation=cv2.INTER_AREA)
+        # 宽高比检查：非 16:9 设备使用 INTER_LINEAR 减少模糊
+        device_ratio = w / max(1, h)
+        target_ratio = self.LOGICAL_WIDTH / max(1, self.LOGICAL_HEIGHT)
+        if abs(device_ratio - target_ratio) > 0.02:
+            interp = cv2.INTER_LINEAR  # 非标比例用线性插值
+        else:
+            interp = cv2.INTER_AREA
+        return cv2.resize(img, (self.LOGICAL_WIDTH, self.LOGICAL_HEIGHT), interpolation=interp)
 
     def get_resolution_info(self):
         return {
