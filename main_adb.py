@@ -155,6 +155,10 @@ class WoaBot:
         # 自适应亮度校准缓存：{key: {'on_brightness': float, 'off_brightness': float}}
         self._btn_calibration = {}
         self.CALIBRATE_CONF = 0.65  # 高于此置信度才用于校准
+        # 自适应坐标校准：首次成功匹配后，用实际位置覆盖硬编码坐标
+        self._pos_calibrated = False
+        self._pos_offset_x = 0
+        self._pos_offset_y = 0
         # 右侧类别栏处理开关
         self.enable_category_processing = False
         self.category_selection = {c["key"]: False for c in SIDEBAR_CATEGORIES}
@@ -949,7 +953,11 @@ class WoaBot:
         self._apply_filter_state(mode1)
 
     def _click_filter_point(self, x, y):
-        self.adb.click(x, y, random_offset=5)
+        """点击筛选按钮（支持坐标自校准）。"""
+        if self._pos_calibrated:
+            self._calibrated_click(x, y)
+        else:
+            self.adb.click(x, y, random_offset=5)
 
     # ─── 分辨率自适应工具 ────────────────────────────────
     def _get_raw_resolution(self):
@@ -960,7 +968,6 @@ class WoaBot:
         rw = getattr(self.adb, '_raw_screen_w', 0)
         rh = getattr(self.adb, '_raw_screen_h', 0)
         if not rw or not rh:
-            # 尝试从截图直接获取
             screen = self.adb.get_screenshot()
             if screen is not None:
                 h, w = screen.shape[:2]
@@ -970,27 +977,52 @@ class WoaBot:
         return int(rw) or REF_WIDTH, int(rh) or REF_HEIGHT
 
     def _scale_to_device(self, ref_x, ref_y):
-        """将 1600×900 参考坐标映射到设备物理坐标。
-        
-        考虑 letterbox 偏移和缩放比（与 _logical_to_device_point 一致）。
-        """
+        """将 1600×900 参考坐标等比映射到设备物理坐标（与 _logical_to_device_point 一致）。"""
         rw, rh = self._get_raw_resolution()
-        if self.adb is not None:
-            scale = getattr(self.adb, "_l_scale", 1.0)
-            x_off = getattr(self.adb, "_lx_off", 0)
-            y_off = getattr(self.adb, "_ly_off", 0)
-            if scale > 0 and abs(scale - 1.0) > 0.001:
-                cx = float(ref_x) - x_off
-                cy = float(ref_y) - y_off
-                return int(round(cx / scale)), int(round(cy / scale))
         return int(round(ref_x * rw / REF_WIDTH)), int(round(ref_y * rh / REF_HEIGHT))
+
+    def _calibrate_ui_positions(self):
+        """自校准 UI 元素位置：用模板匹配检测已知元素，计算坐标偏移量。
+        
+        在首次截图成功后调用一次，后续所有硬编码坐标通过偏移量修正。
+        """
+        if self._pos_calibrated:
+            return
+        screen = self.adb.get_screenshot() if self.adb else None
+        if screen is None:
+            return
+
+        # 用 main_interface.png 作为锚点（左上角固定元素）
+        anchor = self.safe_locate('main_interface.png', region=self.REGION_MAIN_ANCHOR, confidence=0.7)
+        if anchor is None:
+            return
+
+        # 锚点期望位置（REGION_MAIN_ANCHOR 中心）
+        ax, ay, aw, ah = self.REGION_MAIN_ANCHOR
+        expected_x = ax + aw // 2
+        expected_y = ay + ah // 2
+        actual_x, actual_y = anchor[0], anchor[1]
+
+        self._pos_offset_x = actual_x - expected_x
+        self._pos_offset_y = actual_y - expected_y
+        self._pos_calibrated = True
+
+        if abs(self._pos_offset_x) > 3 or abs(self._pos_offset_y) > 3:
+            self.log(f"📐 [校准] UI坐标偏移: dx={self._pos_offset_x:+d}, dy={self._pos_offset_y:+d}")
+            self.log(f"📐 [校准] 设备分辨率: {self._get_aspect_info()}")
+
+    def _calibrated_click(self, ref_x, ref_y):
+        """校准后的点击：应用坐标偏移量后点击。"""
+        cx = ref_x + self._pos_offset_x
+        cy = ref_y + self._pos_offset_y
+        self.adb.click(cx, cy, random_offset=5)
 
     def _get_aspect_info(self):
         """返回分辨率信息用于日志调试。"""
         rw, rh = self._get_raw_resolution()
         ratio = rw / max(1, rh)
         ref_ratio = REF_WIDTH / REF_HEIGHT
-        status = "OK" if abs(ratio - ref_ratio) < 0.02 else "⚠️非16:9"
+        status = "OK" if abs(ratio - ref_ratio) < 0.03 else "⚠️非16:9"
         return f"{rw}×{rh} (比例 {ratio:.3f}, 参考 {ref_ratio:.3f}) {status}"
 
     def _scale_to_logical(self, ref_x, ref_y):
@@ -1965,6 +1997,8 @@ class WoaBot:
             self._no_takeoff_cycle_side = 'landing'
             self._no_takeoff_cycle_next_switch_time = time.time() + self._no_takeoff_switch_interval
         self._periodic_15s_check(force_initial_filter_check=True)
+        # 自校准 UI 坐标偏移（首次运行）
+        self._calibrate_ui_positions()
         if self.enable_no_takeoff_mode:
             self._schedule_no_takeoff_auto_logout()
         if self.enable_standalone_logout:

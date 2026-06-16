@@ -276,10 +276,6 @@ class AdbController:
         self._minitouch_screen_h = 900
         self._raw_screen_w = self.LOGICAL_WIDTH
         self._raw_screen_h = self.LOGICAL_HEIGHT
-        # letterbox 归一化参数（非 16:9 设备自动计算）
-        self._l_scale = 1.0
-        self._lx_off = 0
-        self._ly_off = 0
 
         # nemu_ipc 截图（MuMu12 专用）
         self._nemu_ipc = NemuIpcHelper(self)
@@ -784,30 +780,11 @@ class AdbController:
             self.run_cmd(["shell", "input", "tap", str(xi), str(yi)])
 
     def _logical_to_device_point(self, x, y):
-        """将 1600×900 逻辑坐标映射到设备物理坐标。
-        
-        考虑 letterbox 偏移和缩放比，支持非 16:9 设备。
-        """
+        """将 1600×900 逻辑坐标等比映射到设备物理坐标。"""
         rw = max(1, int(getattr(self, "_raw_screen_w", self.LOGICAL_WIDTH)))
         rh = max(1, int(getattr(self, "_raw_screen_h", self.LOGICAL_HEIGHT)))
-        scale = getattr(self, "_l_scale", 1.0)
-        x_off = getattr(self, "_lx_off", 0)
-        y_off = getattr(self, "_ly_off", 0)
-
-        # 1. 减去黑边偏移 → 内容坐标
-        cx = float(x) - x_off
-        cy = float(y) - y_off
-
-        # 2. 除以缩放比 → 原始设备坐标
-        if scale > 0:
-            dx = int(round(cx / scale))
-            dy = int(round(cy / scale))
-        else:
-            # 回退：直接按比例缩放
-            dx = int(round(float(x) * rw / self.LOGICAL_WIDTH))
-            dy = int(round(float(y) * rh / self.LOGICAL_HEIGHT))
-
-        # 3. 钳制到设备范围
+        dx = int(round(float(x) * rw / self.LOGICAL_WIDTH))
+        dy = int(round(float(y) * rh / self.LOGICAL_HEIGHT))
         dx = max(0, min(rw - 1, dx))
         dy = max(0, min(rh - 1, dy))
         return dx, dy
@@ -821,45 +798,20 @@ class AdbController:
         )
 
     def _normalize_to_logical_resolution(self, img):
-        """将截图归一化到 1600×900 逻辑分辨率。
+        """将截图等比缩放至 1600×900 逻辑分辨率（stretch-to-fit）。
         
-        策略：等比例缩放（letterbox），黑边填充，保持原始宽高比。
-        存储偏移量 (_lx_off, _ly_off) 和缩放比 (_l_scale) 供坐标反算。"""
+        存储设备原始分辨率供坐标反算，保持与旧版一致的坐标语义。
+        """
         import cv2
-        import numpy as np
         if img is None:
             return None
         h, w = img.shape[:2]
         self._raw_screen_w = int(w)
         self._raw_screen_h = int(h)
-
         if w == self.LOGICAL_WIDTH and h == self.LOGICAL_HEIGHT:
-            self._l_scale = 1.0
-            self._lx_off = 0
-            self._ly_off = 0
             return img
-
-        # 计算等比例缩放：内容填满 1600×900，超出部分裁剪或留黑边
-        scale = min(self.LOGICAL_WIDTH / w, self.LOGICAL_HEIGHT / h)
-        new_w = int(round(w * scale))
-        new_h = int(round(h * scale))
-
-        # 缩放内容
-        interp = cv2.INTER_AREA if scale < 1.0 else cv2.INTER_LINEAR
-        resized = cv2.resize(img, (new_w, new_h), interpolation=interp)
-
-        # 创建 1600×900 黑色画布，居中放置缩放后的内容
-        canvas = np.zeros((self.LOGICAL_HEIGHT, self.LOGICAL_WIDTH, 3), dtype=np.uint8)
-        x_off = (self.LOGICAL_WIDTH - new_w) // 2
-        y_off = (self.LOGICAL_HEIGHT - new_h) // 2
-        canvas[y_off:y_off + new_h, x_off:x_off + new_w] = resized
-
-        # 存储变换参数
-        self._l_scale = scale
-        self._lx_off = x_off
-        self._ly_off = y_off
-
-        return canvas
+        interp = cv2.INTER_AREA if w > self.LOGICAL_WIDTH else cv2.INTER_LINEAR
+        return cv2.resize(img, (self.LOGICAL_WIDTH, self.LOGICAL_HEIGHT), interpolation=interp)
 
     def get_resolution_info(self):
         return {
