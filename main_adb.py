@@ -359,7 +359,7 @@ class WoaBot:
 
     def _ensure_view_mode(self):
         """确保游戏视角为期望的2D/3D模式。
-        模板匹配 + 亮度回退检测，防止反复切换。"""
+        模板匹配 + 双环采样亮度回退，兼容低对比度2D图标（亮度差仅31）。"""
         screen = self.adb.get_screenshot() if self.adb else None
         if screen is None:
             return
@@ -367,12 +367,15 @@ class WoaBot:
         vx, vy = self.VIEW_2D_BTN
         v3x, v3y = self.VIEW_3D_BTN
 
-        # 多尺度模板匹配
+        # 多尺度模板匹配（2D图标对比度低，加大ROI+降低阈值）
+        margin = 32  # 与 pending 按钮一致
         score_2d_on = self._match_template_score(screen, '2D_on.png',
-                         (vx - 24, vy - 24, 48, 48), multi_scale=True)
+                         (vx - margin, vy - margin, margin * 2, margin * 2),
+                         multi_scale=True)
         score_2d_off = self._match_template_score(screen, '2D_off.png',
-                          (vx - 24, vy - 24, 48, 48), multi_scale=True)
-        MIN_VIEW_CONF = 0.40
+                          (vx - margin, vy - margin, margin * 2, margin * 2),
+                          multi_scale=True)
+        MIN_VIEW_CONF = 0.35  # 降低以兼容低对比度（与 pending 一致）
 
         is_2d = False
         if (score_2d_on is not None and score_2d_on >= MIN_VIEW_CONF) or \
@@ -384,11 +387,11 @@ class WoaBot:
             else:
                 is_2d = False
         else:
-            # 模板匹配失败 → 亮度回退
-            cal = self._sample_brightness(screen, vx, vy, radius=3)
+            # 模板匹配失败 → 双环采样亮度回退（避免中心采样打到图标）
+            cal = self._sample_ring_brightness(screen, vx, vy, outer_r=16, inner_r=6)
             if cal is not None:
-                _, _, _, brightness = cal
-                is_2d = brightness < 120  # 深色=当前选中=2D模式
+                brightness = cal
+                is_2d = brightness < 120  # 深色=当前选中=2D模式（2D_on≈128, 2D_off≈159）
 
         # 仅在确信状态不一致时才切换（防止反复切换）
         if self.enable_2d_mode and not is_2d and (score_2d_off or 0) >= MIN_VIEW_CONF:
@@ -396,6 +399,13 @@ class WoaBot:
             self._click_filter_point(vx, vy)
         elif not self.enable_2d_mode and is_2d and (score_2d_on or 0) >= MIN_VIEW_CONF:
             self.log("🖥️ [视角] 当前为2D模式，切换至3D...")
+            self._click_filter_point(v3x, v3y)
+        elif self.enable_2d_mode and not is_2d:
+            # 模板置信度低于阈值但亮度判断为非2D → 仍尝试切换
+            self.log("🖥️ [视角] 亮度回退: 当前疑似3D，切换至2D...")
+            self._click_filter_point(vx, vy)
+        elif not self.enable_2d_mode and is_2d:
+            self.log("🖥️ [视角] 亮度回退: 当前疑似2D，切换至3D...")
             self._click_filter_point(v3x, v3y)
 
     def _color_diff(self, a, b):
@@ -425,6 +435,47 @@ class WoaBot:
             avg_r = sum(s[2] for s in samples) / n
             brightness = (avg_b + avg_g + avg_r) / 3.0
             return (avg_b, avg_g, avg_r, brightness)
+        except Exception:
+            return None
+
+    def _sample_ring_brightness(self, screen, x, y, outer_r=16, inner_r=6):
+        """双环采样亮度：外环采背景圆底，内环用于验证内外亮度差。
+        若内外亮度差<20（采样到了同质区域），改用中间环(r=11)。
+        返回纯亮度值(0~255)或None。"""
+        try:
+            import math
+            h, w = screen.shape[:2]
+
+            def _ring(radius):
+                pts = []
+                for ang in range(0, 360, 45):
+                    rad = math.radians(ang)
+                    sx = int(x + radius * math.cos(rad))
+                    sy = int(y + radius * math.sin(rad))
+                    if 0 <= sx < w and 0 <= sy < h:
+                        px = screen[sy, sx]
+                        if len(px) >= 3:
+                            pts.append((int(px[0]), int(px[1]), int(px[2])))
+                        else:
+                            v = int(px[0])
+                            pts.append((v, v, v))
+                return pts
+
+            outer_pts = _ring(outer_r)
+            inner_pts = _ring(inner_r)
+            if not outer_pts:
+                return None
+
+            outer_bright = sum(s[0]+s[1]+s[2] for s in outer_pts) / (3.0 * len(outer_pts))
+
+            if inner_pts:
+                inner_bright = sum(s[0]+s[1]+s[2] for s in inner_pts) / (3.0 * len(inner_pts))
+                if abs(outer_bright - inner_bright) < 20:
+                    mid_pts = _ring(11)
+                    if mid_pts:
+                        outer_bright = sum(s[0]+s[1]+s[2] for s in mid_pts) / (3.0 * len(mid_pts))
+
+            return outer_bright
         except Exception:
             return None
 
@@ -614,11 +665,13 @@ class WoaBot:
         """
         cx, cy = btn['click']
         key = btn['key']
-        margin = 24
+        # pending 按钮有 ❗ 图标，需要更大 ROI 才能完整匹配模板
+        margin = 32 if key == 'pending' else 24
         roi = (cx - margin, cy - margin, margin * 2, margin * 2)
 
         # ── 第1层：多尺度模板匹配 ──
-        MIN_CONF = 0.42
+        # pending 按钮对比度低（亮度差仅31），适当降低置信度阈值
+        MIN_CONF = 0.35 if key == 'pending' else 0.42
         score_on = self._match_template_score(screen, btn['tpl_on'], roi, multi_scale=True)
         score_off = self._match_template_score(screen, btn['tpl_off'], roi, multi_scale=True)
         if (score_on is not None and score_on >= MIN_CONF) or (score_off is not None and score_off >= MIN_CONF):
@@ -743,16 +796,26 @@ class WoaBot:
 
     def _filter_state_matches(self, state, expected):
         """检查实际状态是否匹配期望状态。
-        None 状态视为「不确定」— 若有已知按钮全部匹配则返回 True，
-        若有已知按钮不匹配则返回 False，全部未知则返回 False（需要干预）。"""
+        - 已知按钮全部匹配 → True
+        - 任一已知按钮不匹配 → False
+        - 全部未知 → False
+        - 存在未知但其余全部匹配 → False（关键按钮未知=不可信，必须重试）
+        对待处理(pending)额外严格：pending 是核心按钮，未知或错配即失败。
+        """
         has_known = False
+        unknown_required = False
         for key, want_selected in expected.items():
             current = state.get(key)
             if current is None:
+                # pending 是核心按钮，未知状态直接判定为不匹配
+                if key == 'pending' or want_selected is not None:
+                    unknown_required = True
                 continue
             has_known = True
             if current != want_selected:
                 return False
+        if unknown_required:
+            return False  # 有关键按钮状态未知，必须重试
         return has_known  # 至少有一个已知按钮匹配才返回 True
 
     def _ensure_filter_menu_open(self):
@@ -796,14 +859,21 @@ class WoaBot:
 
     def _apply_filter_state(self, expected_state, max_rounds=8):
         """循环将筛选状态修正为目标状态。
-        盲点策略：点击1次 → 重检测 → 若仍未知则跳过该按钮。"""
-        blind_tried = set()  # 本轮已盲点尝试的按钮（每按钮最多1次盲点+1次纠正）
+        
+        优先级策略：待处理(pending) > 机场内(ground) > 进港(arrival) > 离港(departure)
+        盲点策略：最多3次连续盲点尝试 → 仍未知则放弃该按钮但继续检查其他按钮。
+        """
+        # 按优先级排序：want=True（需选中）的按钮优先处理
+        priority_order = {key: i for i, key in enumerate(
+            ['pending', 'ground', 'arrival', 'departure']
+        )}
+        
         for round_idx in range(max_rounds):
             screen = self.adb.get_screenshot()
             if screen is None:
                 return
             mx, my = self.FILTER_MENU_BTN
-            # 检查菜单是否展开（像素+亮度双重检测）
+            # 检查菜单是否展开（像素+亮度+模板三重检测）
             menu_open = self._is_pixel_dark(screen, mx, my)
             if not menu_open:
                 try:
@@ -815,42 +885,63 @@ class WoaBot:
                 self._click_filter_point(mx, my)
                 self.sleep(0.3)
                 continue
+
             all_ok = True
-            for btn in self.FILTER_BUTTONS:
+            # 按优先级排序：pending 最先检查
+            sorted_btns = sorted(
+                self.FILTER_BUTTONS,
+                key=lambda b: priority_order.get(b['key'], 99)
+            )
+            for btn in sorted_btns:
                 key = btn['key']
                 want = expected_state.get(key)
                 if want is None:
                     continue
+
                 current = self._detect_filter_button_state(screen, btn)
+
                 if current is None:
-                    # 盲点策略：点1次 → 重检测 → 若状态已知且不符则再点1次纠正
-                    if key in blind_tried:
-                        continue  # 已尝试过，不再盲点
-                    blind_tried.add(key)
-                    self.log(f"📋 [筛选] ⚠️ {btn['label']} 状态未知，盲点切换后重检测")
-                    self._click_filter_point(*btn['click'])
-                    self.sleep(0.3)
-                    # 立即重检测
-                    screen2 = self.adb.get_screenshot()
-                    if screen2 is not None:
+                    # ── 盲点策略：最多3次尝试 ──
+                    resolved = False
+                    for blind_i in range(3):
+                        self.log(f"📋 [筛选] ⚠️ {btn['label']} 状态未知，"
+                                 f"盲点尝试 {blind_i+1}/3")
+                        self._click_filter_point(*btn['click'])
+                        self.sleep(0.3)
+                        screen2 = self.adb.get_screenshot()
+                        if screen2 is None:
+                            break
                         current2 = self._detect_filter_button_state(screen2, btn)
                         if current2 is not None:
                             if current2 == want:
-                                self.log(f"📋 [筛选] ✓ {btn['label']} 盲点后状态正确")
-                                continue  # 已正确，继续下一个按钮
+                                self.log(f"📋 [筛选] ✓ {btn['label']} 盲点第{blind_i+1}次后状态正确")
                             else:
                                 # 状态已知但相反 → 再点1次纠正
-                                self.log(f"📋 [筛选] ↻ {btn['label']} 盲点后状态相反，再次切换")
+                                self.log(f"📋 [筛选] ↻ {btn['label']} 盲点后状态相反，纠正")
                                 self._click_filter_point(*btn['click'])
                                 self.sleep(0.2)
-                        # 重检测仍未知 → 跳过
-                    all_ok = False
-                    break
+                            resolved = True
+                            break
+                    if not resolved:
+                        # 3次盲点仍未知 → 放弃此按钮，继续检查其他按钮
+                        self.log(f"📋 [筛选] ⚠️ {btn['label']} 3次盲点仍无法识别，跳过")
+                        all_ok = False
+                    else:
+                        # 盲点已解决，重新截图继续下一个按钮
+                        screen = self.adb.get_screenshot()
+                        if screen is None:
+                            return
+                    continue
+
                 if current != want:
                     self._click_filter_point(*btn['click'])
                     self.sleep(0.2)
                     all_ok = False
-                    break
+                    # 切换后重新截图检查下一个按钮（本轮不 break，继续处理后续按钮）
+                    screen = self.adb.get_screenshot()
+                    if screen is None:
+                        return
+
             if all_ok:
                 return
 
