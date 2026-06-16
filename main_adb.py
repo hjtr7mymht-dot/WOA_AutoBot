@@ -649,26 +649,48 @@ class WoaBot:
                         self._btn_calibration[key] = entry
             return result
 
-        # ── 取像素样本（偏移采样：避开中心图标，取背景圆环区域）──
-        # 按钮中心是图标(✈️/→等)，颜色与背景圆底相反。
-        # 偏移 12px 到圆环区域获取真实背景色。
-        bg_samples = []
+        # ── 取像素样本（双环采样：外环=背景圆底，内环=图标区域）──
+        # 外环 (radius 14-18px): 背景圆环区域，颜色稳定
+        # 内环 (radius 4-8px):  图标区域，颜色与背景相反
+        # 通过内外对比确定真实 on/off 状态
         h, w = screen.shape[:2]
-        for off_x, off_y in [(12, 0), (-12, 0), (0, 12), (0, -12), (8, 8), (-8, -8), (8, -8), (-8, 8)]:
-            sx, sy = cx + off_x, cy + off_y
-            if 0 <= sx < w and 0 <= sy < h:
-                px = screen[sy, sx]
-                if len(px) >= 3:
-                    b, g, r = int(px[0]), int(px[1]), int(px[2])
-                else:
-                    b = g = r = int(px[0])
-                bg_samples.append((b, g, r))
-        if not bg_samples:
+        def _ring_samples(radius):
+            pts = []
+            for ang in range(0, 360, 45):
+                import math
+                rad = math.radians(ang)
+                sx = int(cx + radius * math.cos(rad))
+                sy = int(cy + radius * math.sin(rad))
+                if 0 <= sx < w and 0 <= sy < h:
+                    px = screen[sy, sx]
+                    if len(px) >= 3:
+                        pts.append((int(px[0]), int(px[1]), int(px[2])))
+                    else:
+                        v = int(px[0])
+                        pts.append((v, v, v))
+            return pts
+
+        outer_pts = _ring_samples(16)  # 外环：背景圆底
+        inner_pts = _ring_samples(6)   # 内环：图标
+
+        if not outer_pts:
             return None
-        avg_b = sum(s[0] for s in bg_samples) / len(bg_samples)
-        avg_g = sum(s[1] for s in bg_samples) / len(bg_samples)
-        avg_r = sum(s[2] for s in bg_samples) / len(bg_samples)
+
+        # 外环亮度（背景色）
+        avg_b = sum(s[0] for s in outer_pts) / len(outer_pts)
+        avg_g = sum(s[1] for s in outer_pts) / len(outer_pts)
+        avg_r = sum(s[2] for s in outer_pts) / len(outer_pts)
         brightness = (avg_r + avg_g + avg_b) / 3.0
+
+        # 内外环亮度差：大差值 = 采样正确（外环=背景, 内环=图标）
+        if inner_pts:
+            in_bright = sum(s[0]+s[1]+s[2] for s in inner_pts) / (3.0 * len(inner_pts))
+            if abs(brightness - in_bright) < 20:
+                # 内外亮度接近 → 可能采样到了纯背景或纯图标
+                # 用中间环 (r=11) 再确认
+                mid_pts = _ring_samples(11)
+                if mid_pts:
+                    brightness = sum(s[0]+s[1]+s[2] for s in mid_pts) / (3.0 * len(mid_pts))
 
         # ── 第2层：自适应亮度校准 ──
         cal_entry = self._btn_calibration.get(key)
