@@ -611,54 +611,76 @@ class WoaBot:
         return True
 
     def _ensure_filter_menu_open(self):
-        """确保筛选菜单已展开（菜单按钮深色=已展开），返回截图。
-        三层检测：像素颜色 → 模板匹配 → 相对亮度。"""
-        for _ in range(6):
+        """确保筛选菜单已展开，返回截图。多轮验证：菜单按钮像素/亮度 → 至少一个筛选按钮模板可匹配。"""
+        for attempt in range(8):
             screen = self.adb.get_screenshot()
             if screen is None:
                 return None
             mx, my = self.FILTER_MENU_BTN
-            # 方法1：像素颜色检测
-            if self._is_pixel_dark(screen, mx, my):
-                return screen
-            # 方法2：相对亮度检测（深色按钮→低亮度→菜单已展开）
-            try:
-                b, g, r = screen[my, mx]
-                brightness = (int(b) + int(g) + int(r)) / 3.0
-                if brightness < 120:  # 深色 → 菜单展开
-                    return screen
-            except Exception:
-                pass
-            # 方法3：模板匹配兜底
+
+            # ── 步骤1：菜单按钮是否深色/低亮度（表示已展开）──
+            menu_dark = self._is_pixel_dark(screen, mx, my)
+            if not menu_dark:
+                try:
+                    b, g, r = screen[my, mx]
+                    menu_dark = (int(b) + int(g) + int(r)) / 3.0 < 120
+                except Exception:
+                    pass
+
+            if not menu_dark:
+                self._click_filter_point(mx, my)
+                self.sleep(0.35)
+                continue
+
+            # ── 步骤2：验证菜单确实已打开（至少一个筛选按钮模板可匹配）──
             import cv2, os
-            tpl_path = self.icon_path + 'filter_menu_open.png'
-            if os.path.exists(tpl_path):
-                tpl = cv2.imread(tpl_path)
-                if tpl is not None:
-                    roi_x, roi_y = mx - 16, my - 16
-                    if roi_x >= 0 and roi_y >= 0:
-                        roi = screen[roi_y:roi_y+32, roi_x:roi_x+32]
-                        if roi.shape[0] >= tpl.shape[0] and roi.shape[1] >= tpl.shape[1]:
-                            try:
-                                res = cv2.matchTemplate(roi, tpl, cv2.TM_CCOEFF_NORMED)
-                                if cv2.minMaxLoc(res)[1] >= 0.7:
-                                    return screen
-                            except Exception:
-                                pass
+            any_filter_visible = False
+            for btn in self.FILTER_BUTTONS:
+                for tpl_key in ('tpl_on', 'tpl_off'):
+                    tpl_path = self.icon_path + btn[tpl_key]
+                    if not os.path.exists(tpl_path):
+                        continue
+                    tpl = cv2.imread(tpl_path)
+                    if tpl is None:
+                        continue
+                    cx, cy = btn['click']
+                    margin = 28
+                    sx, sy = max(0, cx - margin), max(0, cy - margin)
+                    sw = min(margin * 2, screen.shape[1] - sx)
+                    sh = min(margin * 2, screen.shape[0] - sy)
+                    if sw < tpl.shape[1] or sh < tpl.shape[0]:
+                        continue
+                    roi = screen[sy:sy+sh, sx:sx+sw]
+                    try:
+                        res = cv2.matchTemplate(roi, tpl, cv2.TM_CCOEFF_NORMED)
+                        if cv2.minMaxLoc(res)[1] >= 0.5:
+                            any_filter_visible = True
+                            break
+                    except Exception:
+                        pass
+                if any_filter_visible:
+                    break
+
+            if any_filter_visible:
+                return screen
+
+            # 菜单按钮看起来是深色但筛选按钮不可见 → 可能误判，再点一次确保
             self._click_filter_point(mx, my)
-            self.sleep(0.3)
+            self.sleep(0.35)
+
+        # 全部尝试后仍返回最后的截图（由调用方处理）
         return self.adb.get_screenshot()
 
     def _apply_filter_state(self, expected_state, max_rounds=8):
         """循环将筛选状态修正为目标状态。
-        当按钮状态无法判断时（None），改为渐进盲点尝试切换（最多2次/按钮/轮）。"""
-        blind_attempts = {}  # key → 本轮盲点次数
+        策略：逐按钮检测→不一致则点击→重截图验证。状态未知时强制点击(odd确保翻转)。"""
         for round_idx in range(max_rounds):
             screen = self.adb.get_screenshot()
             if screen is None:
                 return
+
+            # 确保菜单展开
             mx, my = self.FILTER_MENU_BTN
-            # 检查菜单是否展开（像素+亮度双重检测）
             menu_open = self._is_pixel_dark(screen, mx, my)
             if not menu_open:
                 try:
@@ -668,8 +690,9 @@ class WoaBot:
                     pass
             if not menu_open:
                 self._click_filter_point(mx, my)
-                self.sleep(0.3)
+                self.sleep(0.35)
                 continue
+
             all_ok = True
             for btn in self.FILTER_BUTTONS:
                 key = btn['key']
@@ -677,28 +700,34 @@ class WoaBot:
                 if want is None:
                     continue
                 current = self._detect_filter_button_state(screen, btn)
+                if current == want:
+                    continue  # 状态正确，检查下一个按钮
+
+                # 状态未知或错误 → 点击1次切换
+                label = btn['label']
                 if current is None:
-                    # 渐进盲点：第1次点1下，第2次点2下（确保状态翻转）
-                    attempts = blind_attempts.get(key, 0)
-                    if attempts < 2:
-                        blind_attempts[key] = attempts + 1
-                        clicks = attempts + 1  # 第1次1下，第2次2下
-                        self.log(f"📋 [筛选] ⚠️ {btn['label']} 状态未知，盲点{clicks}次尝试切换")
-                        for _ in range(clicks):
-                            self._click_filter_point(*btn['click'])
-                            self.sleep(0.15)
-                        self.sleep(0.25)
-                        all_ok = False
-                        break
-                    # 已盲点2次仍无法判断 → 跳过
-                    continue
-                if current != want:
-                    self._click_filter_point(*btn['click'])
-                    self.sleep(0.2)
-                    all_ok = False
-                    break
+                    self.log(f"📋 [筛选] ⚠️ {label} 状态未知，点击切换")
+                else:
+                    self.log(f"📋 [筛选] {label}: {'on' if current else 'off'} → {'on' if want else 'off'}")
+                self._click_filter_point(*btn['click'])
+                self.sleep(0.25)
+                all_ok = False
+                break  # 点击后重新截图验证
+
             if all_ok:
                 return
+
+        # 超过最大轮次仍未达到目标 → 强行盲切：每个不符合的按钮点1次
+        self.log("📋 [筛选] ⚠️ 多轮未达目标，执行盲切...")
+        for btn in self.FILTER_BUTTONS:
+            key = btn['key']
+            want = expected_state.get(key)
+            if want is None:
+                continue
+            current = self._detect_filter_button_state(screen, btn)
+            if current != want:
+                self._click_filter_point(*btn['click'])
+                self.sleep(0.2)
 
     def _matches_filter_mode3(self, screen):
         """不起飞模式：菜单深色、待处理选中、离港不选，进港/机场内有且仅有一个选中"""
