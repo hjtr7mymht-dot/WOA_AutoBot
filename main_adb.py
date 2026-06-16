@@ -576,7 +576,7 @@ class WoaBot:
         """用 on/off 模板比对一个按钮的选中状态，返回 True=选中, False=未选中, None=无法判断。
         
         三层策略（逐级回退）：
-        1. 模板匹配 (TM_CCOEFF_NORMED) — 最准确
+        1. 模板匹配 (TM_CCOEFF_NORMED) — 最准确，需最低置信度 0.45
         2. 绝对颜色匹配 (COLOR_LIGHT / COLOR_DARK) — 中等
         3. 相对亮度比较 (avg(RGB)) — 最通用，不依赖具体颜色值
         """
@@ -584,13 +584,14 @@ class WoaBot:
         margin = 24
         roi = (cx - margin, cy - margin, margin * 2, margin * 2)
 
-        # ── 第1层：模板匹配 ──
+        # ── 第1层：模板匹配（需最低置信度）──
         score_on = self._match_template_score(screen, btn['tpl_on'], roi)
         score_off = self._match_template_score(screen, btn['tpl_off'], roi)
-        if score_on is not None or score_off is not None:
-            if score_on is None:
-                return False
-            if score_off is None:
+        MIN_CONF = 0.45
+        if (score_on is not None and score_on >= MIN_CONF) or (score_off is not None and score_off >= MIN_CONF):
+            if score_on is None or score_on < MIN_CONF:
+                return False if (score_off or 0) >= MIN_CONF else None
+            if score_off is None or score_off < MIN_CONF:
                 return True
             if score_on >= score_off:
                 return True
@@ -618,10 +619,9 @@ class WoaBot:
         avg_b = sum(s[0] for s in samples) / len(samples)
         avg_g = sum(s[1] for s in samples) / len(samples)
         avg_r = sum(s[2] for s in samples) / len(samples)
+        brightness = (avg_r + avg_g + avg_b) / 3.0
 
         # ── 第2层：绝对颜色匹配 ──
-        # COLOR_LIGHT=(203,191,179) BGR → 亮灰圆底 → 未选中(off)
-        # COLOR_DARK=(101,85,70) BGR   → 深灰圆底 → 选中(on)
         diff_light = abs(avg_b - self.COLOR_LIGHT[0]) + abs(avg_g - self.COLOR_LIGHT[1]) + abs(avg_r - self.COLOR_LIGHT[2])
         diff_dark  = abs(avg_b - self.COLOR_DARK[0])  + abs(avg_g - self.COLOR_DARK[1])  + abs(avg_r - self.COLOR_DARK[2])
         if diff_dark < diff_light and diff_dark < 140:
@@ -633,27 +633,21 @@ class WoaBot:
         if diff_light < diff_dark and (diff_dark - diff_light) > 60:
             return False
 
-        # ── 第3层：相对亮度比较（纯灰度，不依赖具体颜色）──
-        # 亮度 = (R+G+B)/3，范围 0~255
-        brightness = (avg_r + avg_g + avg_b) / 3.0
-        # 亮按钮(off): 典型亮度 ~180-205
-        # 暗按钮(on):  典型亮度 ~65-95
-        # 以中间值 140 为分界线
-        if brightness < 105:
+        # ── 第3层：相对亮度比较 ──
+        if brightness < 115:
             return True   # 深色 → 选中(on)
-        if brightness > 170:
+        if brightness > 160:
             return False  # 亮色 → 未选中(off)
-        # 在中间灰区（105~170），说明像素可能不在按钮上
-        # 尝试放大采样区域重新判断（移动 8px 偏移）
+        # 中间灰区（115~160）：偏移重采样
         for off_x, off_y in [(8, 0), (-8, 0), (0, 8), (0, -8)]:
             sx, sy = cx + off_x, cy + off_y
             if 0 <= sx < w and 0 <= sy < h:
                 px = screen[sy, sx]
                 b2, g2, r2 = int(px[0]), int(px[1]), int(px[2]) if len(px) >= 3 else (int(px[0]),)*3
                 b2_avg = (r2 + g2 + b2) / 3.0
-                if b2_avg < 105:
+                if b2_avg < 115:
                     return True
-                if b2_avg > 170:
+                if b2_avg > 160:
                     return False
 
         return None       # 所有方法都无法判断
@@ -666,14 +660,17 @@ class WoaBot:
         return state
 
     def _filter_state_matches(self, state, expected):
-        """检查实际状态是否匹配期望状态"""
+        """检查实际状态是否匹配期望状态。
+        None 状态视为「不确定」，不阻止匹配（避免因个别按钮无法识别导致整体误判）。"""
+        known_mismatch = False
         for key, want_selected in expected.items():
             current = state.get(key)
             if current is None:
-                return False
+                continue  # 不确定 → 跳过，不阻止
             if current != want_selected:
-                return False
-        return True
+                known_mismatch = True  # 已知不匹配
+        # 只有明确检测到不匹配时才返回 False
+        return not known_mismatch
 
     def _ensure_filter_menu_open(self):
         """确保筛选菜单已展开（菜单按钮深色=已展开），返回截图。
@@ -716,8 +713,8 @@ class WoaBot:
 
     def _apply_filter_state(self, expected_state, max_rounds=8):
         """循环将筛选状态修正为目标状态。
-        当按钮状态无法判断时（None），改为渐进盲点尝试切换（最多2次/按钮/轮）。"""
-        blind_attempts = {}  # key → 本轮盲点次数
+        盲点策略：点击1次 → 重检测 → 若仍未知则跳过该按钮。"""
+        blind_tried = set()  # 本轮已盲点尝试的按钮（每按钮最多1次盲点+1次纠正）
         for round_idx in range(max_rounds):
             screen = self.adb.get_screenshot()
             if screen is None:
@@ -743,20 +740,29 @@ class WoaBot:
                     continue
                 current = self._detect_filter_button_state(screen, btn)
                 if current is None:
-                    # 渐进盲点：第1次点1下，第2次点2下（确保状态翻转）
-                    attempts = blind_attempts.get(key, 0)
-                    if attempts < 2:
-                        blind_attempts[key] = attempts + 1
-                        clicks = attempts + 1  # 第1次1下，第2次2下
-                        self.log(f"📋 [筛选] ⚠️ {btn['label']} 状态未知，盲点{clicks}次尝试切换")
-                        for _ in range(clicks):
-                            self._click_filter_point(*btn['click'])
-                            self.sleep(0.15)
-                        self.sleep(0.25)
-                        all_ok = False
-                        break
-                    # 已盲点2次仍无法判断 → 跳过
-                    continue
+                    # 盲点策略：点1次 → 重检测 → 若状态已知且不符则再点1次纠正
+                    if key in blind_tried:
+                        continue  # 已尝试过，不再盲点
+                    blind_tried.add(key)
+                    self.log(f"📋 [筛选] ⚠️ {btn['label']} 状态未知，盲点切换后重检测")
+                    self._click_filter_point(*btn['click'])
+                    self.sleep(0.3)
+                    # 立即重检测
+                    screen2 = self.adb.get_screenshot()
+                    if screen2 is not None:
+                        current2 = self._detect_filter_button_state(screen2, btn)
+                        if current2 is not None:
+                            if current2 == want:
+                                self.log(f"📋 [筛选] ✓ {btn['label']} 盲点后状态正确")
+                                continue  # 已正确，继续下一个按钮
+                            else:
+                                # 状态已知但相反 → 再点1次纠正
+                                self.log(f"📋 [筛选] ↻ {btn['label']} 盲点后状态相反，再次切换")
+                                self._click_filter_point(*btn['click'])
+                                self.sleep(0.2)
+                        # 重检测仍未知 → 跳过
+                    all_ok = False
+                    break
                 if current != want:
                     self._click_filter_point(*btn['click'])
                     self.sleep(0.2)
