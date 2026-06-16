@@ -970,8 +970,19 @@ class WoaBot:
         return int(rw) or REF_WIDTH, int(rh) or REF_HEIGHT
 
     def _scale_to_device(self, ref_x, ref_y):
-        """将 1600×900 参考坐标映射到设备物理坐标（与 _logical_to_device_point 一致使用 round）。"""
+        """将 1600×900 参考坐标映射到设备物理坐标。
+        
+        考虑 letterbox 偏移和缩放比（与 _logical_to_device_point 一致）。
+        """
         rw, rh = self._get_raw_resolution()
+        if self.adb is not None:
+            scale = getattr(self.adb, "_l_scale", 1.0)
+            x_off = getattr(self.adb, "_lx_off", 0)
+            y_off = getattr(self.adb, "_ly_off", 0)
+            if scale > 0 and abs(scale - 1.0) > 0.001:
+                cx = float(ref_x) - x_off
+                cy = float(ref_y) - y_off
+                return int(round(cx / scale)), int(round(cy / scale))
         return int(round(ref_x * rw / REF_WIDTH)), int(round(ref_y * rh / REF_HEIGHT))
 
     def _get_aspect_info(self):
