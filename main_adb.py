@@ -649,11 +649,26 @@ class WoaBot:
                         self._btn_calibration[key] = entry
             return result
 
-        # ── 取 5×5 邻域像素样本 ──
-        cal = self._sample_brightness(screen, cx, cy, radius=2)
-        if cal is None:
+        # ── 取像素样本（偏移采样：避开中心图标，取背景圆环区域）──
+        # 按钮中心是图标(✈️/→等)，颜色与背景圆底相反。
+        # 偏移 12px 到圆环区域获取真实背景色。
+        bg_samples = []
+        h, w = screen.shape[:2]
+        for off_x, off_y in [(12, 0), (-12, 0), (0, 12), (0, -12), (8, 8), (-8, -8), (8, -8), (-8, 8)]:
+            sx, sy = cx + off_x, cy + off_y
+            if 0 <= sx < w and 0 <= sy < h:
+                px = screen[sy, sx]
+                if len(px) >= 3:
+                    b, g, r = int(px[0]), int(px[1]), int(px[2])
+                else:
+                    b = g = r = int(px[0])
+                bg_samples.append((b, g, r))
+        if not bg_samples:
             return None
-        avg_b, avg_g, avg_r, brightness = cal
+        avg_b = sum(s[0] for s in bg_samples) / len(bg_samples)
+        avg_g = sum(s[1] for s in bg_samples) / len(bg_samples)
+        avg_r = sum(s[2] for s in bg_samples) / len(bg_samples)
+        brightness = (avg_r + avg_g + avg_b) / 3.0
 
         # ── 第2层：自适应亮度校准 ──
         cal_entry = self._btn_calibration.get(key)
