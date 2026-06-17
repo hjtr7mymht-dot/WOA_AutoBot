@@ -110,3 +110,40 @@ python gui_launcher.py
 - 程序每次启动都会自动进行一次联网版本检测（GitHub Raw -> jsDelivr -> ghproxy）。
 - 检测到新版本时会直接弹窗提示，不会自动下载、覆盖或重启。
 - 运行过程中不再执行自动更新逻辑，避免覆盖失败或误替换带来的风险。
+
+## 故障排查
+
+### ADB 连接问题
+
+| 现象 | 可能原因 | 解决方案 |
+|------|----------|----------|
+| `ADB_001` 连接失败 | 设备未授权/ADB 未启动 | 运行 `adb devices` 确认设备已授权 |
+| `ADB_002` 已断开 | 模拟器关闭/USB 松动 | 重启模拟器，检查 USB 调试授权 |
+| `ADB_004` 截图失败 | screencap 超时 | 切换截图方式为 `uiautomator2` 或降低分辨率 |
+
+### 识别问题
+
+| 现象 | 可能原因 | 解决方案 |
+|------|----------|----------|
+| 2D/3D 反复切换 | 低对比度模板误判 | 已自动降低阈值至 0.35，若仍发生请检查 icon 目录模板完整性 |
+| 待处理按钮不选中 | ❗ 图标干扰识别 | 已加大 ROI(32px)+降低阈值，若仍失败请检查设备分辨率 |
+| `[CV]` 匹配耗时 > 500ms | 全屏搜索未限定 ROI | 确保所有 match() 调用都传入 roi 参数 |
+
+### 性能优化
+
+- **截图速度**：Windows 上优先使用 `nemu_ipc`（MuMu 模拟器共享内存），速度最快 (<50ms)
+- **模板匹配**：默认使用 `TM_CCOEFF_NORMED`，可切换 `TM_SQDIFF_NORMED` 提速 30%
+- **日志限制**：GUI 日志区限制 500 行，超过自动清理旧日志
+
+### v2.0 架构说明
+
+```
+src/
+├── domain/          # 纯数据模型（NormalizedPoint, FilterMode, AircraftCategory）
+├── infrastructure/  # ADB 控制器 + CV 匹配器（分层可测试）
+├── application/     # BotOrchestrator + AppSettings（Pydantic 配置）
+├── presentation/    # CustomTkinter GUI（线程安全信号队列）
+tests/              # 单元测试（test_adb_controller, test_matcher）
+```
+
+新架构与旧 `main_adb.py` 并行运行，渐进式迁移。运行 `python -m src.presentation.gui.app` 启动新版 GUI。
