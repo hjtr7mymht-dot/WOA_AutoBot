@@ -357,18 +357,15 @@ class WoaBot:
             return
         # 用 on/off 模板检测 2D 按钮状态
         import cv2, os
-        def _match_btn(tpl_name, x, y, margin=20):
-            tpl_path = self.icon_path + tpl_name
-            if not os.path.exists(tpl_path):
-                return 0.0
-            tpl = cv2.imread(tpl_path)
+        def _match_btn(tpl_name, x, y, margin=28):
+            tpl, tw, th = self._validate_template_roi(tpl_name, (0, 0, margin*2, margin*2), log_label=f"视角按钮{tpl_name}")
             if tpl is None:
                 return 0.0
             sx = max(0, x - margin)
             sy = max(0, y - margin)
             sw = min(margin * 2, screen.shape[1] - sx)
             sh = min(margin * 2, screen.shape[0] - sy)
-            if sw < tpl.shape[1] or sh < tpl.shape[0]:
+            if sw < tw or sh < th:
                 return 0.0
             roi = screen[sy:sy+sh, sx:sx+sw]
             try:
@@ -485,12 +482,32 @@ class WoaBot:
                 return btn
         return None
 
-    def _match_template_score(self, screen, template_name, roi):
+    def _validate_template_roi(self, template_name, roi, log_label=""):
+        """校验模板尺寸是否适配 ROI，返回 (tpl, tpl_w, tpl_h) 或 (None, 0, 0)。
+        模板超过 ROI 时记录警告日志，便于排查匹配失败。"""
         import cv2
         tpl_path = self.icon_path + template_name
         if not os.path.exists(tpl_path):
-            return None
+            if log_label:
+                self.log(f"🔍 [模板] {log_label}: 文件不存在 {template_name}")
+            return None, 0, 0
         tpl = cv2.imread(tpl_path)
+        if tpl is None:
+            if log_label:
+                self.log(f"🔍 [模板] {log_label}: 无法读取 {template_name}")
+            return None, 0, 0
+        th, tw = tpl.shape[:2]
+        x, y, rw, rh = roi
+        rw = int(rw); rh = int(rh)
+        if rw < tw or rh < th:
+            if log_label:
+                self.log(f"🔍 [模板] {log_label}: ROI({rw}×{rh}) < 模板({tw}×{th})，将无法匹配！")
+            return None, tw, th
+        return tpl, tw, th
+
+    def _match_template_score(self, screen, template_name, roi):
+        import cv2
+        tpl, tw, th = self._validate_template_roi(template_name, roi, log_label=template_name)
         if tpl is None:
             return None
         x, y, w, h = roi
@@ -499,6 +516,7 @@ class WoaBot:
             return None
         search = screen[y:y + h, x:x + w]
         if search.shape[0] < tpl.shape[0] or search.shape[1] < tpl.shape[1]:
+            self.log(f"🔍 [模板] {template_name}: 截图ROI({search.shape[1]}×{search.shape[0]}) < 模板({tw}×{th})，边界裁剪导致无法匹配")
             return None
         try:
             res = cv2.matchTemplate(search, tpl, cv2.TM_CCOEFF_NORMED)
@@ -510,7 +528,7 @@ class WoaBot:
     def _detect_filter_button_state(self, screen, btn):
         """用 on/off 模板比对一个按钮的选中状态，返回 True=选中, False=未选中, None=无法判断"""
         cx, cy = btn['click']
-        margin = 24
+        margin = 32
         roi = (cx - margin, cy - margin, margin * 2, margin * 2)
         score_on = self._match_template_score(screen, btn['tpl_on'], roi)
         score_off = self._match_template_score(screen, btn['tpl_off'], roi)
