@@ -7,7 +7,7 @@ cd "$(dirname "$0")"
 PYINST=.venv-312-fresh/bin/pyinstaller
 PY=.venv-312-fresh/bin/python
 APP_NAME="WOA_AutoBot"
-DMG_VOL="WOA AutoBot v1.4.0"
+DMG_VOL="WOA AutoBot v1.4.1"
 
 echo ">>> [1/6] PyInstaller 打包..."
 rm -rf build dist

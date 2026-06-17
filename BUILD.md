@@ -31,7 +31,7 @@ xattr -rc dist/WOA_AutoBot.app
 codesign --remove-signature dist/WOA_AutoBot.app 2>/dev/null
 codesign --deep --force --sign - dist/WOA_AutoBot.app
 # 制作 DMG
-hdiutil create -volname "WOA AutoBot v1.4.0" -srcfolder dist/WOA_AutoBot.app -ov -format UDZO dist/WOA_AutoBot_macOS.dmg
+hdiutil create -volname "WOA AutoBot v1.4.1" -srcfolder dist/WOA_AutoBot.app -ov -format UDZO dist/WOA_AutoBot_macOS.dmg
 ```
 
 注意
