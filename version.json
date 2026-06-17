@@ -1,0 +1,14 @@
+{
+  "version": "1.4.0",
+  "package_urls": [
+    {
+      "name": "GitHub Release",
+      "url": "https://github.com/hjtr7mymht-dot/WOA_AutoBot/releases/download/1.4.0/WOA_AutoBot.zip"
+    },
+    {
+      "name": "ghproxy Release",
+      "url": "https://ghproxy.cn/https://github.com/hjtr7mymht-dot/WOA_AutoBot/releases/download/1.4.0/WOA_AutoBot.zip"
+    }
+  ],
+  "notes": "1.4.0：筛选系统支持4按钮识图+模板匹配交叉验证、2D/3D视角自动切换、类别栏新增客机/货机、塔台二次确认窗口、macOS全面兼容优化。"
+}
