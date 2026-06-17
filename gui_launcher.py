@@ -2796,11 +2796,10 @@ class Application(ttkb.Window):
         scroll.pack(side=RIGHT, fill=Y)
         text_area.config(yscrollcommand=scroll.set)
 
-        # ── 读取 .md 文件 ──
+        # ── 读取 .md 文件（使用 get_resource_path 兼容 PyInstaller _MEIPASS）──
         content = f"⚠️ 无法加载内容，请确认程序文件完整。"
         try:
-            _base = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else os.path.dirname(os.path.abspath(__file__))
-            md_path = os.path.join(_base, md_filename)
+            md_path = get_resource_path(md_filename)
             if os.path.isfile(md_path):
                 with io.open(md_path, "r", encoding="utf-8") as f:
                     content = f.read()
