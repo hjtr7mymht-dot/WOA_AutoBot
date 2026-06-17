@@ -682,15 +682,20 @@ class WoaBot:
                     self._no_takeoff_strategy_stable_count = 0
                     self.log(f"📋 [不起飞] 策略变更: landing_stand_cycle → {new_strategy}")
             else:
-                self._no_takeoff_strategy_stable_count = 0
+                # 新策略与当前不同（如 stand_only → landing_stand_cycle），开始累计
+                self._no_takeoff_strategy_stable_count = 1
 
-        # 进入 landing_stand_cycle 需要常规稳定性确认
+        # 进入 landing_stand_cycle 需要常规稳定性确认（连续3次）
         if (new_strategy != self._no_takeoff_last_strategy and
             self._no_takeoff_last_strategy != 'landing_stand_cycle' and
             self._no_takeoff_strategy_stable_count >= self._no_takeoff_strategy_stable_needed):
             self._no_takeoff_last_strategy = new_strategy
             self._no_takeoff_strategy_stable_count = 0
             self.log(f"📋 [不起飞] 策略变更: → {new_strategy}")
+            # 刚进入 landing_stand_cycle 时立即安排第一次轮切，避免等满一个完整周期
+            if new_strategy == 'landing_stand_cycle':
+                self._no_takeoff_cycle_next_switch_time = time.time() + self._no_takeoff_switch_interval
+                self.log(f"📋 [不起飞] 进入轮切模式，{self._no_takeoff_switch_interval:g}s 后首次切换")
 
         return self._no_takeoff_last_strategy
 
