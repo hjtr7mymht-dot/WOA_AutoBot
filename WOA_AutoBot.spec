@@ -1,7 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_all
 
-datas = [('assets', 'assets'), ('icon', 'icon'), ('adb_tools', 'adb_tools'), ('platform-tools', 'platform-tools'), ('config.json', '.'), ('version.json', '.')]
+datas = [('assets', 'assets'), ('icon', 'icon'), ('adb_tools', 'adb_tools'), ('platform-tools', 'platform-tools'), ('config.json', '.'), ('version.json', '.'), ('ANNOUNCEMENT.md', '.'), ('GUIDE.md', '.')]
 binaries = []
 hiddenimports = ['tkinter', 'PIL._tkinter_finder', 'certifi', 'ssl']
 tmp_ret = collect_all('certifi')

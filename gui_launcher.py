@@ -1834,6 +1834,11 @@ class Application(ttkb.Window):
         ]:
             btn = ttkb.Button(btn_row, text=text, bootstyle=bootstyle, command=cmd, padding=(8, 2))
             btn.pack(side=LEFT, padx=2)
+        # 公告 / 说明 按钮（内容由 ANNOUNCEMENT.md 和 GUIDE.md 控制，用户可自由编辑）
+        ttkb.Button(btn_row, text="📢 公告", bootstyle="outline-info",
+                    command=self.open_announcement_window, padding=(8, 2)).pack(side=LEFT, padx=2)
+        ttkb.Button(btn_row, text="📖 说明", bootstyle="outline-success",
+                    command=self.open_guide_window, padding=(8, 2)).pack(side=LEFT, padx=2)
 
         # ═══════════ 2. 控制栏 ═══════════
         ctrl_bar = ttkb.Frame(wrapper, padding=(8, 6))
@@ -2757,6 +2762,65 @@ class Application(ttkb.Window):
             self._hide_help_badge()
         # 内容已在内存中，无需后台线程加载；使用线程安全队列调度到主线程执行
         self._call_main_thread(_fill)
+
+    def _open_markdown_window(self, title, md_filename, icon="📄"):
+        """通用 Markdown 弹窗：从项目根目录读取 .md 文件并展示在可滚动文本区中。
+        用户可直接编辑 .md 文件来修改内容，无需改动代码。"""
+        import io
+        c = self._clr
+        win = ttkb.Toplevel(self)
+        win.title(title)
+        win.geometry("780x680")
+        win.configure(bg=c["bg"])
+        shell = ttkb.Frame(win, padding=16)
+        shell.pack(fill=BOTH, expand=True)
+
+        # ── 标题栏 ──
+        header = ttkb.Frame(shell, padding=(12, 10))
+        header.pack(fill=X)
+        ttkb.Label(header, text=f"{icon} {title}", font=(DEFAULT_FONT, 16, "bold"),
+                   foreground=c["primary"]).pack(anchor="w")
+        ttkb.Label(header, text=f"编辑 {md_filename} 即可更新此内容 · 支持 Markdown 格式",
+                   font=(DEFAULT_FONT, 9),
+                   foreground=c["text_sec"]).pack(anchor="w", pady=(2, 0))
+
+        # ── 内容区 ──
+        container = ttkb.Labelframe(shell, text=f" {title} ", padding=12,
+                                     bootstyle="primary", style="Card.TLabelframe")
+        container.pack(fill=BOTH, expand=True, pady=(10, 0))
+        text_area = tk.Text(container, font=(DEFAULT_FONT, 10), wrap="word",
+                            bg=c["surface"], fg=c["text"], relief="flat",
+                            padx=12, pady=10)
+        text_area.pack(side=LEFT, fill=BOTH, expand=True)
+        scroll = ttkb.Scrollbar(container, command=text_area.yview)
+        scroll.pack(side=RIGHT, fill=Y)
+        text_area.config(yscrollcommand=scroll.set)
+
+        # ── 读取 .md 文件 ──
+        content = f"⚠️ 无法找到 {md_filename}，请确认文件存在于程序目录中。"
+        try:
+            _base = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else os.path.dirname(os.path.abspath(__file__))
+            md_path = os.path.join(_base, md_filename)
+            if os.path.isfile(md_path):
+                with io.open(md_path, "r", encoding="utf-8") as f:
+                    content = f.read()
+        except Exception as e:
+            content = f"⚠️ 读取 {md_filename} 失败: {e}"
+
+        text_area.insert("end", content)
+        text_area.configure(state="disabled")
+        self._center_toplevel_on_parent(win)
+        # 将窗口置顶
+        win.lift()
+        win.focus_force()
+
+    def open_announcement_window(self):
+        """打开在线公告窗口（内容来自 ANNOUNCEMENT.md）"""
+        self._open_markdown_window("在线公告", "ANNOUNCEMENT.md", icon="📢")
+
+    def open_guide_window(self):
+        """打开使用说明窗口（内容来自 GUIDE.md）"""
+        self._open_markdown_window("使用说明", "GUIDE.md", icon="📖")
 
     def _open_stats_chart(self):
         import csv

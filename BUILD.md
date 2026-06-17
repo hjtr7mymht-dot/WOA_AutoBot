@@ -38,4 +38,4 @@ hdiutil create -volname "WOA AutoBot v1.4.0" -srcfolder dist/WOA_AutoBot.app -ov
 ----
 - Windows 版需要 `adb.exe` 在系统 PATH 或连接 MuMu 模拟器自动发现
 - `adb_tools/` 与 `platform-tools/` 目录中的二进制为 macOS 通用格式，打包时会随 spec 一同复制
-- `core/` 和 `bot/` 是纯 Python 包，PyInstaller 自动分析导入并编译进 exe；`icon/`、`assets/`、`config.json`、`version.json` 列为 spec datas 随包复制
+- `core/` 和 `bot/` 是纯 Python 包，PyInstaller 自动分析导入并编译进 exe；`icon/`、`assets/`、`config.json`、`version.json`、`ANNOUNCEMENT.md`、`GUIDE.md` 列为 spec datas 随包复制
