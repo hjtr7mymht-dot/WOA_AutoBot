@@ -2831,72 +2831,86 @@ class WoaBot:
         start_time = time.time()
         action_buttons = ['push_back.png', 'taxi_to_runway.png', 'wait.png', 'takeoff_by_gliding.png', 'takeoff.png',
                           'get_award_1.png', 'get_award_4.png', 'start_general.png']
+        reward_buttons = ['get_award_1.png', 'get_award_4.png']
         sm = getattr(self.adb, 'screenshot_method', 'adb')
-        scan_timeout = 1.0 if sm in ('nemu_ipc', 'uiautomator2') else 5.0
+        scan_timeout = 1.5 if sm in ('nemu_ipc', 'uiautomator2') else 5.0
         while time.time() - start_time < scan_timeout:
             self._check_running()
             screen = self.adb.get_screenshot()
             if screen is None: continue
+
+            # ── 阶段0：奖励区域预扫描（奖励弹窗出现在屏幕中央，不在底部ROI内）──
+            rx, ry, rw, rh = self.REGION_REWARD_RECOVERY
+            reward_roi = screen[ry:ry + rh, rx:rx + rw]
+            for rbtn in reward_buttons:
+                rres = self.adb.locate_image(self.icon_path + rbtn, confidence=0.65, screen_image=reward_roi)
+                if rres:
+                    reward_x = rres[0] + rx
+                    reward_y = rres[1] + ry
+                    self.log(f"   -> 🎁 [奖励区] 发现 {rbtn}，进入领奖流程")
+                    self.adb.click(reward_x, reward_y)
+                    self.sleep(0.4)
+                    got_step2 = False
+                    t2_start = time.time()
+                    def _reward_step2_click(name):
+                        return self.find_and_click(name, confidence=0.72, wait=0.6, random_offset=3)
+                    while time.time() - t2_start < 15.0:
+                        self._check_running()
+                        if _reward_step2_click('get_award_2.png') or \
+                                _reward_step2_click('get_award_3.png') or \
+                                _reward_step2_click('get_award_4.png'):
+                            got_step2 = True
+                            break
+                        time.sleep(0.1)
+                    if not got_step2:
+                        self.log("🛑 领奖流程卡死")
+                        return False
+                    self.log("   -> 领奖确认，等待开始检测下一步...")
+                    self.sleep(1.4)
+                    t3_timeout = 1.0 if sm in ('nemu_ipc', 'uiautomator2') else 2.0
+                    t3_start = time.time()
+                    bx, by, bw, bh = self.REGION_BOTTOM_ROI
+                    while time.time() - t3_start < t3_timeout:
+                        self._check_running()
+                        s3_screen = self.adb.get_screenshot()
+                        if s3_screen is None:
+                            time.sleep(0.1)
+                            continue
+                        s3_roi = s3_screen[by:by + bh, bx:bx + bw]
+                        for final_btn in ['push_back.png', 'taxi_to_runway.png', 'start_general.png']:
+                            res_final = self.adb.locate_image(self.icon_path + final_btn, confidence=0.7,
+                                                              screen_image=s3_roi)
+                            if res_final:
+                                if final_btn in ('push_back.png', 'taxi_to_runway.png'):
+                                    self._stat_depart += 1
+                                    self._stat_session_depart += 1
+                                self.adb.click(res_final[0] + bx, res_final[1] + by)
+                                self.log("   -> ✅ 离场动作执行完毕")
+                                return True
+                        time.sleep(0.1)
+                    if self.safe_locate('green_dot.png', region=self.REGION_GREEN_DOT):
+                        self.log("   -> ⚠️ 检测到绿点，跳转至地勤分配...")
+                        self.sleep(0.5)
+                        return self.handle_stand_task()
+                    self.log("   -> ℹ️ 未检测到绿点，判定为塔台已接管")
+                    return True
+
+            # ── 阶段1：底部ROI扫描常规操作按钮 ──
             bx, by, bw, bh = self.REGION_BOTTOM_ROI
             roi_img = screen[by:by + bh, bx:bx + bw]
             for btn in action_buttons:
+                # 奖励图标已在上方奖励区预扫描过，底部ROI跳过以节省匹配开销
+                if btn in reward_buttons:
+                    continue
                 res = self.adb.locate_image(self.icon_path + btn, confidence=0.8, screen_image=roi_img)
                 if res:
                     x = res[0] + bx
                     y = res[1] + by
-                    if btn == 'get_award_1.png' or btn == 'get_award_4.png':
-                        self.log("   -> 🎁 发现领奖图标，进入流程")
-                        self.adb.click(x, y)
-                        self.sleep(0.4)  # 等待弹窗完全出现，避免 nemu_ipc 等高速截图下未就绪
-                        got_step2 = False
-                        t2_start = time.time()
-                        # 领奖第二步按钮：降低置信度、减小点击偏移，提高点击成功率
-                        def _reward_step2_click(name):
-                            return self.find_and_click(name, confidence=0.72, wait=0.6, random_offset=3)
-                        while time.time() - t2_start < 15.0:
-                            self._check_running()
-                            if _reward_step2_click('get_award_2.png') or \
-                                    _reward_step2_click('get_award_3.png') or \
-                                    _reward_step2_click('get_award_4.png'):
-                                got_step2 = True
-                                break
-                            time.sleep(0.1)
-                        if not got_step2:
-                            self.log("🛑 领奖流程卡死")
-                            return False
-                        self.log("   -> 领奖确认，等待开始检测下一步...")
-                        self.sleep(1.4)
-                        t3_timeout = 1.0 if sm in ('nemu_ipc', 'uiautomator2') else 2.0
-                        t3_start = time.time()
-                        while time.time() - t3_start < t3_timeout:
-                            self._check_running()
-                            s3_screen = self.adb.get_screenshot()
-                            if s3_screen is None:
-                                time.sleep(0.1)
-                                continue
-                            s3_roi = s3_screen[by:by + bh, bx:bx + bw]
-                            for final_btn in ['push_back.png', 'taxi_to_runway.png', 'start_general.png']:
-                                res_final = self.adb.locate_image(self.icon_path + final_btn, confidence=0.7,
-                                                                  screen_image=s3_roi)
-                                if res_final:
-                                    if final_btn in ('push_back.png', 'taxi_to_runway.png'):
-                                        self._stat_depart += 1
-                                        self._stat_session_depart += 1
-                                    self.adb.click(res_final[0] + bx, res_final[1] + by)
-                                    self.log("   -> ✅ 离场动作执行完毕")
-                                    return True
-                            time.sleep(0.1)
-                        if self.safe_locate('green_dot.png', region=self.REGION_GREEN_DOT):
-                            self.log("   -> ⚠️ 检测到绿点，跳转至地勤分配...")
-                            self.sleep(0.5)
-                            return self.handle_stand_task()
-                        self.log("   -> ℹ️ 未检测到绿点，判定为塔台已接管")
-                        return True
                     if btn in ('push_back.png', 'taxi_to_runway.png'):
                         self._stat_depart += 1
                         self._stat_session_depart += 1
                     self.adb.click(x, y)
-                    self.sleep(0.5)          
+                    self.sleep(0.5)
                     return True
             time.sleep(0.1)
         self.log("⚠️ 离场任务扫描超时")
