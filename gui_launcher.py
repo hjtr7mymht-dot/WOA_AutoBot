@@ -2780,7 +2780,7 @@ class Application(ttkb.Window):
         header.pack(fill=X)
         ttkb.Label(header, text=f"{icon} {title}", font=(DEFAULT_FONT, 16, "bold"),
                    foreground=c["primary"]).pack(anchor="w")
-        ttkb.Label(header, text=f"编辑 {md_filename} 即可更新此内容 · 支持 Markdown 格式",
+        ttkb.Label(header, text=f"支持 Markdown 格式 · 版本 {LOCAL_VERSION}",
                    font=(DEFAULT_FONT, 9),
                    foreground=c["text_sec"]).pack(anchor="w", pady=(2, 0))
 
@@ -2797,15 +2797,15 @@ class Application(ttkb.Window):
         text_area.config(yscrollcommand=scroll.set)
 
         # ── 读取 .md 文件 ──
-        content = f"⚠️ 无法找到 {md_filename}，请确认文件存在于程序目录中。"
+        content = f"⚠️ 无法加载内容，请确认程序文件完整。"
         try:
             _base = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else os.path.dirname(os.path.abspath(__file__))
             md_path = os.path.join(_base, md_filename)
             if os.path.isfile(md_path):
                 with io.open(md_path, "r", encoding="utf-8") as f:
                     content = f.read()
-        except Exception as e:
-            content = f"⚠️ 读取 {md_filename} 失败: {e}"
+        except Exception:
+            content = f"⚠️ 读取内容失败，请重试或联系作者。"
 
         text_area.insert("end", content)
         text_area.configure(state="disabled")
