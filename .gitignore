@@ -7,6 +7,10 @@ build/
 *.exe
 !WOA_AutoBot.spec
 !WOA_AutoBot_mac.spec
+!adb_tools/*.exe
+!adb_tools/*.dll
+!platform-tools/*.exe
+!platform-tools/*.dll
 
 # 排除参考项目
 AzurLaneAutoScript-master/
