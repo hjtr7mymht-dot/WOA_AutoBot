@@ -1,4 +1,4 @@
-WOA AutoBot v1.4.0 打包指南
+WOA AutoBot v1.4.1 打包指南
 ===========================
 
 Windows 打包
