@@ -484,14 +484,14 @@ class WoaBot:
 
     def _validate_template_roi(self, template_name, roi, log_label=""):
         """校验模板尺寸是否适配 ROI，返回 (tpl, tpl_w, tpl_h) 或 (None, 0, 0)。
-        模板超过 ROI 时记录警告日志，便于排查匹配失败。"""
-        import cv2
+        模板超过 ROI 时记录警告日志，便于排查匹配失败。
+        使用 read_image_safe（np.fromfile+imdecode）替代 cv2.imread，支持中文路径。"""
         tpl_path = self.icon_path + template_name
         if not os.path.exists(tpl_path):
             if log_label:
                 self.log(f"🔍 [模板] {log_label}: 文件不存在 {template_name}")
             return None, 0, 0
-        tpl = cv2.imread(tpl_path)
+        tpl = read_image_safe(tpl_path)
         if tpl is None:
             if log_label:
                 self.log(f"🔍 [模板] {log_label}: 无法读取 {template_name}")
