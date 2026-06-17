@@ -34,6 +34,8 @@ a = Analysis(
         ('platform-tools', 'platform-tools'),
         ('config.json', '.'),
         ('version.json', '.'),
+        ('ANNOUNCEMENT.md', '.'),
+        ('GUIDE.md', '.'),
         ('icon/digits', 'icon/digits'),
         ('icon/digits/global', 'icon/digits/global'),
         ('icon/digits/task', 'icon/digits/task'),
