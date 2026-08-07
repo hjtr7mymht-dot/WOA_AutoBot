@@ -50,6 +50,28 @@ __pycache__/
 # 排除 Claude Code 本地配置
 .claude/
 
+# ─── 安全：密钥与凭证（绝对不要提交到 Git） ─────────────────
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.truststore
+id_rsa*
+id_ed25519*
+id_ecdsa*
+*.token
+*.secret
+.env
+.env.*
+!env.example
+credentials.json
+service-account.json
+gh-pages-deploy-key
+*.gpg
+*.asc
+
 # 排除临时文件
 _gen_obf.py
 Snipaste_*.png
