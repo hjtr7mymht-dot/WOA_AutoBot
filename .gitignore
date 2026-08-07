@@ -87,4 +87,6 @@ generate_patch.py
 manifest_*.json
 patch_*.zip
 运行调试版(pyinstaller).bat
-运行调试版(点击后约10s没有任何窗口，是正常现象，nuitka).batupdate_fingerprints.sh
+运行调试版(点击后约10s没有任何窗口，是正常现象，nuitka).bat
+
+update_fingerprints.sh
