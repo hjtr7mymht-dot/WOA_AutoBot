@@ -706,6 +706,13 @@ class Application(ttkb.Window):
                 self.tk.call('tk', 'scaling', '-displayof', '.', 1.0)
             except Exception:
                 pass
+            # ── macOS Edit 菜单：解决打包后 Cmd+C/V/X/A 失效 ──
+            self._setup_macos_edit_menu()
+
+        # ── 全局剪贴板快捷键绑定（跨平台兜底）───────────────
+        # 绑定 <<Copy>>/<<Paste>>/<<Cut>> 虚拟事件到实际剪贴板操作，
+        # 确保在任何控件中 Cmd+C/V/X 都能正常工作
+        self._setup_global_clipboard_bindings()
 
         self._apply_theme_colors()
 
@@ -1136,6 +1143,175 @@ class Application(ttkb.Window):
                     self.iconbitmap(default=icon_path)
         except Exception:
             pass
+
+    # ─── macOS 原生 Edit 菜单 ──────────────────────────────────
+    # Tk Aqua 的后端依赖原生 macOS Edit 菜单来分发 <<Copy>> / <<Paste>> /
+    # <<Cut>> / <<SelectAll>> 虚拟事件。没有这个菜单，Cmd+C/V/X/A 完全失效。
+    # 此方法创建标准 Edit 菜单并绑定虚拟事件到实际的剪贴板操作。
+    def _setup_macos_edit_menu(self):
+        """创建 macOS 原生 Edit 菜单，确保 Cmd+C/V/X/A 快捷键正常工作。
+        
+        Tk 9.0 Aqua 的后端通过 NSMenu 分发 <<Copy>>/<<Paste>>/<<Cut>>
+        虚拟事件。若应用没有 Edit 菜单，这些虚拟事件永远不会被触发，
+        导致所有文本控件的复制粘贴失效（打包后尤其明显）。
+        """
+        try:
+            menubar = tk.Menu(self)
+            # ── 应用菜单（macOS 自动处理，仅需占位）──
+            app_menu = tk.Menu(menubar, name='apple')
+            menubar.add_cascade(menu=app_menu, label='WOA AutoBot')
+            
+            # ── Edit 菜单（复制粘贴的核心）──
+            edit_menu = tk.Menu(menubar, name='edit', tearoff=0)
+            menubar.add_cascade(menu=edit_menu, label='Edit')
+            
+            # 每个菜单项触发对应的 Tk 虚拟事件，由 _setup_global_clipboard_bindings 处理
+            edit_menu.add_command(
+                label='Cut', accelerator='Cmd+X',
+                command=lambda: self.event_generate('<<Cut>>'))
+            edit_menu.add_command(
+                label='Copy', accelerator='Cmd+C',
+                command=lambda: self.event_generate('<<Copy>>'))
+            edit_menu.add_command(
+                label='Paste', accelerator='Cmd+V',
+                command=lambda: self.event_generate('<<Paste>>'))
+            edit_menu.add_separator()
+            edit_menu.add_command(
+                label='Select All', accelerator='Cmd+A',
+                command=lambda: self.event_generate('<<SelectAll>>'))
+            
+            self.config(menu=menubar)
+        except Exception:
+            pass  # 非 Aqua 平台或 Tk 版本不支持时静默跳过
+
+    def _setup_global_clipboard_bindings(self):
+        """绑定全局剪贴板快捷键 — 所有控件的复制粘贴兜底方案。
+        
+        策略（避免与 Tk 原生行为冲突）：
+        1. 顶层窗口绑定原始按键（Cmd+C/V/X/A）→ 生成对应的 <<Copy>> 等虚拟事件
+        2. bind_all 绑定 <<Copy>>/<<Paste>>/<<Cut>>/<<SelectAll>> 虚拟事件 → 执行实际操作
+        3. 控件级绑定（如 _enable_copy_for_disabled_text）通过 return "break" 阻止冒泡
+        
+        事件冒泡顺序：控件级 → 顶层窗口 → bind_all
+        由于我们在顶层窗口将原始按键转为虚拟事件，控件级绑定若 return "break"
+        则顶层窗口绑定不触发，虚拟事件不生成。正常控件无控件级绑定时，
+        顶层窗口生成虚拟事件 → bind_all 处理 → 复制粘贴生效。
+        """
+        def _clipboard_copy(event=None):
+            """将当前焦点控件的选中内容复制到剪贴板"""
+            try:
+                w = self.focus_get()
+                if w is None:
+                    return
+                # 处理 Text 控件
+                if isinstance(w, tk.Text):
+                    sel = w.tag_ranges('sel')
+                    if sel:
+                        text = w.get(*sel)
+                        self.clipboard_clear()
+                        self.clipboard_append(text)
+                # 处理 Entry / ttk.Entry
+                elif isinstance(w, (tk.Entry, ttkb.Entry)):
+                    sel = w.selection_get()
+                    if sel:
+                        self.clipboard_clear()
+                        self.clipboard_append(sel)
+                # 处理 ttk.Combobox
+                elif isinstance(w, ttkb.Combobox):
+                    try:
+                        sel = w.selection_get()
+                        if sel:
+                            self.clipboard_clear()
+                            self.clipboard_append(sel)
+                    except Exception:
+                        pass
+            except Exception:
+                pass  # 无选中内容时 selection_get() 会抛异常
+
+        def _clipboard_paste(event=None):
+            """将剪贴板内容粘贴到当前焦点控件"""
+            try:
+                w = self.focus_get()
+                if w is None:
+                    return
+                text = self.clipboard_get()
+                if not text:
+                    return
+                if isinstance(w, tk.Text):
+                    # 有选中内容则替换，否则在光标处插入
+                    if w.tag_ranges('sel'):
+                        w.delete(*w.tag_ranges('sel'))
+                    w.insert('insert', text)
+                elif isinstance(w, (tk.Entry, ttkb.Entry)):
+                    if w.selection_present():
+                        w.delete('sel.first', 'sel.last')
+                    w.insert('insert', text)
+                elif isinstance(w, ttkb.Combobox):
+                    try:
+                        w.delete(0, 'end')
+                        w.insert(0, text)
+                    except Exception:
+                        pass
+            except Exception:
+                pass  # 剪贴板为空或控件不可编辑时静默跳过
+
+        def _clipboard_cut(event=None):
+            """剪切选中内容到剪贴板（复制后删除）"""
+            try:
+                w = self.focus_get()
+                if w is None:
+                    return
+                if isinstance(w, tk.Text):
+                    sel = w.tag_ranges('sel')
+                    if sel:
+                        text = w.get(*sel)
+                        self.clipboard_clear()
+                        self.clipboard_append(text)
+                        w.delete(*sel)
+                elif isinstance(w, (tk.Entry, ttkb.Entry)):
+                    sel = w.selection_get()
+                    if sel:
+                        self.clipboard_clear()
+                        self.clipboard_append(sel)
+                        w.delete('sel.first', 'sel.last')
+            except Exception:
+                pass
+
+        def _clipboard_select_all(event=None):
+            """全选当前焦点控件的内容"""
+            try:
+                w = self.focus_get()
+                if w is None:
+                    return
+                if isinstance(w, tk.Text):
+                    w.tag_add('sel', '1.0', 'end-1c')
+                elif isinstance(w, (tk.Entry, ttkb.Entry)):
+                    w.selection_range(0, 'end')
+                elif isinstance(w, ttkb.Combobox):
+                    try:
+                        w.selection_range(0, 'end')
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+        # Step 1: 顶层窗口将原始按键映射为虚拟事件
+        # 注意：用 self.bind（顶层），不用 bind_all。
+        # 这样控件级 handler 可通过 return "break" 阻止虚拟事件生成。
+        self.bind('<Command-c>', lambda e: self.event_generate('<<Copy>>'))
+        self.bind('<Control-c>', lambda e: self.event_generate('<<Copy>>'))
+        self.bind('<Command-v>', lambda e: self.event_generate('<<Paste>>'))
+        self.bind('<Control-v>', lambda e: self.event_generate('<<Paste>>'))
+        self.bind('<Command-x>', lambda e: self.event_generate('<<Cut>>'))
+        self.bind('<Control-x>', lambda e: self.event_generate('<<Cut>>'))
+        self.bind('<Command-a>', lambda e: self.event_generate('<<SelectAll>>'))
+        self.bind('<Control-a>', lambda e: self.event_generate('<<SelectAll>>'))
+
+        # Step 2: bind_all 处理虚拟事件，执行实际剪贴板操作
+        self.bind_all('<<Copy>>', _clipboard_copy)
+        self.bind_all('<<Paste>>', _clipboard_paste)
+        self.bind_all('<<Cut>>', _clipboard_cut)
+        self.bind_all('<<SelectAll>>', _clipboard_select_all)
 
     def load_config(self):
         if os.path.exists(CONFIG_FILE):

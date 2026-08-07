@@ -110,9 +110,11 @@ cat > "$APP/Contents/Info.plist" << PLIST
 <key>CFBundleShortVersionString</key><string>1.5.0</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleExecutable</key><string>$APP_NAME</string>
+<key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
 <key>LSMinimumSystemVersion</key><string>11.0</string>
 <key>NSHighResolutionCapable</key><true/>
 <key>NSRequiresAquaSystemAppearance</key><false/>
+<key>NSPrincipalClass</key><string>NSApplication</string>
 <key>NSAppTransportSecurity</key><dict><key>NSAllowsArbitraryLoads</key><true/></dict>
 </dict></plist>
 PLIST
