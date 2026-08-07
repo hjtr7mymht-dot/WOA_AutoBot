@@ -6,7 +6,7 @@ WOA AutoBot - 全局常量 (消除在 4 个文件中重复定义的魔法值)
 from core.platform import IS_WINDOWS, IS_MAC
 
 # ─── 版本与仓库 ──────────────────────────────────────────
-LOCAL_VERSION = "1.4.1"
+LOCAL_VERSION = "1.5.0"
 OFFICIAL_REPO_URL = "https://github.com/hjtr7mymht-dot/WOA_AutoBot"
 OFFICIAL_REPO_NAME = "hjtr7mymht-dot/WOA_AutoBot"
 ONLINE_VERSION_PATH = "version.json"
@@ -48,7 +48,7 @@ CATEGORY_CYCLE_INTERVAL = 15.0
 FEATURE_GUARD_TOKEN = "WOA_DONATE_GUARD_V1"
 
 # ─── 实例与资源 ──────────────────────────────────────────
-MAX_INSTANCES = 3
+MAX_INSTANCES = 4
 DEFAULT_APP_DATA_DIR = "WOA_AutoBot"
 
 # ─── MuMu 常用 ADB 端口 ──────────────────────────────────
@@ -61,6 +61,22 @@ REQUIRED_GUARD_MODULES = (
     "simple_ocr",
     "emulator_discovery",
 )
+
+# ─── 核心文件完整性指纹 (SHA256 前 16 位) ─────────────────
+# 用于启动时防篡改校验，检测关键文件是否被恶意修改
+# 每次正式发布前更新此字典
+# 注意：core/constants.py 本身不在此列表中，因为它包含指纹数据，
+# 无法自洽校验。如需更新指纹，请运行项目根目录下的 update_fingerprints.sh
+CORE_FILE_FINGERPRINTS = {
+    "main_adb.py":           "fa8aa9b2655cf934",
+    "gui_launcher.py":       "b0655584d70b2eae",
+    "adb_controller.py":     "e030cdf9143ea9c2",
+    "ANNOUNCEMENT.md":       "9b4afc0dbd48823a",
+    "GUIDE.md":              "963f4f46b0efd620",
+    "version.json":          "da3184ce96a97d1d",
+    "core/resources.py":     "4007d7730eed72f9",
+    "core/platform.py":      "b1f2ebb1233089ec",
+}
 
 # ─── 跨平台默认字体 ──────────────────────────────────────
 if IS_MAC:

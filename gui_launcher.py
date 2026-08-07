@@ -46,6 +46,7 @@ from core import (
     ARPA_REPO_URL,
     SIDEBAR_CATEGORIES,
     REQUIRED_GUARD_MODULES,
+    CORE_FILE_FINGERPRINTS,
     DEFAULT_FONT, MONO_FONT, MUMU_PORTS,
 )
 
@@ -90,27 +91,122 @@ _MUMU_PORTS = MUMU_PORTS  # 向后兼容别名
 # 数据存储路径（开发模式：当前目录；打包后：系统 Application Support）
 _DATA_BASE = get_app_data_dir()
 
+# === 只读 Text 控件剪贴板补丁 =================================
+# Tk 的 Text 控件在 state="disabled" 时会禁用系统复制粘贴快捷键
+# （Cmd+C/Ctrl+C）。这在 macOS Aqua Tk 9.x 上尤其明显。
+# 此函数为 disabled Text 控件绑定手动复制/全选快捷键，
+# 确保只读日志区和说明文档依然可以正常复制文字。
+def _enable_copy_for_disabled_text(text_widget):
+    """为 disabled 状态的 Text 控件启用 Cmd/Ctrl+C 复制和 Cmd/Ctrl+A 全选"""
+
+    def _copy_selection(event=None):
+        try:
+            sel = text_widget.tag_ranges("sel")
+            if sel:
+                text = text_widget.get(*sel)
+                text_widget.clipboard_clear()
+                text_widget.clipboard_append(text)
+        except Exception:
+            pass
+        return "break"
+
+    def _select_all(event=None):
+        try:
+            text_widget.tag_add("sel", "1.0", "end-1c")
+        except Exception:
+            pass
+        return "break"
+
+    # 绑定跨平台快捷键（macOS: Command, Windows/Linux: Control）
+    text_widget.bind("<Command-c>", _copy_selection)
+    text_widget.bind("<Control-c>", _copy_selection)
+    text_widget.bind("<Command-a>", _select_all)
+    text_widget.bind("<Control-a>", _select_all)
+    # 也绑定 Shift 方向键扩展选区（disabled 状态下可能被吞掉）
+    text_widget.bind("<Command-Shift-Left>", lambda e: None)  # 允许默认行为
+    text_widget.bind("<Command-Shift-Right>", lambda e: None)
+
 # === 多实例支持 ===
+def _cleanup_dead_locks():
+    """清理所有残留的死锁文件（不会影响正在运行的实例）。
+    使用 'r+' 模式检测锁，避免 'w' 模式截断活跃实例的锁文件。"""
+    import glob
+    cleaned = 0
+    # 清理 instance_*.lock（仅处理死锁）
+    for lock_path in glob.glob(os.path.join(_DATA_BASE, "instance_*.lock")):
+        try:
+            _try_acquire_and_cleanup_lock(lock_path)
+            if not os.path.exists(lock_path):
+                cleaned += 1
+        except Exception:
+            try:
+                os.remove(lock_path)
+                cleaned += 1
+            except Exception:
+                pass
+    # 清理 CSV 锁
+    for lock_name in ("woa_stats.csv.lock", "config.json.lock"):
+        lock_path = os.path.join(_DATA_BASE, lock_name)
+        try:
+            _try_acquire_and_cleanup_lock(lock_path)
+            if not os.path.exists(lock_path):
+                cleaned += 1
+        except Exception:
+            try:
+                os.remove(lock_path)
+                cleaned += 1
+            except Exception:
+                pass
+    if cleaned > 0:
+        print(f">>> [清理] 已清除 {cleaned} 个残留锁文件")
+
+
+def _try_acquire_and_cleanup_lock(lock_path):
+    """安全地尝试获取锁文件：成功 → 死锁，删除；失败 → 仍在使用，保留。
+    使用 'a+' 模式附加打开，避免截断已有文件内容。"""
+    if not os.path.exists(lock_path):
+        return
+    try:
+        fh = open(lock_path, "a+")  # a+ 不会截断，且可读写
+        if try_lock_file(fh):
+            unlock_file(fh)
+            fh.close()
+            os.remove(lock_path)
+        else:
+            fh.close()
+    except Exception:
+        pass
+
+
 def _acquire_instance():
-    """自动获取可用的实例槽位 (1~MAX_INSTANCES)，通过文件锁防止冲突。"""
+    """自动获取可用的实例槽位 (1~MAX_INSTANCES)，通过文件锁防止冲突。
+    启动时已清理死锁，此处快速竞争第一个可用槽位。"""
     for i in range(1, MAX_INSTANCES + 1):
         lock_path = os.path.join(_DATA_BASE, f"instance_{i}.lock")
+        # 尝试排他创建新锁文件
         try:
-            fh = open(lock_path, "w")
+            fh = open(lock_path, "x")
             fh.write(str(i))
             fh.flush()
             fh.seek(0)
             if try_lock_file(fh):
                 return i, fh
-            try:
-                fh.close()
-            except Exception:
-                pass
-        except (OSError, IOError):
-            try:
-                fh.close()
-            except Exception:
-                pass
+            fh.close()
+        except FileExistsError:
+            pass
+        # 文件已存在（可能死锁）→ 尝试获取
+        try:
+            fh = open(lock_path, "a+")
+            if try_lock_file(fh):
+                fh.seek(0)
+                fh.truncate()
+                fh.write(str(i))
+                fh.flush()
+                fh.seek(0)
+                return i, fh
+            fh.close()
+        except Exception:
+            pass
     return None, None
 
 
@@ -267,6 +363,7 @@ class MultiTextRedirector(object):
         if widget not in self.widgets:
             self.widgets.append(widget)
             self._setup_tags(widget)
+            _enable_copy_for_disabled_text(widget)
 
     def _setup_tags(self, widget):
         widget.tag_config("time", foreground="#858585", font=(MONO_FONT, 8))
@@ -277,6 +374,8 @@ class MultiTextRedirector(object):
         widget.tag_config("method", foreground="#569cd6")
         widget.tag_config("update", foreground="#f44747", font=(DEFAULT_FONT, 9, "bold"))
         widget.tag_config("stats", foreground="#569cd6", font=(DEFAULT_FONT, 9, "bold"))
+        # 赞助公告专用：金色加粗
+        widget.tag_config("sponsor", foreground="#e5b800", font=(MONO_FONT, 10, "bold"))
 
     def refresh_tags(self, c):
         """主题切换时更新所有 widget 的标签颜色"""
@@ -289,6 +388,8 @@ class MultiTextRedirector(object):
             widget.tag_config("method", foreground=c["primary"])
             widget.tag_config("update", foreground=c["danger"], font=(DEFAULT_FONT, 9, "bold"))
             widget.tag_config("stats", foreground=c["info"], font=(DEFAULT_FONT, 9, "bold"))
+            # 赞助公告金色加粗
+            widget.tag_config("sponsor", foreground=c["warning"], font=(MONO_FONT, 10, "bold"))
 
     def write(self, str_val):
         if self.closing:
@@ -325,6 +426,9 @@ class MultiTextRedirector(object):
         tag = "normal"
         if "[统计]" in str_val:
             tag = "stats"
+        elif any(border_char in str_val for border_char in ("╔", "╚", "║")):
+            # 检测赞助公告边框 → 金色加粗
+            tag = "sponsor"
         elif "[版本更新]" in str_val:
             tag = "update"
         elif any(x in str_val for x in ["⚠️", "警告", "注意", "跳过", "超时"]):
@@ -587,6 +691,22 @@ class Application(ttkb.Window):
         initial_theme = "darkly" if self._theme_is_dark else "flatly"
         super().__init__(themename=initial_theme)
 
+        # ─── Aqua Tk 原生优化 ────────────────────────────
+        # Tk 9.0 + Aqua 专属配置：利用 macOS 原生渲染能力
+        self._is_tk9 = (tk.TkVersion >= 9.0)
+        self._is_aqua = (self.tk.call('tk', 'windowingsystem') == 'aqua')
+        if self._is_aqua:
+            try:
+                # 启用 macOS 原生全屏按钮（绿色交通灯）
+                self.tk.call('::tk::mac::ShowFullScreen', self)
+            except Exception:
+                pass
+            try:
+                # 在 Aqua Tk 9.0 上使用原生色彩空间获得最佳渲染
+                self.tk.call('tk', 'scaling', '-displayof', '.', 1.0)
+            except Exception:
+                pass
+
         self._apply_theme_colors()
 
         self.title(f"✈ WOA AutoBot v{LOCAL_VERSION}" + (f" — 实例 {INSTANCE_ID}" if INSTANCE_ID > 1 else ""))
@@ -627,6 +747,11 @@ class Application(ttkb.Window):
         self._gold_remind_last_daily_hour = self.config.get("gold_remind_last_daily_hour", -1)
         self._gold_remind_last_weekly_week = self.config.get("gold_remind_last_weekly_week", -1)
         self.var_public_adb_targets = tk.StringVar(value=str(self.config.get("public_adb_targets", "")))
+        # 自定义随机偏移
+        self.var_click_jitter = tk.StringVar(value=str(self.config.get("click_jitter", 6)))
+        self.var_swipe_jitter = tk.StringVar(value=str(self.config.get("swipe_jitter", 8)))
+        # 暂停状态
+        self.var_paused = tk.BooleanVar(value=False)
         # 右侧类别栏处理开关
         self.var_category_processing = tk.BooleanVar(value=bool(self.config.get("category_processing_enabled", False)))
         self.var_category_selection = {}
@@ -657,6 +782,11 @@ class Application(ttkb.Window):
         self.var_avg_cycle_time = tk.StringVar(value="—")
         self.var_stats_source = tk.StringVar(value="等待运行")
         self.var_tower_status = tk.StringVar(value="未检测")
+        # ── 实时倒计时 ──
+        self.var_next_logout_cd = tk.StringVar(value="—")
+        self.var_tower_delay_cd = tk.StringVar(value="—")
+        self.var_auto_delay_left = tk.StringVar(value="0")
+        self.var_staff_avail = tk.StringVar(value="—")
         self._runtime_start_time = None
         
         self._online_validation_running = False
@@ -738,13 +868,23 @@ class Application(ttkb.Window):
         self.after(500, self.setup_window_icon)
         self.after(800, self._auto_show_help_on_first_launch)
         self.after(2200, self._startup_online_update_check)
+        self.after(3000, self._startup_silent_announcement_check)
+        self.after(3500, self._check_file_integrity)
         self.bind("<Map>", self._on_window_map)
         self.protocol("WM_DELETE_WINDOW", self._on_closing)
 
     def _schedule_bg_tick(self):
         """每 30 秒在后台线程执行一次定时检查（统计汇报/金币提醒），结果通过 after 回主线程。
+        每 20 个 tick（10 分钟）还会在主线程执行一次残留锁清理。
         
         tkinter 变量的读取在主线程（此处）完成，避免后台线程跨线程访问 Tcl 变量导致内存损坏。"""
+        # 每 10 分钟清理一次残留锁文件
+        self._bg_tick_counter += 1
+        if self._bg_tick_counter % 20 == 0:
+            try:
+                _cleanup_dead_locks()
+            except Exception:
+                pass
         # 在主线程读取 tkinter 变量值，传给后台线程避免跨线程 Tcl 访问
         bg_args = {
             "notify_enabled": bool(self.var_notify_enabled.get()),
@@ -809,7 +949,6 @@ class Application(ttkb.Window):
         bg_args: 由主线程 _schedule_bg_tick 传入的配置参数字典，
                  包含 notify_enabled/stats_report_enabled/stats_report_hours/
                  gold_remind_enabled/notify_webhook 等，避免后台线程跨线程访问 Tcl 变量。"""
-        self._bg_tick_counter += 1
         result = {"stats": None, "gold": None, "tick": self._bg_tick_counter}
 
         # 统计汇报检查
@@ -885,7 +1024,7 @@ class Application(ttkb.Window):
         self.after(100, _emit_notice)
 
     def _on_closing(self):
-        """关闭窗口时停止脚本并清理资源，避免进程残留"""
+        """关闭窗口时停止脚本并彻底清理资源，避免进程残留和锁文件堆积"""
         if getattr(self, "_is_closing", False):
             return
         self._is_closing = True
@@ -895,6 +1034,7 @@ class Application(ttkb.Window):
         bot = self.bot
         if bot:
             bot.running = False
+            bot.paused = False  # 解除暂停避免线程阻塞
             worker = getattr(bot, '_worker_thread', None)
             if worker and worker.is_alive():
                 worker.join(timeout=2.0)
@@ -906,51 +1046,57 @@ class Application(ttkb.Window):
                 pass
         self.bot = None
 
-        # 检查是否还有其他实例在运行
-        other_alive = False
-        for i in range(1, MAX_INSTANCES + 1):
-            if i == INSTANCE_ID:
-                continue
-            lock_path = os.path.join(_DATA_BASE, f"instance_{i}.lock")
-            try:
-                fh = open(lock_path, "w")
-                if try_lock_file(fh):
-                    unlock_file(fh)
-                    fh.close()
-                else:
-                    fh.close()
-            except (OSError, IOError):
-                other_alive = True
-                break
-            except Exception:
-                pass
-
-        if not other_alive:
-            try:
-                close_all_and_kill_server()
-            except Exception:
-                pass
-        # 关闭后台工作线程，清理残留
-        try:
-            if hasattr(self, '_bg_worker'):
-                self._bg_worker.shutdown()
-        except Exception:
-            pass
-        # 清空 BgWorker 回调队列中残余项（主线程安全处理）
-        try:
-            if hasattr(self, '_bg_callback_queue'):
-                self._process_bg_callbacks()
-        except Exception:
-            pass
-        # 释放实例锁文件
+        # ── 释放本实例锁文件 ──
         try:
             if _INSTANCE_LOCK_FH:
+                unlock_file(_INSTANCE_LOCK_FH)
                 _INSTANCE_LOCK_FH.close()
                 lock_path = os.path.join(_DATA_BASE, f"instance_{INSTANCE_ID}.lock")
                 if os.path.exists(lock_path):
                     os.remove(lock_path)
         except Exception:
             pass
+
+        # ── 关闭后台工作线程 ──
+        try:
+            if hasattr(self, '_bg_worker'):
+                self._bg_worker.shutdown()
+        except Exception:
+            pass
+        try:
+            if hasattr(self, '_bg_callback_queue'):
+                self._process_bg_callbacks()
+        except Exception:
+            pass
+
+        # ── 检测是否还有其它实例存活 ──
+        other_alive = False
+        for i in range(1, MAX_INSTANCES + 1):
+            if i == INSTANCE_ID:
+                continue
+            lock_path = os.path.join(_DATA_BASE, f"instance_{i}.lock")
+            if not os.path.exists(lock_path):
+                continue
+            try:
+                _try_acquire_and_cleanup_lock(lock_path)
+                if not os.path.exists(lock_path):
+                    continue
+                other_alive = True
+            except Exception:
+                other_alive = True
+                break
+
+        # ── 最后一个实例退出时全面清理 ──
+        if not other_alive:
+            try:
+                close_all_and_kill_server()
+            except Exception:
+                pass
+            # 清理所有可能的残留文件
+            _cleanup_dead_locks()
+            print(">>> [清理] 最后一个实例已退出，已清理所有残留资源")
+
+        # ── 清理日志与窗口 ──
         try:
             if getattr(self, "_log_tee", None):
                 self._log_tee.close()
@@ -1058,6 +1204,15 @@ class Application(ttkb.Window):
         self.config["gold_remind_last_daily_hour"] = int(getattr(self, "_gold_remind_last_daily_hour", -1))
         self.config["gold_remind_last_weekly_week"] = int(getattr(self, "_gold_remind_last_weekly_week", -1))
         self.config["public_adb_targets"] = str(self.var_public_adb_targets.get() or "").strip()
+        # 自定义随机偏移
+        try:
+            self.config["click_jitter"] = max(1, min(30, int(self.var_click_jitter.get())))
+        except Exception:
+            self.config["click_jitter"] = 6
+        try:
+            self.config["swipe_jitter"] = max(1, min(40, int(self.var_swipe_jitter.get())))
+        except Exception:
+            self.config["swipe_jitter"] = 8
         # 将实际文件 I/O 委托到后台线程，避免阻塞主线程 GUI
         config_snapshot = dict(self.config)
         config_path = CONFIG_FILE
@@ -1108,20 +1263,90 @@ class Application(ttkb.Window):
         }.get(snap.get('source'), '无数据')
         self.var_stats_source.set(source_label)
 
-        # 塔台状态
+        # ── bot 实时状态 ──
         bot = self.bot
+        now = time.time()
+
+        # 可用地勤
+        staff_val = getattr(bot, "last_checked_avail_staff", None) if bot else None
+        if staff_val is not None and staff_val >= 0:
+            self.var_staff_avail.set(str(staff_val))
+        else:
+            self.var_staff_avail.set("—")
+
+        # 剩余延时次数
+        delay_left = getattr(bot, "auto_delay_count", 0) if bot else 0
+        self.var_auto_delay_left.set(str(delay_left))
+
+        # ── 倒计时格式化 ──
+        def _fmt_cd(deadline):
+            if deadline is None or deadline <= 0:
+                return None
+            remain = max(0, int(deadline - now))
+            if remain <= 0:
+                return "即将"
+            m, s = divmod(remain, 60)
+            if m > 0:
+                return f"{m}分{s:02d}秒"
+            return f"{s}秒"
+
+        # 塔台状态（含延时倒计时）
         if bot and getattr(bot, "running", False):
             active = getattr(bot, "_tower_active_slots", [False]*4)
             active_n = sum(active)
+            td = getattr(bot, "_tower_delay_deadline", 0)
+            cd_str = _fmt_cd(td) if td > 0 and delay_left > 0 else None
             if active_n == 0:
-                self.var_tower_status.set("关闭")
+                base = "关闭"
             elif active_n == 4:
-                self.var_tower_status.set("全开 4/4")
+                base = "全开 4/4"
             else:
                 slots = ",".join(str(i+1) for i, a in enumerate(active) if a)
-                self.var_tower_status.set(f"部分 {slots}")
+                base = f"开启 {slots}"
+            if cd_str:
+                self.var_tower_status.set(f"{base} · {cd_str}后延时")
+            else:
+                self.var_tower_status.set(base)
         else:
             self.var_tower_status.set("—")
+            """格式化倒计时，带颜色标记：>60s 正常，<60s 警告，<30s 紧急"""
+            if deadline is None or deadline <= 0:
+                return "—"
+            remain = max(0, int(deadline - now))
+            if remain <= 0:
+                return "即将触发"
+            m, s = divmod(remain, 60)
+            if m > 0:
+                return f"{m}分{s:02d}秒"
+            return f"{s}秒"
+
+        # 下次小退（取两者中最近的一个）
+        if bot and getattr(bot, "running", False):
+            logout_deadlines = []
+            nt = getattr(bot, "_no_takeoff_auto_logout_next_time", 0)
+            sl = getattr(bot, "_standalone_logout_next_time", 0)
+            if nt > 0:
+                logout_deadlines.append(nt)
+            if sl > 0:
+                logout_deadlines.append(sl)
+            if logout_deadlines:
+                self.var_next_logout_cd.set(_fmt_cd(min(logout_deadlines)))
+            else:
+                self.var_next_logout_cd.set("未启用")
+        else:
+            self.var_next_logout_cd.set("—")
+
+        # 塔台延时倒计时
+        if bot and getattr(bot, "running", False):
+            td = getattr(bot, "_tower_delay_deadline", 0)
+            if td > 0 and getattr(bot, "auto_delay_count", 0) > 0:
+                self.var_tower_delay_cd.set(_fmt_cd(td))
+            elif td > 0:
+                self.var_tower_delay_cd.set("监控中")
+            else:
+                self.var_tower_delay_cd.set("—")
+        else:
+            self.var_tower_delay_cd.set("—")
 
         self.after(1000, self._update_runtime_stats)
 
@@ -1324,8 +1549,8 @@ class Application(ttkb.Window):
             return cache['data']
 
         import csv
-        _base = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else os.path.dirname(os.path.abspath(__file__))
-        csv_path = os.path.join(_base, STATS_FILE)
+        # 统一使用 _DATA_BASE 路径，与 _add_stats_to_csv_date 和 _open_stats_chart 保持一致
+        csv_path = os.path.join(_DATA_BASE, "woa_stats.csv")
         today = datetime.datetime.now().strftime("%Y-%m-%d")
         result = None
         if os.path.isfile(csv_path):
@@ -1364,6 +1589,48 @@ class Application(ttkb.Window):
         hours = self._normalize_stats_report_hours(self.var_stats_report_hours.get())
         self.var_stats_report_hours.set(str(hours))
         snap = self._get_runtime_stats_snapshot()
+        bot = self.bot
+        now = time.time()
+
+        # ── 实时状态快照 ──
+        status_lines = []
+        if bot and getattr(bot, "running", False):
+            # 地勤
+            staff = getattr(bot, "last_checked_avail_staff", None)
+            if staff is not None and staff >= 0:
+                status_lines.append(f"可用地勤: {staff}")
+            # 延时次数
+            delay_left = getattr(bot, "auto_delay_count", 0)
+            if delay_left > 0:
+                status_lines.append(f"剩余延时: {delay_left} 次")
+            # 塔台
+            active = getattr(bot, "_tower_active_slots", [False]*4)
+            active_n = sum(active)
+            if active_n == 4:
+                tw = "全开"
+            elif active_n == 0:
+                tw = "关闭"
+            else:
+                tw = f"{active_n}/4"
+            td = getattr(bot, "_tower_delay_deadline", 0)
+            if td > 0 and delay_left > 0:
+                remain = max(0, int(td - now))
+                m, s = divmod(remain, 60)
+                tw += f" ({m}分{s:02d}秒后延时)"
+            status_lines.append(f"塔台: {tw}")
+            # 下次小退
+            logout_times = []
+            for attr in ("_no_takeoff_auto_logout_next_time", "_standalone_logout_next_time"):
+                t = getattr(bot, attr, 0)
+                if t > 0:
+                    logout_times.append(t)
+            if logout_times:
+                remain = max(0, int(min(logout_times) - now))
+                m, s = divmod(remain, 60)
+                status_lines.append(f"下次小退: {m}分{s:02d}秒后")
+
+        status_text = "\n".join(status_lines) if status_lines else ""
+
         detail = (
             f"周期: 每 {hours} 小时\n"
             f"运行时长: {snap['runtime']}\n"
@@ -1372,6 +1639,9 @@ class Application(ttkb.Window):
             f"分配地勤: {snap['stand_count']} 架次 / {snap['stand_staff']} 人次\n"
             f"数据来源: {'本次运行' if snap['source'] == 'session' else '当日CSV'}"
         )
+        if status_text:
+            detail += f"\n\n━━ 实时状态 ━━\n{status_text}"
+
         title = "统计汇报(手动)" if manual else f"{hours}小时统计汇报"
         self._send_mobile_notify(title, detail, force=True)
 
@@ -1588,6 +1858,13 @@ class Application(ttkb.Window):
                                          width=8, state="disabled", command=self.stop_bot)
         self.btn_mini_stop.pack(side=LEFT, padx=(3, 0), fill=X, expand=True)
         
+        # 小窗暂停按钮
+        pause_row = ttkb.Frame(self.container_mini, padding=4)
+        pause_row.pack(fill=X, padx=pad)
+        self.btn_mini_pause = ttkb.Button(pause_row, text="⏸  暂停", bootstyle="warning",
+                                           width=16, state="disabled", command=self.toggle_pause)
+        self.btn_mini_pause.pack(fill=X)
+        
         log_frame = ttkb.Frame(self.container_mini, padding=4)
         log_frame.pack(fill=BOTH, expand=True, padx=pad, pady=(0, pad))
         ttkb.Label(log_frame, textvariable=self.var_online_status,
@@ -1689,7 +1966,17 @@ class Application(ttkb.Window):
         }
 
         self.configure(bg=clr_bg)
-        self.style.theme_use("darkly" if is_dark else "flatly")
+        # Tk 9.0 Aqua 优先使用 ttkbootstrap 主题，失败时回退原生 awdark/awlight
+        if self._is_tk9 and self._is_aqua:
+            try:
+                self.style.theme_use("darkly" if is_dark else "flatly")
+            except Exception:
+                try:
+                    self.style.theme_use("awdark" if is_dark else "awlight")
+                except Exception:
+                    pass
+        else:
+            self.style.theme_use("darkly" if is_dark else "flatly")
 
         # ── ttkbootstrap 全局色板 ──
         self.style.colors.primary   = clr_primary
@@ -1748,6 +2035,103 @@ class Application(ttkb.Window):
         if hasattr(self, 'redirector'):
             self.redirector.refresh_tags(self._clr)
 
+        # 刷新所有硬编码颜色的原生 tk 控件（tk.Frame/tk.Text 等不会随 ttk 主题自动更新）
+        self._refresh_widget_colors()
+
+    def _refresh_widget_colors(self):
+        """主题切换后即时刷新所有硬编码颜色的原生 tk 控件。
+        ttkbootstrap 控件随 theme_use() 自动更新，但 tk.Frame、tk.Text、
+        tk.Canvas 等原生控件的颜色是在创建时写死的，需要手动重新应用。
+        最后调用 update_idletasks() 确保界面立即重绘无延迟。"""
+        c = self._clr
+        is_dark = self._theme_is_dark
+
+        def _safe_cfg(widget, **kw):
+            try:
+                if widget and widget.winfo_exists():
+                    widget.configure(**kw)
+            except Exception:
+                pass
+
+        # ── 根窗口 ──
+        _safe_cfg(self, bg=c["bg"])
+
+        # ── 容器（主界面 + 小窗）──
+        for container_attr in ('container_main', 'container_mini'):
+            container = getattr(self, container_attr, None)
+            if container and container.winfo_exists():
+                _safe_cfg(container, bg=c["bg"])
+
+        # ── 头部栏 ──
+        for attr, bg_key in [
+            ('_header_bar', 'bg_header'),
+            ('_accent_line', 'primary_dim'),
+            ('_brand_frame', 'bg_header'),
+            ('_pill_frame', 'bg_header'),
+            ('_btn_row', 'bg_header'),
+        ]:
+            w = getattr(self, attr, None)
+            _safe_cfg(w, bg=c[bg_key])
+
+        # 头部栏内嵌 label 的 background 不会自动更新，递归刷
+        for container_attr in ('_brand_frame', '_pill_frame'):
+            container = getattr(self, container_attr, None)
+            if container and container.winfo_exists():
+                bg_hdr = c['bg_header']
+                for child in container.winfo_children():
+                    _safe_cfg(child, background=bg_hdr)
+                    if child.winfo_class() == 'Frame':
+                        for sub in child.winfo_children():
+                            _safe_cfg(sub, background=c.get('pill_runtime_bg', bg_hdr))
+
+        # ── 状态药丸 ──
+        for label_name, bg_field, fg_field in [
+            ("运行", "pill_runtime_bg", "pill_runtime_fg"),
+            ("设备", "pill_device_bg", "pill_device_fg"),
+            ("云端", "pill_online_bg", "pill_online_fg"),
+        ]:
+            pf = getattr(self, f'_pill_frame_{label_name}', None)
+            _safe_cfg(pf, bg=c[bg_field])
+            pl = getattr(self, f'_pill_lbl_{label_name}', None)
+            _safe_cfg(pl, background=c[bg_field], foreground=c[fg_field])
+
+        # ── 仪表盘卡片（含子控件色条 + 标签）──
+        card_bg = c["elevated"] if is_dark else c["surface"]
+        for frames_attr in ('_dash_metric_frames',):
+            frames = getattr(self, frames_attr, None)
+            if not frames:
+                continue
+            for frm in frames:
+                try:
+                    if not frm.winfo_exists():
+                        continue
+                    frm.configure(bg=card_bg)
+                    for child in frm.winfo_children():
+                        wclass = child.winfo_class()
+                        if wclass == 'TLabel':
+                            _safe_cfg(child, background=card_bg)
+                        elif wclass == 'Frame':
+                            _safe_cfg(child, bg=card_bg)
+                except Exception:
+                    pass
+        # 色条保持原 accent 色（不随主题变化）
+        accent_bars = getattr(self, '_dash_accent_bars', None)
+        if accent_bars:
+            for bar, accent_color in accent_bars:
+                _safe_cfg(bar, bg=accent_color)
+
+        # ── 终端输出 ──
+        _safe_cfg(getattr(self, 'txt_main_log', None),
+                  bg=c["terminal_bg"], fg=c["terminal_fg"])
+        _safe_cfg(getattr(self, 'txt_mini_log', None),
+                  bg=c["terminal_bg"], fg=c["terminal_fg"])
+
+        # ── 即时重绘（消除切换延迟感）──
+        try:
+            self.update_idletasks()
+        except Exception:
+            pass
+
     def toggle_theme(self):
         """切换深色/浅色模式"""
         self._theme_is_dark = not self._theme_is_dark
@@ -1787,13 +2171,16 @@ class Application(ttkb.Window):
         header_bar = tk.Frame(wrapper, bg=c["bg_header"], height=48, bd=0, highlightthickness=0)
         header_bar.grid(row=0, column=0, sticky="ew", pady=(0, 4))
         header_bar.grid_propagate(False)
+        self._header_bar = header_bar  # 主题切换时刷新颜色
         
         # 顶部强调线（低调用主色暗调）
         accent_line = tk.Frame(header_bar, bg=c["primary_dim"], height=2, bd=0)
         accent_line.pack(fill=X, side=TOP)
+        self._accent_line = accent_line
         
         brand_frame = tk.Frame(header_bar, bg=c["bg_header"], bd=0, highlightthickness=0)
         brand_frame.pack(side=LEFT, padx=16, pady=6)
+        self._brand_frame = brand_frame
         ttkb.Label(brand_frame, text="✈ WOA AutoBot", font=(DEFAULT_FONT, 16, "bold"),
                    background=c["bg_header"], foreground=c["text"]).pack(side=LEFT)
         ttkb.Label(brand_frame, text=f" v{LOCAL_VERSION}", font=(MONO_FONT, 9),
@@ -1805,6 +2192,7 @@ class Application(ttkb.Window):
         # 状态药丸 — 游戏化发光徽章
         pill_frame = tk.Frame(header_bar, bg=c["bg_header"], bd=0, highlightthickness=0)
         pill_frame.pack(side=RIGHT, padx=10, pady=6)
+        self._pill_frame = pill_frame
         pill_data = [
             ("运行", self.var_runtime_status, c["pill_runtime_bg"], c["pill_runtime_fg"]),
             ("设备", self.var_device_status, c["pill_device_bg"], c["pill_device_fg"]),
@@ -1813,6 +2201,7 @@ class Application(ttkb.Window):
         for label, var, pill_bg, pill_fg in pill_data:
             pf = tk.Frame(pill_frame, bg=pill_bg, bd=0, highlightthickness=0)
             pf.pack(side=LEFT, padx=3)
+            setattr(self, f"_pill_frame_{label}", pf)
             ttkb.Label(pf, text=f" {label} ", font=(DEFAULT_FONT, 8, "bold"),
                        background=pill_bg, foreground=pill_fg).pack(side=LEFT)
             setattr(self, f"_pill_lbl_{label}",
@@ -1824,6 +2213,7 @@ class Application(ttkb.Window):
         # 快捷按钮（header 右侧）
         btn_row = tk.Frame(header_bar, bg=c["bg_header"], bd=0, highlightthickness=0)
         btn_row.pack(side=RIGHT, padx=(0, 4), pady=6)
+        self._btn_row = btn_row
         # 主题切换按钮
         self.btn_theme = ttkb.Button(btn_row, text="🌙 深色" if not self._theme_is_dark else "☀️ 浅色",
                                       bootstyle="outline-secondary", command=self.toggle_theme, padding=(8, 2))
@@ -1862,6 +2252,9 @@ class Application(ttkb.Window):
         self.btn_main_stop = ttkb.Button(ctrl_right, text="■  停 止", bootstyle="danger", state="disabled",
                                           command=self.stop_bot, width=10, padding=(8, 5))
         self.btn_main_stop.pack(side=LEFT, padx=3)
+        self.btn_main_pause = ttkb.Button(ctrl_right, text="⏸  暂 停", bootstyle="warning", state="disabled",
+                                           command=self.toggle_pause, width=10, padding=(8, 5))
+        self.btn_main_pause.pack(side=LEFT, padx=3)
         ttkb.Button(ctrl_right, text="⚙ 设置", bootstyle="outline-secondary",
                     command=self.open_settings_window, width=8, padding=(8, 5)).pack(side=LEFT, padx=3)
         ttkb.Button(ctrl_right, text="🪟 小窗", bootstyle="outline-warning",
@@ -1942,9 +2335,16 @@ class Application(ttkb.Window):
             mf = tk.Frame(card, bg=card_bg, bd=0, highlightthickness=0)
             mf.grid(row=row, column=col, sticky="nsew", padx=2, pady=3)
             mf.grid_columnconfigure(1, weight=1)
+            # 追踪：主题切换时需要刷新颜色
+            if not hasattr(self, '_dash_metric_frames'):
+                self._dash_metric_frames = []
+            self._dash_metric_frames.append(mf)
+            if not hasattr(self, '_dash_accent_bars'):
+                self._dash_accent_bars = []
             # 左侧彩色指示条
             accent_bar = tk.Frame(mf, bg=accent, width=3, bd=0)
             accent_bar.grid(row=0, column=0, rowspan=2, sticky="ns")
+            self._dash_accent_bars.append((accent_bar, accent))
             # 标签行
             ttkb.Label(mf, text=icon_label, font=(DEFAULT_FONT, 9),
                        foreground=c["text_sec"], background=card_bg).grid(
@@ -1958,24 +2358,51 @@ class Application(ttkb.Window):
                 ttkb.Label(val_frame, text=f" {unit}", font=(DEFAULT_FONT, 8),
                            foreground=c["muted"], background=card_bg).pack(side=LEFT, padx=(2, 0))
 
-        # ── 底部状态行 ──
+        # ── 倒计时区 ──
         sep_row = 2 + (len(metrics) + 1) // 2
         ttkb.Separator(card, bootstyle="secondary").grid(
-            row=sep_row, column=0, columnspan=2, sticky="ew", pady=(6, 6))
+            row=sep_row, column=0, columnspan=2, sticky="ew", pady=(6, 4))
 
-        bottom_data = [
+        countdown_section_bg = c["elevated"] if self._theme_is_dark else c["surface"]
+        cd_data = [
+            ("🔄 下次小退", self.var_next_logout_cd, c["warning"]),
+            ("🗼 塔台延时", self.var_tower_delay_cd, c["info"]),
+        ]
+        for i, (icon, var, accent) in enumerate(cd_data):
+            row = sep_row + 1 + i
+            mf = tk.Frame(card, bg=countdown_section_bg, bd=0, highlightthickness=0)
+            mf.grid(row=row, column=0, columnspan=2, sticky="ew", padx=2, pady=1)
+            if not hasattr(self, '_dash_metric_frames'):
+                self._dash_metric_frames = []
+            self._dash_metric_frames.append(mf)
+            ttkb.Label(mf, text=icon, font=(DEFAULT_FONT, 8),
+                       foreground=c["text_sec"], background=countdown_section_bg).pack(side=LEFT, padx=8, pady=2)
+            ttkb.Label(mf, textvariable=var, font=(MONO_FONT, 9, "bold"),
+                       foreground=accent, background=countdown_section_bg).pack(side=RIGHT, padx=8, pady=2)
+        cd_sep_row = sep_row + 3
+
+        # ── 实时状态行 ──
+        ttkb.Separator(card, bootstyle="secondary").grid(
+            row=cd_sep_row, column=0, columnspan=2, sticky="ew", pady=(6, 4))
+
+        status_bg = c["elevated"] if self._theme_is_dark else c["surface"]
+        status_items = [
+            ("👥 可用地勤", self.var_staff_avail, c["success"]),
+            ("🔁 剩余延时", self.var_auto_delay_left, c["warning"]),
             ("🗼 塔台状态", self.var_tower_status, c["info"]),
             ("📊 数据来源", self.var_stats_source, c["primary"]),
         ]
-        for i, (icon, var, accent) in enumerate(bottom_data):
-            row = sep_row + 1 + i
-            bot_bg = c["elevated"] if self._theme_is_dark else c["surface"]
-            mf = tk.Frame(card, bg=bot_bg, bd=0, highlightthickness=0)
+        for i, (icon, var, accent) in enumerate(status_items):
+            row = cd_sep_row + 1 + i
+            mf = tk.Frame(card, bg=status_bg, bd=0, highlightthickness=0)
             mf.grid(row=row, column=0, columnspan=2, sticky="ew", padx=2, pady=1)
+            if not hasattr(self, '_dash_metric_frames'):
+                self._dash_metric_frames = []
+            self._dash_metric_frames.append(mf)
             ttkb.Label(mf, text=icon, font=(DEFAULT_FONT, 8),
-                       foreground=c["text_sec"], background=bot_bg).pack(side=LEFT, padx=8, pady=4)
+                       foreground=c["text_sec"], background=status_bg).pack(side=LEFT, padx=8, pady=2)
             ttkb.Label(mf, textvariable=var, font=(DEFAULT_FONT, 8, "bold"),
-                       foreground=accent, background=bot_bg).pack(side=RIGHT, padx=8, pady=4)
+                       foreground=accent, background=status_bg).pack(side=RIGHT, padx=8, pady=2)
 
     def _build_center_terminal(self, parent):
         """中间：深色终端（霓虹暗色控制台）"""
@@ -2138,7 +2565,7 @@ class Application(ttkb.Window):
 
         # [Tab 5] 自愿资助
         tab5 = ttkb.Frame(notebook, padding=(10, 8))
-        notebook.add(tab5, text=" ❤️ ")
+        notebook.add(tab5, text=" 赞助 ")
         self._setup_donate_tab(tab5)
 
     def _do_initial_scan(self):
@@ -2468,6 +2895,82 @@ class Application(ttkb.Window):
 
         threading.Thread(target=_worker, daemon=True).start()
 
+    def _startup_silent_announcement_check(self):
+        """启动时静默获取最新公告，若与本地版本不同则自动弹出公告窗口。"""
+        if getattr(self, "_is_closing", False):
+            return
+        last_hash = self.config.get("announcement_last_hash", "")
+
+        def _worker():
+            try:
+                sources = self._build_online_sources("ANNOUNCEMENT.md")
+                text, source_name, url = self._fetch_online_text(sources)
+                if not text or not text.strip():
+                    return
+                import hashlib
+                new_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+                if new_hash == last_hash:
+                    return  # 公告无变化，静默跳过
+
+                def _show():
+                    if getattr(self, "_is_closing", False):
+                        return
+                    self.config["announcement_last_hash"] = new_hash
+                    self.save_config()
+                    print(f">>> [在线公告] 检测到新公告，来源：{source_name}")
+                    # 用本地文件作为回退，但优先使用在线内容
+                    self._open_online_announcement_window()
+                self._call_main_thread(_show)
+            except Exception:
+                pass  # 静默失败，不影响正常使用
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _check_file_integrity(self):
+        """防篡改：校验核心文件完整性，发现修改则在终端输出警告。"""
+        if getattr(self, "_is_closing", False):
+            return
+
+        def _worker():
+            import hashlib
+            tampered = []
+            for rel_path, expected_fp in CORE_FILE_FINGERPRINTS.items():
+                try:
+                    abs_path = get_resource_path(rel_path)
+                    if not os.path.isfile(abs_path):
+                        # 尝试项目根目录
+                        abs_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), rel_path)
+                    if not os.path.isfile(abs_path):
+                        continue
+                    with open(abs_path, "rb") as f:
+                        actual = hashlib.sha256(f.read()).hexdigest()[:16]
+                    if actual != expected_fp:
+                        tampered.append(rel_path)
+                except Exception:
+                    pass
+
+            def _report():
+                if getattr(self, "_is_closing", False):
+                    return
+                if not tampered:
+                    print(">>> [完整性] ✅ 核心文件校验通过")
+                    return
+                print("")
+                print("╔══════════════════════════════════════════════════════════╗")
+                print("║  ⚠️  文件完整性警告 — 以下文件可能已被篡改               ║")
+                print("╚══════════════════════════════════════════════════════════╝")
+                for f in tampered:
+                    print(f"║  • {f}")
+                print("╠══════════════════════════════════════════════════════════╣")
+                print("║  如您未主动修改这些文件，请从官方仓库重新下载！          ║")
+                print("║  官方仓库：github.com/hjtr7mymht-dot/WOA_AutoBot         ║")
+                print("╚══════════════════════════════════════════════════════════╝")
+                print("")
+                self.var_online_detail.set(f"⚠️ 文件完整性警告：{len(tampered)} 个文件被修改")
+            self._call_main_thread(_report)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
     def open_personal_website(self):
         webbrowser.open("https://hjtr7mymht-dot.github.io/")
 
@@ -2752,6 +3255,7 @@ class Application(ttkb.Window):
         text_area.config(yscrollcommand=scroll.set)
         text_area.insert("end", "正在加载...\n")
         text_area.configure(state="disabled")
+        _enable_copy_for_disabled_text(text_area)
         self._center_toplevel_on_parent(win)
 
         def _fill():
@@ -2759,19 +3263,102 @@ class Application(ttkb.Window):
             text_area.delete("1.0", "end")
             text_area.insert("end", self._LOCAL_HELP_CONTENT)
             text_area.configure(state="disabled")
+            _enable_copy_for_disabled_text(text_area)
             self._hide_help_badge()
         # 内容已在内存中，无需后台线程加载；使用线程安全队列调度到主线程执行
         self._call_main_thread(_fill)
 
+    def _open_online_announcement_window(self):
+        """在线公告：先尝试从 GitHub 拉取最新 ANNOUNCEMENT.md，失败则回退到本地文件。"""
+        c = self._clr
+        win = ttkb.Toplevel(self)
+        win.title("在线公告")
+        win.geometry("780x680")
+        win.configure(bg=c["bg"])
+        win.transient(self)
+        shell = ttkb.Frame(win, padding=16)
+        shell.pack(fill=BOTH, expand=True)
+
+        header = ttkb.Frame(shell, padding=(12, 10))
+        header.pack(fill=X)
+        ttkb.Label(header, text="📢 在线公告", font=(DEFAULT_FONT, 16, "bold"),
+                   foreground=c["primary"]).pack(anchor="w")
+        self._announce_status_label = ttkb.Label(header, text="正在从 GitHub 获取最新公告...",
+                                                  font=(DEFAULT_FONT, 9), foreground=c["text_sec"])
+        self._announce_status_label.pack(anchor="w", pady=(2, 0))
+
+        container = ttkb.Labelframe(shell, text=" 公告内容 ", padding=12,
+                                     bootstyle="primary", style="Card.TLabelframe")
+        container.pack(fill=BOTH, expand=True, pady=(10, 0))
+        text_area = tk.Text(container, font=(DEFAULT_FONT, 10), wrap="word",
+                            bg=c["surface"], fg=c["text"], relief="flat", padx=12, pady=10,
+                            )
+        text_area.pack(side=LEFT, fill=BOTH, expand=True)
+        scroll = ttkb.Scrollbar(container, command=text_area.yview)
+        scroll.pack(side=RIGHT, fill=Y)
+        text_area.config(yscrollcommand=scroll.set)
+        text_area.insert("end", "正在从 GitHub 获取最新公告，请稍候...")
+        text_area.configure(state="disabled")
+        _enable_copy_for_disabled_text(text_area)
+
+        self._center_toplevel_on_parent(win)
+
+        def _load_online():
+            """后台线程：尝试在线拉取 ANNOUNCEMENT.md"""
+            content = None
+            source_label = ""
+            try:
+                sources = self._build_online_sources("ANNOUNCEMENT.md")
+                text, source_name, _ = self._fetch_online_text(sources)
+                if text and text.strip():
+                    content = text
+                    source_label = f"✅ 已获取最新公告 · 来源：{source_name}"
+            except Exception as e:
+                source_label = f"⚠️ 在线获取失败（{e}），使用本地公告"
+
+            def _update_ui():
+                try:
+                    self._announce_status_label.configure(text=source_label)
+                except Exception:
+                    pass
+                text_area.configure(state="normal")
+                text_area.delete("1.0", "end")
+                if content:
+                    text_area.insert("end", content)
+                else:
+                    # 回退到本地文件
+                    try:
+                        md_path = get_resource_path("ANNOUNCEMENT.md")
+                        if md_path and os.path.isfile(md_path):
+                            with open(md_path, "r", encoding="utf-8") as f:
+                                text_area.insert("end", f.read())
+                        else:
+                            fallback = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ANNOUNCEMENT.md")
+                            if os.path.isfile(fallback):
+                                with open(fallback, "r", encoding="utf-8") as f:
+                                    text_area.insert("end", f.read())
+                            else:
+                                text_area.insert("end", "⚠️ 无法加载公告内容。")
+                    except Exception as e2:
+                        text_area.insert("end", f"⚠️ 加载本地公告也失败: {e2}")
+                text_area.configure(state="disabled")
+                _enable_copy_for_disabled_text(text_area)
+                win.lift()
+                win.focus_force()
+
+            self._call_main_thread(_update_ui)
+
+        threading.Thread(target=_load_online, daemon=True).start()
+
     def _open_markdown_window(self, title, md_filename, icon="📄"):
         """通用 Markdown 弹窗：从项目根目录读取 .md 文件并展示在可滚动文本区中。
         用户可直接编辑 .md 文件来修改内容，无需改动代码。"""
-        import io
         c = self._clr
         win = ttkb.Toplevel(self)
         win.title(title)
         win.geometry("780x680")
         win.configure(bg=c["bg"])
+        win.transient(self)
         shell = ttkb.Frame(win, padding=16)
         shell.pack(fill=BOTH, expand=True)
 
@@ -2797,25 +3384,34 @@ class Application(ttkb.Window):
         text_area.config(yscrollcommand=scroll.set)
 
         # ── 读取 .md 文件（使用 get_resource_path 兼容 PyInstaller _MEIPASS）──
-        content = f"⚠️ 无法加载内容，请确认程序文件完整。"
+        content = "⚠️ 无法加载内容，请确认程序文件完整。"
         try:
             md_path = get_resource_path(md_filename)
-            if os.path.isfile(md_path):
-                with io.open(md_path, "r", encoding="utf-8") as f:
+            if md_path and os.path.isfile(md_path):
+                with open(md_path, "r", encoding="utf-8") as f:
                     content = f.read()
-        except Exception:
-            content = f"⚠️ 读取内容失败，请重试或联系作者。"
+            else:
+                # 回退：尝试当前目录
+                fallback = os.path.join(os.path.dirname(os.path.abspath(__file__)), md_filename)
+                if os.path.isfile(fallback):
+                    with open(fallback, "r", encoding="utf-8") as f:
+                        content = f.read()
+                else:
+                    content = f"⚠️ 未找到文件: {md_filename}\n已搜索: {md_path}\n和: {fallback}"
+        except Exception as e:
+            content = f"⚠️ 读取内容失败: {e}"
 
         text_area.insert("end", content)
         text_area.configure(state="disabled")
+        _enable_copy_for_disabled_text(text_area)
         self._center_toplevel_on_parent(win)
         # 将窗口置顶
         win.lift()
         win.focus_force()
 
     def open_announcement_window(self):
-        """打开在线公告窗口（内容来自 ANNOUNCEMENT.md）"""
-        self._open_markdown_window("在线公告", "ANNOUNCEMENT.md", icon="📢")
+        """打开在线公告窗口（优先从 GitHub 拉取最新公告，失败则使用本地 ANNOUNCEMENT.md）"""
+        self._open_online_announcement_window()
 
     def open_guide_window(self):
         """打开使用说明窗口（内容来自 GUIDE.md）"""
@@ -2825,8 +3421,8 @@ class Application(ttkb.Window):
         import csv
         from datetime import datetime, timedelta, date as date_type
 
-        _base = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else os.path.dirname(os.path.abspath(__file__))
-        csv_path = os.path.join(_base, STATS_FILE)
+        # 统一使用 get_app_data_dir() 解析 CSV 路径，与 _add_stats_to_csv_date 保持一致
+        csv_path = os.path.join(_DATA_BASE, "woa_stats.csv")
         if not os.path.isfile(csv_path):
             messagebox.showinfo("统计图表", "暂无统计数据，请先运行脚本。", parent=self)
             return
@@ -3566,11 +4162,12 @@ class Application(ttkb.Window):
                          bootstyle="success-round-toggle").pack(side=LEFT)
         self.create_info_icon(f_no_takeoff_enable,
                               "不起飞模式（基于像素检测，独立于 OCR）：\n"
+                              "• 塔台全部未开启 → 自动在「降落」与「停机坪」之间轮切\n"
                               "• 4号塔台单独开启 → 自动在「待降落」与「停机坪」之间轮切\n"
                               "  轮切间隔由下方参数控制，默认每15秒切换一次。\n"
                               "• 塔台全开(1-4号) → 只处理停机位待处理。\n"
                               "• 策略稳定性保护：像素波动不会导致误切换，\n"
-                              "  退出轮切需连续8次确认（约2秒）。\n"
+                              "  进入轮切需连续3次确认，退出轮切需连续8次确认。\n"
                               "• 开启后会自动启用该模式独有的小退调度，\n"
                               "  到达间隔后自动重进释放内存。\n"
                               "• 像素检测优先于OCR，不受OCR读取波动影响。\n"
@@ -3672,6 +4269,23 @@ class Application(ttkb.Window):
                               "控制地勤分配界面中滑块操作的持续时间。\n建议范围 200-500ms。\n若最低值小于200，可能出现地勤分配时滑动不到位的情况").pack(
             side=LEFT, padx=5)
 
+        f_jitter = ttkb.Frame(tab_runtime_right)
+        f_jitter.pack(fill=X, pady=5)
+        ttkb.Label(f_jitter, text="点击随机偏移(px):").pack(side=LEFT)
+        e_click_jitter = ttkb.Entry(f_jitter, width=5)
+        e_click_jitter.pack(side=LEFT, padx=5)
+        e_click_jitter.insert(0, str(self.config.get("click_jitter", 6)))
+        ttkb.Label(f_jitter, text="滑动偏移(px):").pack(side=LEFT, padx=(12, 0))
+        e_swipe_jitter = ttkb.Entry(f_jitter, width=5)
+        e_swipe_jitter.pack(side=LEFT, padx=5)
+        e_swipe_jitter.insert(0, str(self.config.get("swipe_jitter", 8)))
+        self.create_info_icon(f_jitter,
+                              "模拟人手操作时的随机像素偏移量。\n"
+                              "点击偏移(1-30)：每次点击在目标周围±N像素内随机偏移\n"
+                              "滑动偏移(1-40)：每次滑动的起止点随机偏移量\n"
+                              "值越大模拟效果越好，但过大可能点偏。建议点击3-10，滑动4-12。").pack(
+            side=LEFT, padx=5)
+
         f_t = ttkb.Frame(tab_runtime_right)
         f_t.pack(fill=X, pady=5)
         ttkb.Label(f_t, text="随机思考时间:").pack(side=LEFT)
@@ -3717,6 +4331,18 @@ class Application(ttkb.Window):
                 self.config["slide_max"] = vx
             except (ValueError, TypeError):
                 messagebox.showerror("错误", "输入整数", parent=win)
+                return
+            try:
+                cj = int(e_click_jitter.get())
+                sj = int(e_swipe_jitter.get())
+                cj = max(1, min(30, cj))
+                sj = max(1, min(40, sj))
+                self.config["click_jitter"] = cj
+                self.config["swipe_jitter"] = sj
+                self.var_click_jitter.set(str(cj))
+                self.var_swipe_jitter.set(str(sj))
+            except (ValueError, TypeError):
+                messagebox.showerror("错误", "随机偏移值必须为整数", parent=win)
                 return
             self.config["thinking_mode"] = c_th.current()
             self.config["speed_mode"] = self.var_speed_mode.get()
@@ -3820,13 +4446,15 @@ class Application(ttkb.Window):
                 old_cfg.get("slide_min") != self.config.get("slide_min") or
                 old_cfg.get("slide_max") != self.config.get("slide_max") or
                 old_cfg.get("thinking_mode") != self.config.get("thinking_mode") or
-                old_cfg.get("random_task_order") != self.config.get("random_task_order")
+                old_cfg.get("random_task_order") != self.config.get("random_task_order") or
+                old_cfg.get("click_jitter") != self.config.get("click_jitter") or
+                old_cfg.get("swipe_jitter") != self.config.get("swipe_jitter")
             )
 
             for name, val in changed:
                 print(f">>> [高级设置] {name} 已更新: {val}")
             if anti_changed:
-                print(f">>> [高级设置] 防检测: 随机任务={self.var_random_task.get()}, 滑块={vm}-{vx}ms, 思考时间={c_th.get()}")
+                print(f">>> [高级设置] 防检测: 随机任务={self.var_random_task.get()}, 滑块={vm}-{vx}ms, 思考时间={c_th.get()}, 点击偏移={self.config.get('click_jitter',6)}px, 滑动偏移={self.config.get('swipe_jitter',8)}px")
 
             self.save_config()
             self.sync_all_configs_to_bot(from_advanced_save=True)
@@ -3939,6 +4567,9 @@ class Application(ttkb.Window):
                 btn.configure(state="disabled", text="运行中...")
             for btn in [self.btn_main_stop, self.btn_mini_stop]:
                 btn.configure(state="normal")
+            for btn in [self.btn_main_pause, self.btn_mini_pause]:
+                btn.configure(state="normal", text="⏸  暂 停")
+            self.var_paused.set(False)
             self.combo_devices.configure(state="disabled")
 
             self.bot.start()
@@ -3953,6 +4584,10 @@ class Application(ttkb.Window):
             self.var_avg_cycle_time.set("—")
             self.var_stats_source.set("运行中")
             self.var_tower_status.set("—")
+            self.var_next_logout_cd.set("—")
+            self.var_tower_delay_cd.set("—")
+            self.var_auto_delay_left.set("0")
+            self.var_staff_avail.set("—")
             self.after(1000, self._update_runtime_stats)
             self.var_runtime_status.set("运行中")
 
@@ -3975,6 +4610,9 @@ class Application(ttkb.Window):
             btn.configure(state="normal", text="▶ 启动")
         for btn in [self.btn_main_stop, self.btn_mini_stop]:
             btn.configure(state="disabled")
+        for btn in [self.btn_main_pause, self.btn_mini_pause]:
+            btn.configure(state="disabled", text="⏸  暂 停")
+        self.var_paused.set(False)
         self.combo_devices.configure(state="readonly")
         traceback.print_exc()
         print(f">>> [错误] {reason}")
@@ -3996,13 +4634,42 @@ class Application(ttkb.Window):
         self.var_avg_cycle_time.set("—")
         self.var_stats_source.set("已停止")
         self.var_tower_status.set("—")
+        self.var_next_logout_cd.set("—")
+        self.var_tower_delay_cd.set("—")
+        self.var_auto_delay_left.set("0")
+        self.var_staff_avail.set("—")
         if not getattr(self, "_is_closing", False):
             for btn in [self.btn_main_start, self.btn_mini_start]:
                 btn.configure(state="normal", text="▶ 启动")
             for btn in [self.btn_main_stop, self.btn_mini_stop]:
                 btn.configure(state="disabled")
+            for btn in [self.btn_main_pause, self.btn_mini_pause]:
+                btn.configure(state="disabled", text="⏸  暂 停")
+            self.var_paused.set(False)
             self.combo_devices.configure(state="readonly")
             print(">>> 脚本已停止")
+
+    def toggle_pause(self):
+        """切换暂停/继续状态。"""
+        bot = self.bot
+        if not bot or not bot.running:
+            return
+        if self.var_paused.get():
+            # 当前已暂停 → 恢复
+            bot.resume()
+            self.var_paused.set(False)
+            self.var_runtime_status.set("运行中")
+            for btn in [self.btn_main_pause, self.btn_mini_pause]:
+                btn.configure(text="⏸  暂 停")
+            print(">>> [暂停] 脚本已继续运行")
+        else:
+            # 当前运行中 → 暂停
+            bot.pause()
+            self.var_paused.set(True)
+            self.var_runtime_status.set("已暂停")
+            for btn in [self.btn_main_pause, self.btn_mini_pause]:
+                btn.configure(text="▶  继 续")
+            print(">>> [暂停] 脚本已暂停")
 
     def on_confirm_tower_delay(self):
         if not self._enforce_online_guard("应用挂机节奏", interactive=True):
@@ -4078,6 +4745,9 @@ class Application(ttkb.Window):
             self.bot.set_mumu_path(self.config.get("mumu_path", ""))
             self.bot.set_active_branch(self.config.get("active_branch", "full"), log_change=not no_log)
             self.bot.set_module_flags(self.config.get("modules", {}), log_change=not no_log)
+            self.bot.set_click_jitter(
+                self.config.get("click_jitter", 6),
+                self.config.get("swipe_jitter", 8))
 
     def on_bot_config_update(self, key, value):
         def _apply_update():
@@ -4109,21 +4779,12 @@ class Application(ttkb.Window):
         self._check_error_and_notify(msg)
 
     def process_log_queue(self):
-        """自适应日志刷新 + 后台回调处理：队列空时降低轮询频率，积压时提高频率。
-        
-        此方法在主线程（由 after 定时器驱动）中运行，同时负责：
-        1. 刷新日志队列到 GUI 控件
-        2. 轮询处理 BackgroundWorker 投递的后台回调
-        3. 轮询处理通过 _call_main_thread 投递的主线程回调
-        """
-        # 处理主线程回调队列（通过 _call_main_thread 投递的安全跨线程回调）
+        """自适应日志刷新 + 后台回调处理。"""
         self._process_main_thread_callbacks()
-        # 处理后台工作线程投递的回调（安全：在主线程中执行）
         self._process_bg_callbacks()
-        # 刷新日志队列
         qsize = self.redirector._queue.qsize()
         self.redirector._flush_queue()
-        # 自适应间隔：空闲 250ms，正常 100ms，积压 50ms
+
         if qsize == 0:
             interval = 250
         elif qsize < 50:

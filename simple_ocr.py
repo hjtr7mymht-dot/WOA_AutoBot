@@ -182,7 +182,7 @@ class SimpleOCR:
         if screen_image is not None:
             full_screen = screen_image
         else:
-            full_screen = self.adb.get_screenshot()
+            full_screen = self.adb.get_screenshot_cached(max_age_ms=40) if hasattr(self.adb, 'get_screenshot_cached') else self.adb.get_screenshot()
         if full_screen is None:
             return None
         templates = self.templates_global if mode == 'global' else self.templates_task

@@ -1,14 +1,14 @@
 {
-  "version": "1.4.1",
+  "version": "1.5.0",
   "package_urls": [
     {
       "name": "GitHub Release",
-      "url": "https://github.com/hjtr7mymht-dot/WOA_AutoBot/releases/download/1.4.1/WOA_AutoBot.zip"
+      "url": "https://github.com/hjtr7mymht-dot/WOA_AutoBot/releases/download/1.5.0/WOA_AutoBot.zip"
     },
     {
       "name": "ghproxy Release",
-      "url": "https://ghproxy.cn/https://github.com/hjtr7mymht-dot/WOA_AutoBot/releases/download/1.4.1/WOA_AutoBot.zip"
+      "url": "https://ghproxy.cn/https://github.com/hjtr7mymht-dot/WOA_AutoBot/releases/download/1.5.0/WOA_AutoBot.zip"
     }
   ],
-  "notes": "1.4.1：修复不起飞模式轮切Bug、离场领奖漏检、模板中文路径读取失败；新增公告与说明按钮、ROI尺寸自动校验。"
+  "notes": "1.5.0：全面实时识图重构、智能状态机秒级响应、仪表盘实时倒计时、Aqua Tk 原生剪贴板修复、代码合并精简、深色/浅色无损切换、跨平台全面兼容。"
 }

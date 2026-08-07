@@ -91,7 +91,7 @@ def safe_subprocess_run(args, **kwargs):
 
 
 def safe_popen_wait(proc, timeout=None):
-    """安全等待子进程，处理超时（带超时 => terminate + wait）"""
+    """安全等待子进程，处理超时（带超时 => terminate + wait + kill）"""
     if timeout is None:
         return proc.wait()
     try:
@@ -103,3 +103,11 @@ def safe_popen_wait(proc, timeout=None):
         except sp.TimeoutExpired:
             proc.kill()
             return proc.wait()
+
+
+def get_adb_bundled_path(base_dir=None):
+    """获取打包/开发环境中内置 adb 的完整路径"""
+    if base_dir is None:
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        base_dir = os.path.dirname(base_dir)  # 从 core/ 向上到项目根目录
+    return os.path.join(base_dir, "adb_tools", ADB_EXE_NAME)

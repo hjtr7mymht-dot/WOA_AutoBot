@@ -15,6 +15,7 @@ from core.platform import (
     unlock_file,
     try_lock_file,
     get_app_data_dir,
+    get_adb_bundled_path,
     safe_subprocess_run,
     safe_popen_wait,
 )
@@ -53,6 +54,7 @@ from core.constants import (
     REQUIRED_GUARD_MODULES,
     REF_WIDTH,
     REF_HEIGHT,
+    CORE_FILE_FINGERPRINTS,
 )
 
 __all__ = [
