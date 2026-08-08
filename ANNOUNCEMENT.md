@@ -9,8 +9,8 @@
 - ✅ 官方唯一发布渠道：[GitHub](https://github.com/hjtr7mymht-dot/WOA_AutoBot)
 - ⚠️ **如您是从任何第三方渠道（淘宝、拼多多、微信等）付费购买的，请立即退款并举报！**
 
-> 💙 赞助支持：如果您认可本项目并愿意提供支持，**仅在闲鱼**设有赞助渠道。
-> - 闲鱼用户名：**MythZx**
+> 💙 赞助支持：如果您认可本项目并愿意提供支持，请使用下方二维码赞助。
+> - 微信 / 支付宝扫码即可
 > - 除此之外的**所有闲鱼卖家、淘宝店铺、微信群、QQ群收费推广均为第三方倒卖**，与作者无关
 
 ---
@@ -47,6 +47,17 @@
 - 🖥️ 建议开启 **2D 模式** 以提升识别准确率
 - 📱 **nemu_ipc** 截图方案速度最快，首次启动会自动探测可用方案
 - ⚠️ 如遇防卡死误触发，可在设置中调整阈值
+
+## 💙 赞助支持
+
+> ⚠️ **本软件的持续更新与维护完全依赖用户赞助。若资金不足，项目将被迫停止更新与维护。**
+>
+> 如果您认可 WOA AutoBot 并希望它持续改进，请考虑赞助支持。每一份支持都是项目活下去的动力。
+
+| 微信支付 | 支付宝 |
+|:---:|:---:|
+| ![微信支付](https://raw.githubusercontent.com/hjtr7mymht-dot/WOA_AutoBot/main/assets/donate/wechat_pay.png) | ![支付宝](https://raw.githubusercontent.com/hjtr7mymht-dot/WOA_AutoBot/main/assets/donate/alipay_pay.png) |
+| 微信扫码 | 支付宝扫码 |
 
 ---
 

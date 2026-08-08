@@ -8,6 +8,17 @@ WOA AutoBot 是一款面向 World of Airports 的自动化辅助工具，目标�
 
 > ⚠️ **v1.5.0 说明**：全面实时识图重构（截图缓存、智能状态机、秒级任务检测）、仪表盘实时倒计时、Aqua Tk 原生剪贴板修复、代码合并精简、深色/浅色无损切换、跨平台全面兼容。
 
+## 💙 赞助支持
+
+> **本软件的持续更新与维护完全依赖用户赞助。若资金不足，项目将被迫停止更新与维护。**
+>
+> 如果您认可 WOA AutoBot 并希望它持续改进，请考虑赞助支持。每一份支持都是项目活下去的动力。
+
+| 微信支付 | 支付宝 |
+|:---:|:---:|
+| ![微信支付](https://raw.githubusercontent.com/hjtr7mymht-dot/WOA_AutoBot/main/assets/donate/wechat_pay.png) | ![支付宝](https://raw.githubusercontent.com/hjtr7mymht-dot/WOA_AutoBot/main/assets/donate/alipay_pay.png) |
+| 微信扫码 | 支付宝扫码 |
+
 ## 项目说明
 
 - 本项目为二创重置项目，原项目链接为 https://github.com/nj-yzf/WOA_AutoBot

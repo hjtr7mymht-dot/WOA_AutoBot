@@ -1,6 +1,6 @@
 # WOA AutoBot — 项目 WIKI
 
-> 本 WIKI 由 Copilot 根据源码自动生成，版本对应 **v1.4.1**。  
+> 本 WIKI 由 Copilot 根据源码自动生成，版本对应 **v1.5.0**。  
 > 如有内容过时，欢迎提交 PR 或在 Issues 中反馈。
 
 ---
@@ -16,27 +16,33 @@
 7. [多开模式](#7-多开模式)
 8. [防检测机制](#8-防检测机制)
 9. [防卡死机制](#9-防卡死机制)
-10. [统计功能](#10-统计功能)
-11. [版本检测与在线验证](#11-版本检测与在线验证)
-12. [开发环境与打包](#12-开发环境与打包)
-13. [常见问题 FAQ](#13-常见问题-faq)
-14. [免责声明](#14-免责声明)
+10. [仪表盘与实时监控](#10-仪表盘与实时监控)
+11. [手机推送通知](#11-手机推送通知)
+12. [统计功能](#12-统计功能)
+13. [版本检测与在线验证](#13-版本检测与在线验证)
+14. [开发环境与打包](#14-开发环境与打包)
+15. [常见问题 FAQ](#15-常见问题-faq)
+16. [免责声明](#16-免责声明)
+17. [赞助支持](#17-赞助支持)
 
 ---
 
 ## 1. 项目简介
 
-**WOA AutoBot** 是面向手游《World of Airports（世界机场）》的 Windows 自动化辅助脚本。  
+**WOA AutoBot** 是面向手游《World of Airports（世界机场）》的跨平台自动化辅助脚本。  
 它通过 ADB 或 uiautomator2 连接安卓模拟器，利用 OpenCV 模板匹配 + 自定义 OCR 识别游戏界面，
 自动完成地勤、除冰、维修、进近、滑行、起飞等重复性操作，让玩家无需持续盯屏即可挂机。
 
+v1.5.0 进行了全面实时识图重构，引入智能状态机实现秒级响应，新增仪表盘实时倒计时、
+手机推送通知、深色/浅色主题切换，并全面支持 macOS 与 Windows 双平台。
+
 | 属性 | 说明 |
 |------|------|
-| 运行平台 | Windows 10 / 11（64 位） |
+| 运行平台 | Windows 10/11（64 位）、macOS 11+（Apple Silicon / Intel） |
 | 目标设备 | 安卓模拟器（推荐 MuMu 12）或真机 |
 | 游戏语言要求 | **简体中文**（UI 模板均以简中截图制作） |
 | 游戏分辨率 | 建议横屏，脚本自动适配常见横屏分辨率 |
-| 当前版本 | 1.0.6 |
+| 当前版本 | 1.5.0 |
 | 官方仓库 | https://github.com/hjtr7mymht-dot/WOA_AutoBot |
 | 原始项目 | https://github.com/nj-yzf/WOA_AutoBot |
 | 官方群 | QQ 群 1067076460 |
@@ -50,10 +56,10 @@
 │                     用户界面层                               │
 │                  (gui_launcher.py)                          │
 │   ┌────────────────────────────────────────────────────┐   │
-│   │  Tkinter + ttkbootstrap 窗口                        │   │
-│   │  • 主窗口 / 紧凑小窗                                 │   │
-│   │  • 设备扫描选择 / 配置面板 / 日志展示                  │   │
-│   │  • 多开模式按钮                                      │   │
+│   │  Tkinter + ttkbootstrap 窗口（深色/浅色主题）       │   │
+│   │  • 主窗口 / 紧凑小窗 / 仪表盘实时数据面板            │   │
+│   │  • 设备扫描选择 / 配置面板 / 日志展示                │   │
+│   │  • 多开模式按钮 / 手机推送通知设置                   │   │
 │   └────────────────────────────────────────────────────┘   │
 └──────────────────────────┬──────────────────────────────────┘
                            │ JSON 配置 & 回调
@@ -62,11 +68,11 @@
 │                   自动化逻辑层                               │
 │                   (main_adb.py)                             │
 │   ┌────────────────────────────────────────────────────┐   │
-│   │  WoaBot 类                                          │   │
-│   │  • 主循环 _main_loop / _do_main_loop                │   │
-│   │  • 任务扫描 scan_task_list                          │   │
-│   │  • 任务执行 handle_*_task                           │   │
-│   │  • 防卡死 / 防检测 / 统计                            │   │
+│   │  WoaBot 类 — 智能状态机引擎                         │   │
+│   │  • 主循环 _main_loop / _do_main_loop（实时识图）    │   │
+│   │  • 任务扫描 scan_task_list（缓存截图 + 60ms 轮询）  │   │
+│   │  • 任务执行 handle_*_task（模块化可配置分支）       │   │
+│   │  • 塔台延时监测 / 防卡死 / 防检测 / 统计            │   │
 │   └────────────────────────────────────────────────────┘   │
 └──────────────────────────┬──────────────────────────────────┘
                            │ 截图 & 点击指令
@@ -94,6 +100,10 @@
 
 | 模块 | 用途 |
 |------|------|
+| `core/constants.py` | 全局常量、版本号、侧边栏类别定义、文件指纹 |
+| `core/platform.py` | 跨平台抽象：文件锁、ADB 路径、应用数据目录 |
+| `core/resources.py` | 资源路径解析（开发模式 vs 打包模式） |
+| `core/debug.py` | 调试与崩溃报告基础设施 |
 | `simple_ocr.py` | 基于数字/图标模板的轻量 OCR，识别地勤数量、费用等 |
 | `emulator_discovery.py` | 扫描本机运行中的模拟器，自动获取 ADB 端口列表 |
 | `woa_debug.py` | 调试工具：保存截图、打印像素颜色等辅助函数 |
@@ -105,24 +115,33 @@
 ### 3.1 `gui_launcher.py` — 用户界面
 
 - **框架**：Tkinter + ttkbootstrap（Bootstrap 主题），提供 `Application` 类。
-- **主窗口**：包含设备选择、快捷开关面板、脚本启停按钮、实时日志滚动区。
-- **高级设置**：双列布局，涵盖触控方式、截图方式、防检测参数、自愿资助入口等。
+- **主题切换**：支持深色（darkly）与浅色（flatly）主题一键切换，仪表盘配色自动跟随。
+- **主窗口**：左侧仪表盘实时数据面板 + 右侧设备选择、快捷开关、脚本启停按钮、实时日志滚动区。
+- **仪表盘**：运行时长大字显示、进场/离场/地勤/累计操作/运行效率/平均周期等 6 项指标实时刷新。
+- **高级设置**：双列布局，涵盖触控方式、截图方式、防检测参数、手机推送、类别栏处理、自愿资助入口等。
 - **紧凑小窗**：通过 `mini_window` 切换，节省屏幕空间。
-- **多实例支持**：通过 `instance_X.lock` 文件锁定实例编号（最多 3 个），每个实例读写独立配置。
+- **多实例支持**：通过 `instance_X.lock` 文件锁定实例编号（最多 4 个），每个实例读写独立配置。
 - **版本检测**：启动时异步请求远端 `version.json`，有新版本时在界面顶部横幅提示。
+- **手机通知**：支持企业微信/钉钉 Webhook 机器人推送告警与统计报告。
+- **Python 3.14+ 兼容**：内置 tkinter Misc.__getattr__ 补丁，修复 macOS Aqua Tk 兼容性问题。
+- **只读文本框剪贴板**：macOS Aqua Tk 下 disabled 状态 Text 控件支持 Cmd+C 复制。
 
 ### 3.2 `main_adb.py` — 游戏自动化核心
 
 - **类**：`WoaBot`，在独立线程中运行，通过回调函数与 GUI 通信（日志推送、按钮状态等）。
+- **智能状态机**：v1.5.0 重构为事件驱动状态机，缓存截图 + 60ms 快速轮询实现秒级响应。
 - **主循环**（`_main_loop` → `_do_main_loop`）：
   1. 检测错误弹窗（服务器断线等）
   2. 检查日期切换（跨天重置统计）
-  3. 执行生命周期检查（塔台延时、自动登出）
-  4. 截图 → 检测任务列表 → 筛选 → 选定任务 → 执行
-  5. 空闲处理（关闭窗口、防卡死恢复）
+  3. 执行生命周期检查（塔台延时 OCR 监测、自动登出）
+  4. 右侧类别栏轮转（可选，按配置切换飞机类别标签）
+  5. 截图 → 检测任务列表 → 筛选 → 选定任务 → 执行
+  6. 空闲处理（关闭窗口、防卡死恢复）
 - **任务类型**：`doing`（处理中）、`stand`（停机位）、`approach`（进近）、`taxiing`（滑行）、`takeoff`（起飞）、`ice`（除冰）、`repair`（维修）。
+- **任务分支**：支持 `full`（全部）、`safe`（安全模式）、`ground_only`（仅地面）、`air_only`（仅空中）四种可配置分支。
 - **模板匹配**：调用 `AdbController.safe_locate()` 在截图 ROI（兴趣区域）中搜索 PNG 模板。
 - **批量匹配优化**：高频路径使用同帧多图批匹配，减少重复截图和多次 `matchTemplate` 调用。
+- **实时识图**：使用缓存截图 + 60ms 间隔的快速轮询，避免每次循环重新截图，大幅降低延迟。
 
 ### 3.3 `adb_controller.py` — 设备通信抽象
 
@@ -167,68 +186,165 @@
 | **除冰 (De-ice)** | 检测除冰任务并完成 |
 | **维修 (Repair)** | 检测维修任务并完成 |
 
-### 4.2 自动地勤领取
+### 4.2 实时识图与智能状态机（v1.5.0 新特性）
 
-- 开关：`bonus_staff`（默认开启）
+- 主循环采用缓存截图 + 60ms 快速轮询机制，避免每次循环重新截图。
+- 智能状态机根据当前界面状态（主界面、任务列表、弹窗等）自动切换处理策略。
+- 塔台倒计时通过 OCR 实时读取四个控制器的剩余时间，精确调度延时贿赂。
+
+### 4.3 仪表盘实时监控（v1.5.0 新特性）
+
+- 主窗口左侧内嵌仪表盘，实时显示运行时长、进场/离场飞机数、地勤分配、累计操作、运行效率、平均周期。
+- 标题栏同步显示进场飞机计数，无需切换窗口即可了解运行状态。
+- 配色自动跟随深色/浅色主题。
+
+### 4.4 右侧类别栏自动轮转（v1.5.0 新特性）
+
+- 开关：`category_processing_enabled`（默认关闭）
+- 可选项：❤️ 喜爱/合约、⚠️ 机队、🟢 其他玩家、🔵 活动飞机、✈️ 客机、📦 货机
+- 按设定的间隔（默认 15 秒）自动切换右侧类别标签，确保各类型飞机都能被处理。
+- 使用图像识别 + 像素验证双重确认按钮状态，识别失败时回退到坐标点击。
+
+### 4.5 自动地勤领取
+
+- 开关：`bonus_staff`（默认关闭）
 - 检测地勤奖励弹窗，自动点击领取，避免地勤溢出或遗漏。
+- 冷却时间 2 小时，避免频繁检测。
 
-### 4.3 自动购买车辆
+### 4.6 自动购买车辆
 
 - 开关：`vehicle_buy`（默认开启）
 - 当检测到需要购买地勤车辆时自动确认购买。
 
-### 4.4 塔台延时贿赂
+### 4.7 塔台延时贿赂
 
 - 开关：`delay_bribe`（默认开启）
-- 参数：`auto_delay_count`（每次贿赂次数，默认 1）
-- 检测塔台延时按钮，自动完成贿赂操作，延续飞机停留时间。
+- 参数：`auto_delay_count`（每次贿赂次数，默认 0 表示全部延时）
+- OCR 实时读取塔台四个控制器的剩余时间，精确判断需要延时的控制器。
+- 支持全部延时按钮一键操作。
 
-### 4.5 筛选自动调整
+### 4.8 筛选自动调整
 
 - 开关：`cancel_stand_filter`、`tower_open_stand_only`
 - 根据塔台开放状态自动调整停机位筛选条件，避免漏分配。
+- 塔台关闭时自动取消停机位筛选，塔台开启时恢复。
 
-### 4.6 无起飞挂机模式
+### 4.9 无起飞挂机模式
 
 - 开关：`no_takeoff_mode`（默认关闭）
 - 启用后跳过所有起飞任务，仅执行地面流程。
-- 相关参数：`no_takeoff_cycle_seconds`、`no_takeoff_switch_interval`、`no_takeoff_auto_logout_interval`。
+- 相关参数：`no_takeoff_switch_interval`（切换间隔）、`no_takeoff_auto_logout_interval`（自动小退间隔）。
+- 支持自动小退功能（`no_takeoff_logout_enabled`），长时间挂机后主动重登。
 
-### 4.7 自动减员
+### 4.10 2D 模式自动切换（v1.5.0 新特性）
+
+- 开关：`2d_mode`（默认开启）
+- 自动将游戏视图切换为 2D 模式，提高模板匹配准确率并降低 GPU 负载。
+- 检测到 3D 模式时自动点击切换按钮。
+
+### 4.11 自动减员
 
 - 开关：`auto_staff_minus_one`（默认开启）
 - 分配地勤时自动减少一格，防止地勤数量溢出上限。
+
+### 4.12 手机推送通知（v1.5.0 新特性）
+
+- 开关：`mobile_notify_enabled`
+- 支持企业微信和钉钉 Webhook 机器人。
+- 推送事件：脚本严重错误、运行报错、自动停机、定时统计报告。
+- 统计报告间隔可配置（3/6/12/24 小时），自动汇总进场/离场/地勤等数据。
+- 内置防刷屏机制（25 秒最小间隔、90 秒同签名去重）。
+
+### 4.13 金币提醒（v1.5.0 新特性）
+
+- 开关：`gold_remind_enabled`（默认关闭）
+- 每日特定时段和每周一早晨推送金币收集提醒。
 
 ---
 
 ## 5. 配置参数参考
 
-配置文件路径：`config.json`（实例 1）、`config_2.json`（实例 2）、`config_3.json`（实例 3）
+配置文件路径：`config.json`（实例 1）、`config_2.json`（实例 2）、`config_3.json`（实例 3）、`config_4.json`（实例 4）
+
+### 触控与截图
 
 | 参数名 | 类型 | 默认值 | 说明 |
 |-------|------|--------|------|
 | `control_method` | string | `"uiautomator2"` | 触控方案：`"adb"` 或 `"uiautomator2"` |
-| `screenshot_method` | string | `"nemu_ipc"` | 截图方案：`"nemu_ipc"` / `"adb"` / `"droidcast_raw"` / `"u2"` |
-| `bonus_staff` | bool | `true` | 自动领取地勤奖励 |
+| `screenshot_method` | string | `"uiautomator2"` | 截图方案：`"nemu_ipc"` / `"adb"` / `"droidcast_raw"` / `"uiautomator2"` |
+| `public_adb_targets` | string | `""` | 远程 ADB 目标地址，多个用逗号分隔（如 `192.168.1.100:5555`） |
+
+### 自动化开关
+
+| 参数名 | 类型 | 默认值 | 说明 |
+|-------|------|--------|------|
+| `bonus_staff` | bool | `false` | 自动领取地勤奖励 |
 | `vehicle_buy` | bool | `true` | 自动购买地勤车辆 |
 | `delay_bribe` | bool | `true` | 自动塔台延时贿赂 |
-| `auto_delay_count` | int | `1` | 每次贿赂次数 |
-| `random_task_order` | bool | `true` | 随机任务顺序（防检测） |
-| `thinking_mode` | int | `1` | 随机思考时间等级（0=关闭，1=轻度，2=中度） |
-| `slide_min` | int | `300` | 滑动/点击最短耗时（毫秒） |
-| `slide_max` | int | `500` | 滑动/点击最长耗时（毫秒） |
-| `no_takeoff_mode` | bool | `false` | 无起飞模式 |
-| `no_takeoff_cycle_seconds` | int | `5` | 无起飞模式循环间隔（秒） |
-| `no_takeoff_switch_interval` | float | `3.0` | 无起飞模式切换间隔（秒） |
-| `no_takeoff_auto_logout_interval` | float | `1.0` | 无起飞模式自动登出间隔（小时） |
-| `standalone_logout_interval` | float | `30.0` | 独立登出间隔（分钟） |
-| `cancel_stand_filter` | bool | `false` | 自动取消停机位筛选 |
-| `tower_open_stand_only` | bool | `false` | 仅在塔台开放时分配停机位 |
+| `auto_delay_count` | int | `0` | 每次贿赂次数（0 = 全部延时） |
 | `skip_staff` | bool | `false` | 地勤不足时跳过当前任务 |
-| `auto_staff_minus_one` | bool | `true` | 分配地勤时自动减一 |
 | `speed_mode` | bool | `false` | 极速模式（减少等待，不推荐长时间使用） |
-| `adb_path` | string | — | ADB 可执行文件路径（可留空使用内置） |
-| `mumu_path` | string | — | MuMu 模拟器安装目录（用于 nemu_ipc） |
+| `2d_mode` | bool | `true` | 自动切换 2D 视图模式 |
+
+### 防检测
+
+| 参数名 | 类型 | 默认值 | 说明 |
+|-------|------|--------|------|
+| `random_task_order` | bool | `false` | 随机任务顺序 |
+| `thinking_mode` | int | `0` | 随机思考时间等级（0=关闭，1=轻度，2=中度） |
+| `slide_min` | int | `250` | 点击最短按下时长（毫秒） |
+| `slide_max` | int | `500` | 点击最长按下时长（毫秒） |
+| `click_jitter` | int | `6` | 点击坐标随机抖动范围（像素） |
+| `swipe_jitter` | int | `8` | 滑动坐标随机抖动范围（像素） |
+
+### 不起飞模式
+
+| 参数名 | 类型 | 默认值 | 说明 |
+|-------|------|--------|------|
+| `no_takeoff_mode` | bool | `false` | 不起飞模式 |
+| `no_takeoff_switch_interval` | float | `15.0` | 不起飞模式切换间隔（秒） |
+| `no_takeoff_logout_enabled` | bool | `false` | 不起飞模式自动小退 |
+| `no_takeoff_auto_logout_interval` | float | `30.0` | 不起飞模式自动小退间隔（分钟） |
+
+### 停机位与筛选
+
+| 参数名 | 类型 | 默认值 | 说明 |
+|-------|------|--------|------|
+| `cancel_stand_filter` | bool | `true` | 塔台关闭时自动取消停机位筛选 |
+| `tower_open_stand_only` | bool | `true` | 仅在塔台开放时分配停机位 |
+| `standalone_logout_interval` | float | `30.0` | 独立小退间隔（分钟） |
+
+### 类别栏处理
+
+| 参数名 | 类型 | 默认值 | 说明 |
+|-------|------|--------|------|
+| `category_processing_enabled` | bool | `false` | 启用右侧类别栏自动轮转 |
+| `category_selection` | object | 全部 false | 各分类开关（favorites/fleet/players/event/passenger/cargo） |
+
+### 防卡死
+
+| 参数名 | 类型 | 默认值 | 说明 |
+|-------|------|--------|------|
+| `anti_stuck_enabled` | bool | `true` | 启用防卡死机制 |
+| `anti_stuck_threshold` | int | `6` | 超时警告触发阈值（次数） |
+
+### 通知与提醒
+
+| 参数名 | 类型 | 默认值 | 说明 |
+|-------|------|--------|------|
+| `mobile_notify_enabled` | bool | `false` | 启用手机推送通知 |
+| `mobile_notify_provider` | string | `"wecom"` | 推送渠道：`"wecom"`（企业微信）或 `"dingtalk"`（钉钉） |
+| `mobile_notify_webhook` | string | `""` | Webhook 机器人地址 |
+| `mobile_notify_keyword` | string | `""` | 推送消息前缀关键字 |
+| `mobile_stats_report_enabled` | bool | `false` | 启用定时统计报告推送 |
+| `mobile_stats_report_hours` | int | `6` | 统计报告间隔（3/6/12/24 小时） |
+| `gold_remind_enabled` | bool | `false` | 启用金币提醒 |
+
+### 界面
+
+| 参数名 | 类型 | 默认值 | 说明 |
+|-------|------|--------|------|
+| `theme` | string | `"light"` | 界面主题：`"light"`（浅色）或 `"dark"`（深色） |
 
 > **注意**：配置文件由程序自动读写，通常无需手动编辑。建议在 GUI 高级设置中修改。
 
@@ -264,19 +380,19 @@
 
 ## 7. 多开模式
 
-WOA AutoBot 最多支持 **3 个实例**同时运行，适合多账号或多模拟器挂机。
+WOA AutoBot 最多支持 **4 个实例**同时运行，适合多账号或多模拟器挂机。
 
 ### 使用步骤
 
 1. 打开第一个窗口后，点击主界面的 **"多开模式"** 按钮。
 2. 系统自动启动新的独立进程窗口（实例 2）。
 3. 在新窗口中重新选择设备和配置。
-4. 如需三开，在任意已启动的窗口中再次点击"多开模式"。
+4. 如需三开或四开，在任意已启动的窗口中再次点击"多开模式"。
 
 ### 实现机制
 
-- 每个实例通过 `instance_1.lock` / `instance_2.lock` / `instance_3.lock` 确定自己的编号。
-- 配置文件独立：实例 1 → `config.json`，实例 2 → `config_2.json`，实例 3 → `config_3.json`。
+- 每个实例通过 `instance_1.lock` / `instance_2.lock` / `instance_3.lock` / `instance_4.lock` 确定自己的编号。
+- 配置文件独立：实例 1 → `config.json`，实例 2 → `config_2.json`，实例 3 → `config_3.json`，实例 4 → `config_4.json`。
 - 统计 CSV（`woa_stats.csv`）多实例共享，写入时使用 `woa_stats.csv.lock` 防止并发覆盖。
 - 多开时建议每个实例绑定**不同的模拟器窗口或端口**，避免控制冲突。
 
@@ -288,9 +404,11 @@ WOA AutoBot 最多支持 **3 个实例**同时运行，适合多账号或多模�
 
 | 机制 | 配置项 | 说明 |
 |------|-------|------|
-| **随机任务顺序** | `random_task_order` | 不总是选第一个任务，80% 概率从前 3 个任务中随机选取 |
-| **随机滑动耗时** | `slide_min` / `slide_max` | 每次点击的按下时长在 `[slide_min, slide_max]` ms 内随机 |
-| **随机思考时间** | `thinking_mode` | 任务间插入 0–5 秒随机停顿（等级 1/2 控制幅度） |
+| **随机任务顺序** | `random_task_order` | 不总是选第一个任务，从前几个任务中随机选取 |
+| **随机点击耗时** | `slide_min` / `slide_max` | 每次点击的按下时长在 `[slide_min, slide_max]` ms 内随机 |
+| **随机思考时间** | `thinking_mode` | 任务间插入随机停顿（等级 1/2 控制幅度） |
+| **点击坐标抖动** | `click_jitter` | 点击坐标在 ±N 像素范围内随机偏移 |
+| **滑动坐标抖动** | `swipe_jitter` | 滑动路径在 ±N 像素范围内随机偏移 |
 | **随机跳过** | 内置概率逻辑 | 偶尔不处理当前第一个任务，模拟人工犹豫 |
 
 > **建议**：保持默认防检测设置开启，不要将 `slide_min`/`slide_max` 设置为相同值（会失去随机性）。
@@ -304,9 +422,10 @@ WOA AutoBot 最多支持 **3 个实例**同时运行，适合多账号或多模�
 ### 9.1 超时警告计数
 
 - 每次操作超时（截图失败、找不到预期元素）会在内部记录一次 `⚠️` 警告。
-- 警告累计 **6 次**：触发"紧急自救"——尝试领取奖励、关闭所有弹窗，重置界面。
+- 警告累计达到 `anti_stuck_threshold`（默认 6 次）：触发"紧急自救"——尝试领取奖励、关闭所有弹窗，重置界面。
 - 自救成功后：自动恢复继续运行，计数器清零。
-- 自救失败超过 **6 次**：自动停止脚本，避免反复空转。
+- 自救失败超过 6 次：触发软停止。
+- 自救失败超过 12 次：触发硬停止，并通过手机推送通知用户（如已启用）。
 
 ### 9.2 弹窗检测
 
@@ -315,14 +434,69 @@ WOA AutoBot 最多支持 **3 个实例**同时运行，适合多账号或多模�
 
 ### 9.3 自动登出保护
 
-- 开关：`no_takeoff_auto_logout_enabled`、`standalone_logout_interval`
+- 开关：`no_takeoff_logout_enabled`（不起飞模式自动小退）、`standalone_logout_interval`（独立小退）。
 - 长时间挂机后主动触发登出再登入，防止会话过期导致卡死。
+
+### 9.4 手机告警通知
+
+- 当脚本因防卡死自动停止时，自动通过企业微信/钉钉推送告警消息。
 
 ---
 
-## 10. 统计功能
+## 10. 仪表盘与实时监控
 
-脚本在运行过程中自动记录操作统计，数据存储于根目录的 `woa_stats.csv`。
+v1.5.0 在主窗口左侧新增仪表盘面板，提供运行状态的实时可视化：
+
+### 显示指标
+
+| 指标 | 说明 |
+|------|------|
+| ⏱ 运行时长 | 本次脚本已运行时间，大字突出显示 |
+| 🛬 进场飞机 | 本次会话处理的进近次数 |
+| 🛫 离场飞机 | 本次会话处理的起飞次数 |
+| 🅿️ 分配地勤 | 本次会话分配停机位 + 地勤次数 |
+| 📦 累计操作 | 当日累计所有操作次数 |
+| ⚡ 运行效率 | 操作数 / 运行分钟，反映处理速度 |
+| ⏳ 平均周期 | 每次操作的平均间隔时间 |
+
+- 数据每 500ms 刷新一次，与主循环异步更新。
+- 标题栏同步显示进场飞机计数。
+- 配色自动跟随深色/浅色主题切换。
+
+---
+
+## 11. 手机推送通知
+
+v1.5.0 新增手机推送通知功能，支持将关键事件推送到手机。
+
+### 支持的推送渠道
+
+| 渠道 | Webhook 格式 |
+|------|-------------|
+| **企业微信** | `https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=...` |
+| **钉钉** | `https://oapi.dingtalk.com/robot/send?access_token=...` |
+
+### 推送事件
+
+| 事件 | 触发条件 | 强制推送 |
+|------|---------|---------|
+| 脚本严重错误 | 脚本异常退出 | ✅ |
+| 脚本运行报错 | 运行中出错 | - |
+| 自动停机 | 防卡死触发停止 | ✅ |
+| 定时统计报告 | 按配置间隔（3/6/12/24 小时） | - |
+| 金币提醒 | 每日/每周定时 | ✅ |
+
+### 防刷屏机制
+
+- 普通通知 25 秒内最多推送一次。
+- 相同内容 90 秒内不重复推送。
+- 严重错误和自动停机不受限制，强制推送。
+
+---
+
+## 12. 统计功能
+
+脚本在运行过程中自动记录操作统计，数据存储于应用数据目录的 `woa_stats.csv`。
 
 ### 统计字段
 
@@ -332,21 +506,23 @@ WOA AutoBot 最多支持 **3 个实例**同时运行，适合多账号或多模�
 | `approach_count` | 当天处理进近任务次数 |
 | `depart_count` | 当天处理起飞任务次数 |
 | `stand_count` | 当天分配停机位次数 |
+| `stand_staff` | 当天分配地勤次数 |
 
 - 每天零点自动切换新行，历史数据保留。
 - 多实例共享同一 CSV，写入前加文件锁（`woa_stats.csv.lock`）防止数据损坏。
+- 支持定时统计报告推送到手机（需启用 `mobile_stats_report_enabled`）。
 
 ---
 
-## 11. 版本检测与在线验证
+## 13. 版本检测与在线验证
 
-### 11.1 版本检测
+### 13.1 版本检测
 
 - 程序**启动时**异步检测一次远端 `version.json`。
 - 请求顺序：GitHub Raw → jsDelivr → ghproxy（适配国内网络）。
 - 发现新版本时：界面顶部显示"发现更新"横幅，**不自动下载**，需用户手动前往 Releases 下载。
 
-### 11.2 在线验证策略
+### 13.2 在线验证策略
 
 | 运行模式 | 验证行为 |
 |---------|---------|
@@ -357,71 +533,88 @@ WOA AutoBot 最多支持 **3 个实例**同时运行，适合多账号或多模�
 
 ---
 
-## 12. 开发环境与打包
+## 14. 开发环境与打包
 
-### 12.1 环境准备
+### 14.1 环境准备
 
-```
-Python 3.x（推荐 3.10 / 3.11）
-Windows 10 / 11
-```
+- Python 3.10+（推荐 3.11 / 3.12）
+- Windows 10/11 或 macOS 11+
 
 安装依赖：
 
-```powershell
+```bash
 pip install -r requirements.txt
 ```
 
-> 主要依赖：`opencv-python==4.13.0.90`、`numpy==2.4.1`、`Pillow==12.1.0`、  
-> `uiautomator2==3.5.0`、`ttkbootstrap==1.2.0`、`requests==2.32.5`
+> 主要依赖：`opencv-python>=4.8.0`、`numpy>=1.26.0`、`Pillow>=10.0`、  
+> `uiautomator2>=3.0.0`、`ttkbootstrap>=1.20.0`、`requests>=2.28.0`、  
+> `lxml>=5.0`、`adbutils>=2.12.0`、`orjson>=3.10.0`（可选，加速 JSON 解析）
 
-### 12.2 运行源码
+### 14.2 运行源码
 
-```powershell
+```bash
 python gui_launcher.py
 ```
 
-### 12.3 打包为 EXE
+### 14.3 打包
 
-项目使用 PyInstaller，仓库内已提供 `WOA_AutoBot.spec`：
+项目使用 PyInstaller，仓库内提供两个 spec 文件：
 
+- `WOA_AutoBot.spec` — Windows 打包配置
+- `WOA_AutoBot_mac.spec` — macOS 打包配置（生成 .app 捆绑包）
+
+**Windows：**
 ```powershell
-# 激活虚拟环境后执行
 python -m PyInstaller -y --clean WOA_AutoBot.spec
 ```
 
+**macOS：**
+```bash
+python -m PyInstaller -y --clean WOA_AutoBot_mac.spec
+```
+
 产物位置：
-- `dist/WOA_AutoBot/WOA_AutoBot.exe`
-- `dist/WOA_AutoBot.zip`（打包后压缩）
+- Windows：`dist/WOA_AutoBot/WOA_AutoBot.exe`
+- macOS：`dist/WOA_AutoBot.app`
 
 打包前请确保以下目录/文件存在（已在 spec 中声明为资源）：
 
 | 资源 | 说明 |
 |------|------|
-| `icon/` | 游戏 UI 模板图片（~50+ PNG） |
+| `icon/` | 游戏 UI 模板图片 |
 | `assets/` | UI 资源与捐助二维码 |
 | `adb_tools/` | 内置 ADB 可执行文件 |
 | `platform-tools/` | 备用 ADB 工具 |
 | `config.json` | 默认配置文件 |
-| `version_info.txt` | Windows EXE 版本信息 |
+| `version.json` | 版本信息文件 |
+| `core/` | 核心共享模块 |
 
-### 12.4 项目文件结构
+### 14.4 项目文件结构
 
 ```
 WOA_AutoBot/
-├── gui_launcher.py          # GUI 入口 & 主窗口（~2400 行）
-├── main_adb.py              # 游戏自动化核心逻辑（~2641 行）
-├── adb_controller.py        # 设备通信抽象层（~1868 行）
-├── nemu_ipc.py              # MuMu 原生截图模块（~516 行）
-├── simple_ocr.py            # 轻量模板 OCR（~286 行）
-├── emulator_discovery.py    # 模拟器自动发现（~438 行）
-├── woa_debug.py             # 调试工具（~92 行）
+├── gui_launcher.py          # GUI 入口 & 主窗口
+├── main_adb.py              # 游戏自动化核心逻辑（智能状态机）
+├── adb_controller.py        # 设备通信抽象层
+├── nemu_ipc.py              # MuMu 原生截图模块
+├── simple_ocr.py            # 轻量模板 OCR
+├── emulator_discovery.py    # 模拟器自动发现
+├── platform_utils.py        # 跨平台工具（兼容旧引用）
+├── woa_debug.py             # 调试工具
+├── core/                    # 核心共享模块
+│   ├── __init__.py
+│   ├── constants.py         # 全局常量、版本号、侧边栏定义
+│   ├── platform.py          # 跨平台文件锁、路径抽象
+│   ├── resources.py         # 资源路径解析
+│   └── debug.py             # 崩溃报告基础设施
+├── bot/                     # Bot Mixin 模块（已归档）
 ├── config.json              # 实例 1 配置
 ├── config_2.json            # 实例 2 配置
-├── config_3.json            # 实例 3 配置（如存在）
+├── config_3.json            # 实例 3 配置
+├── config_4.json            # 实例 4 配置（如存在）
 ├── version.json             # 当前版本号 & 下载地址
-├── version_info.txt         # PyInstaller EXE 版本信息
-├── WOA_AutoBot.spec         # PyInstaller 打包规格
+├── WOA_AutoBot.spec         # Windows PyInstaller 打包规格
+├── WOA_AutoBot_mac.spec     # macOS PyInstaller 打包规格
 ├── requirements.txt         # Python 依赖列表
 ├── icon/                    # 游戏 UI 模板图片
 ├── assets/                  # UI 资源（捐助二维码等）
@@ -429,25 +622,25 @@ WOA_AutoBot/
 ├── platform-tools/          # 备用 ADB 工具
 ├── docs/                    # 文档目录
 │   ├── WIKI.md              # 本文档
-│   └── GITHUB_RELEASE_PLAYBOOK.md  # 发布流程规范
+│   └── GUIDE.md             # 使用指南
 └── dist/                    # 打包输出目录（gitignore）
 ```
 
 ---
 
-## 13. 常见问题 FAQ
+## 15. 常见问题 FAQ
 
 ### Q1：点击没有响应 / 点击偏移
 **A**：进入高级设置，将触控方案切换为 `ADB` 或 `uiautomator2` 并重试。  
 若仍异常，检查模拟器分辨率是否为常见横屏分辨率（如 1280×720、1920×1080）。
 
 ### Q2：截图黑屏 / 识别错误
-**A**：截图方案依次尝试 `nemu_ipc` → `droidcast_raw` → `u2` → `adb`。  
+**A**：截图方案依次尝试 `nemu_ipc` → `droidcast_raw` → `uiautomator2` → `adb`。  
 程序启动时自动自检，如仍黑屏，手动在高级设置中切换截图方案。
 
 ### Q3：nemu_ipc 初始化失败
-**A**：确认 `mumu_path` 指向正确的 MuMu 12 安装目录（需包含 `nx_main` 子目录）。  
-也可在高级设置中手动指定路径后重启脚本。
+**A**：nemu_ipc 仅适用于 Windows + MuMu 12 模拟器。macOS 用户请使用 `uiautomator2` 或 `adb` 截图方案。  
+Windows 用户确认 `mumu_path` 指向正确的 MuMu 12 安装目录（需包含 `nx_main` 子目录）。
 
 ### Q4：在线验证失败
 **A**：程序尝试 GitHub Raw → jsDelivr → ghproxy 三个端点，国内网络可能需要代理。  
@@ -459,8 +652,8 @@ WOA_AutoBot/
 重新点击"启动脚本"即可恢复运行。
 
 ### Q6：多开时配置互相覆盖
-**A**：确保通过主界面的"多开模式"按钮启动新实例，而非直接再次打开 EXE。  
-直接打开 EXE 会竞争同一个实例编号，导致使用相同配置文件。
+**A**：确保通过主界面的"多开模式"按钮启动新实例，而非直接再次打开程序。  
+直接打开程序会竞争同一个实例编号，导致使用相同配置文件。
 
 ### Q7：统计数据不准确
 **A**：`woa_stats.csv` 按天记录，跨天后自动新增行。  
@@ -469,14 +662,40 @@ WOA_AutoBot/
 ### Q8：如何更新到新版本
 **A**：程序启动时会提示有新版本，前往 [GitHub Releases](https://github.com/hjtr7mymht-dot/WOA_AutoBot/releases) 下载新版 zip，解压覆盖旧目录即可（`config.json` 会保留）。
 
+### Q9：macOS 上程序无法启动 / 提示损坏
+**A**：macOS 下从 GitHub 下载的 .app 可能被 Gatekeeper 拦截。  
+在终端执行：`xattr -cr /path/to/WOA_AutoBot.app` 清除隔离属性后再打开。
+
+### Q10：macOS 上 ADB 找不到设备
+**A**：确保已通过 Homebrew 安装 android-platform-tools：`brew install android-platform-tools`。  
+或在高级设置中手动指定 ADB 路径。
+
+### Q11：手机通知收不到
+**A**：检查 Webhook 地址是否正确，企业微信/钉钉机器人是否已创建并绑定到正确的群聊。  
+关键字（`mobile_notify_keyword`）需与机器人设置中的关键字一致。
+
+### Q12：深色模式下部分文字看不清
+**A**：v1.5.0 已全面适配深色/浅色主题切换。如有个别显示问题，请提交 Issue 反馈。
+
 ---
 
-## 14. 免责声明
+## 16. 免责声明
 
 - 本项目仅供学习交流使用，完全免费。若通过付费渠道获得，请立即退款并举报。
 - 使用自动化工具存在账号封禁、误操作、资源损失等风险，后果由使用者自行承担。
 - 若遇问题，请优先在 [官方 Issues](https://github.com/hjtr7mymht-dot/WOA_AutoBot/issues) 或 QQ 群 **1067076460** 反馈。
 
+## 17. 赞助支持
+
+> ⚠️ **本软件的持续更新与维护完全依赖用户赞助。若资金不足，项目将被迫停止更新与维护。**
+>
+> 如果您认可 WOA AutoBot 并希望它持续改进，请考虑赞助支持。每一份支持都是项目活下去的动力。
+
+| 微信支付 | 支付宝 |
+|:---:|:---:|
+| ![微信支付](https://raw.githubusercontent.com/hjtr7mymht-dot/WOA_AutoBot/main/assets/donate/wechat_pay.png) | ![支付宝](https://raw.githubusercontent.com/hjtr7mymht-dot/WOA_AutoBot/main/assets/donate/alipay_pay.png) |
+| 微信扫码 | 支付宝扫码 |
+
 ---
 
-*本文档由 GitHub Copilot 根据源码 v1.0.6 自动生成，最后更新：2026-04-04*
+*本文档由 GitHub Copilot 根据源码 v1.5.0 自动生成，最后更新：2026-08-08*
