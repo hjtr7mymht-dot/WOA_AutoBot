@@ -232,8 +232,8 @@ v1.5.0 进行了全面实时识图重构，引入智能状态机实现秒级响�
 ### 4.9 无起飞挂机模式
 
 - 开关：`no_takeoff_mode`（默认关闭）
-- 启用后跳过所有起飞任务，仅执行地面流程。
-- 相关参数：`no_takeoff_switch_interval`（切换间隔）、`no_takeoff_auto_logout_interval`（自动小退间隔）。
+- 启用后跳过所有起飞任务，仅执行地面流程，自动同时开启「待降落」与「停机坪」筛选，不再轮切。
+- 相关参数：`no_takeoff_auto_logout_interval`（自动小退间隔）。
 - 支持自动小退功能（`no_takeoff_logout_enabled`），长时间挂机后主动重登。
 
 ### 4.10 2D 模式自动切换（v1.5.0 新特性）
@@ -301,8 +301,7 @@ v1.5.0 进行了全面实时识图重构，引入智能状态机实现秒级响�
 
 | 参数名 | 类型 | 默认值 | 说明 |
 |-------|------|--------|------|
-| `no_takeoff_mode` | bool | `false` | 不起飞模式 |
-| `no_takeoff_switch_interval` | float | `15.0` | 不起飞模式切换间隔（秒） |
+| `no_takeoff_mode` | bool | `false` | 不起飞模式（同时开启待降落+停机坪筛选，不轮切） |
 | `no_takeoff_logout_enabled` | bool | `false` | 不起飞模式自动小退 |
 | `no_takeoff_auto_logout_interval` | float | `30.0` | 不起飞模式自动小退间隔（分钟） |
 

@@ -18,17 +18,60 @@ from core import (FEATURE_GUARD_TOKEN, get_resource_path,
 # Bot 引擎（所有方法已内联到 WoaBot 类中，bot/ 包中的 Mixin 已归档）
 # from bot import ConfigMixin, TowerMixin  # 已移除死继承
 
+# --- Web 控制面板（可选集成，多实例支持）---
+try:
+    from web_panel import bot_states as _wp_bot_states, update_frame as _wp_update_frame
+    _WEB_PANEL_AVAILABLE = True
+except ImportError:
+    _WEB_PANEL_AVAILABLE = False
+    _wp_bot_states = None
+    _wp_update_frame = None
+
 # 向后兼容别名
 WOA_FEATURE_GUARD_TOKEN = FEATURE_GUARD_TOKEN
+
+# ── 全局熔断标志（由 gui_launcher 设置，主循环运行时检测）──
+_GLOBAL_FUSE_BLOWN = False
+_GLOBAL_FUSE_REASON = ""
+
+def global_fuse_signal(reason=""):
+    """由 GUI 层调用，通知所有运行中的 Bot 实例立即停止。"""
+    global _GLOBAL_FUSE_BLOWN, _GLOBAL_FUSE_REASON
+    _GLOBAL_FUSE_BLOWN = True
+    _GLOBAL_FUSE_REASON = reason or "未知"
+
+def is_global_fuse_active():
+    return _GLOBAL_FUSE_BLOWN
 
 
 class WoaBot:
     def _check_running(self):
+        # 全局熔断检查（最高优先级）
+        if _GLOBAL_FUSE_BLOWN:
+            self.running = False
+            self.log(f"⛔ [熔断] 软件已被远程停用：{_GLOBAL_FUSE_REASON}")
+            raise StopSignal()
+        # Web 面板可远程停止（按当前实例）
+        if _WEB_PANEL_AVAILABLE and _wp_bot_states:
+            s = _wp_bot_states.get(self.instance_id, {})
+            if not s.get("running", True):
+                self.running = False
         if not self.running:
             raise StopSignal()
 
     def _check_paused(self):
         """暂停时阻塞等待，直到恢复运行或停止。"""
+        # Web 面板远程暂停/恢复同步（按当前实例）
+        if _WEB_PANEL_AVAILABLE and _wp_bot_states:
+            s = _wp_bot_states.get(self.instance_id, {})
+            wp_paused = s.get("paused", False)
+            wp_running = s.get("running", True)
+            if wp_paused and not self.paused:
+                self.paused = True
+            elif not wp_paused and self.paused:
+                self.paused = False
+            if not wp_running:
+                self.running = False
         if not self.paused:
             return
         # 暂停时重置界面检测计时，避免恢复后立即触发防卡死
@@ -156,6 +199,7 @@ class WoaBot:
         self.FILTER_MODE_STATES = {
             'mode1': {'arrival': False, 'ground': False, 'departure': False, 'pending': True},
             'mode2': {'arrival': False, 'ground': True,  'departure': False, 'pending': True},
+            'mode3': {'arrival': True,  'ground': True,  'departure': False, 'pending': True},
         }
         self.enable_no_takeoff_mode = False
         self.enable_standalone_logout = False
@@ -177,18 +221,11 @@ class WoaBot:
         self._tower_all_open_stable_count = 0    # 当前连续全开计数
         self._last_tower_all_open_state = False  # 上一次确认的全开状态
 
-        self._no_takeoff_cycle_side = 'landing'
-        self._no_takeoff_cycle_next_switch_time = 0.0
-        self._no_takeoff_switch_interval = 15.0
         self._request_switch_mode1 = False
         self._no_takeoff_auto_logout_interval = 30.0
         self._no_takeoff_auto_logout_next_time = 0.0
         self._standalone_logout_interval = 30.0
         self._standalone_logout_next_time = 0.0
-        # 不起飞策略稳定性保护
-        self._no_takeoff_last_strategy = 'stand_only'
-        self._no_takeoff_strategy_stable_count = 0
-        self._no_takeoff_strategy_stable_needed = 3
         self._stat_approach = 0
         self._stat_depart = 0
         self._stat_stand_count = 0
@@ -287,25 +324,10 @@ class WoaBot:
         self.enable_no_takeoff_mode = enabled
         self.log(f">>> [配置] 不起飞模式: {'已开启' if enabled else '已关闭'}")
         if enabled:
-            self._no_takeoff_cycle_side = 'landing'
-            self._no_takeoff_cycle_next_switch_time = time.time() + self._no_takeoff_switch_interval
             self._schedule_no_takeoff_auto_logout()
         else:
             self._no_takeoff_auto_logout_next_time = 0.0
             self._request_switch_mode1 = True
-
-    def set_no_takeoff_switch_interval(self, seconds):
-        try:
-            interval = float(seconds)
-        except (TypeError, ValueError):
-            interval = 15.0
-        interval = max(3.0, min(300.0, interval))
-        if self._no_takeoff_switch_interval == interval:
-            return
-        self._no_takeoff_switch_interval = interval
-        self.log(f">>> [配置] 不起飞模式切换间隔: {interval:g} 秒")
-        if self.enable_no_takeoff_mode:
-            self._no_takeoff_cycle_next_switch_time = time.time() + self._no_takeoff_switch_interval
 
     def set_no_takeoff_auto_logout_interval(self, minutes):
         try:
@@ -430,60 +452,6 @@ class WoaBot:
             except Exception:
                 return False
         return True
-
-    def _is_tower_all_open_by_pixels(self, screen):
-        """像素兜底：判断塔台四个控制器是否全部开启（非灰色即开启）。"""
-        if screen is None:
-            return False
-        tb, tg, tr = self.TOWER_OFF_COLOR
-        for (x, y) in self.TOWER_CHECK_POINTS:
-            try:
-                b, g, r = screen[y, x]
-                if self._color_diff((b, g, r), (tb, tg, tr)) <= 70:
-                    return False
-            except Exception:
-                return False
-        return True
-
-    def _is_tower_slot_active_by_pixels(self, screen, slot_index):
-        """像素检测单个塔台控制器是否激活（slot_index: 0-3 对应控制器1-4）。
-        非灰色即为激活。"""
-        if screen is None:
-            return False
-        tb, tg, tr = self.TOWER_OFF_COLOR
-        x, y = self.TOWER_CHECK_POINTS[slot_index]
-        try:
-            b, g, r = screen[y, x]
-            return self._color_diff((b, g, r), (tb, tg, tr)) > 70
-        except Exception:
-            return False
-
-    def _estimate_no_takeoff_strategy(self, screen):
-        """基于像素检测（非 OCR）判断不起飞策略，避免 OCR 波动导致误判。
-        返回: 'stand_only' 或 'landing_stand_cycle'
-        
-        策略规则：
-        - 塔台全开(1-4号) → stand_only（只处理停机位待处理）
-        - 仅4号塔台开启 → landing_stand_cycle（待降落↔停机坪轮切）
-        - 塔台全部未开启 → landing_stand_cycle（降落↔停机坪轮切）
-        - 其他部分开启 → stand_only"""
-        if screen is None:
-            # 无法截图时返回当前策略保持不变
-            return self._no_takeoff_last_strategy
-        if self._is_tower_all_open_by_pixels(screen):
-            return 'stand_only'
-        # 检测各控制器激活状态
-        t4_active = self._is_tower_slot_active_by_pixels(screen, 3)
-        t1_active = self._is_tower_slot_active_by_pixels(screen, 0)
-        t2_active = self._is_tower_slot_active_by_pixels(screen, 1)
-        t3_active = self._is_tower_slot_active_by_pixels(screen, 2)
-        # 仅4号控制器激活 → 待降落/停机坪轮切
-        if t4_active and not t1_active and not t2_active and not t3_active:
-            return 'landing_stand_cycle'
-        # 塔台全部未开启 → 降落/停机坪轮切（无塔台接管，需自行处理降落+停机位）
-        if not t1_active and not t2_active and not t3_active and not t4_active:
-            return 'landing_stand_cycle'
-        return 'stand_only'
 
     def _is_tower_icon_visible(self):
         """检测塔台图标是否可见（ROI 内匹配 tower.png）"""
@@ -660,7 +628,7 @@ class WoaBot:
                 return
 
     def _matches_filter_mode3(self, screen):
-        """不起飞模式：菜单深色、待处理选中、离港不选，进港/机场内有且仅有一个选中"""
+        """不起飞模式：菜单深色、待处理选中、离港不选，进港与机场内同时选中"""
         mx, my = self.FILTER_MENU_BTN
         if not self._is_pixel_dark(screen, mx, my):
             return False
@@ -673,64 +641,7 @@ class WoaBot:
         b = state.get('ground')
         if a is None or b is None:
             return False
-        return (a and not b) or (not a and b)
-
-    def _get_mode3_side(self, screen):
-        """返回不起飞模式的当前侧：'landing' 或 'stand'，无法判断返回 None"""
-        state = self._detect_filter_state(screen)
-        a = state.get('arrival')
-        b = state.get('ground')
-        if a and not b:
-            return 'landing'
-        if b and not a:
-            return 'stand'
-        return None
-
-    # ── 不起飞模式策略（带稳定性保护） ──
-
-    def _get_no_takeoff_strategy(self):
-        """获取不起飞策略（带稳定性保护，防止像素/OCR瞬时波动导致误判）。
-        稳定条件：新策略需连续出现 _stable_needed 次才确认切换，
-        且 landing_stand_cycle → stand_only 的退出需要更严格的确认次数。"""
-        screen = self.adb.get_screenshot() if self.adb else None
-        new_strategy = self._estimate_no_takeoff_strategy(screen)
-
-        if new_strategy == self._no_takeoff_last_strategy:
-            self._no_takeoff_strategy_stable_count += 1
-        else:
-            # 从 landing_stand_cycle 退出需要更多确认（防止 OCR/像素波动）
-            if self._no_takeoff_last_strategy == 'landing_stand_cycle':
-                self._no_takeoff_strategy_stable_count += 1
-                # 需要 8 次连续不一致才退出（约 2 秒）
-                if self._no_takeoff_strategy_stable_count >= 8:
-                    self._no_takeoff_last_strategy = new_strategy
-                    self._no_takeoff_strategy_stable_count = 0
-                    self.log(f"📋 [不起飞] 策略变更: landing_stand_cycle → {new_strategy}")
-            else:
-                # 新策略与当前不同（如 stand_only → landing_stand_cycle），累加计数
-                # 注意：必须用 += 而非 =，因为 last_strategy 尚未改变，每次都会进入此分支
-                self._no_takeoff_strategy_stable_count += 1
-
-        # 进入 landing_stand_cycle 需要常规稳定性确认（连续3次）
-        if (new_strategy != self._no_takeoff_last_strategy and
-            self._no_takeoff_last_strategy != 'landing_stand_cycle' and
-            self._no_takeoff_strategy_stable_count >= self._no_takeoff_strategy_stable_needed):
-            self._no_takeoff_last_strategy = new_strategy
-            self._no_takeoff_strategy_stable_count = 0
-            self.log(f"📋 [不起飞] 策略变更: → {new_strategy}")
-            # 刚进入 landing_stand_cycle 时立即安排第一次轮切，避免等满一个完整周期
-            if new_strategy == 'landing_stand_cycle':
-                self._no_takeoff_cycle_next_switch_time = time.time() + self._no_takeoff_switch_interval
-                self.log(f"📋 [不起飞] 进入轮切模式，{self._no_takeoff_switch_interval:g}s 后首次切换")
-
-        return self._no_takeoff_last_strategy
-
-    def _toggle_no_takeoff_cycle_side(self, reason="定时切换"):
-        """在 landing/stand 之间切换不起飞模式的轮切方向。"""
-        old = self._no_takeoff_cycle_side
-        self._no_takeoff_cycle_side = 'stand' if old == 'landing' else 'landing'
-        self._no_takeoff_cycle_next_switch_time = time.time() + self._no_takeoff_switch_interval
-        self.log(f"📋 [不起飞] {reason}，{old} → {self._no_takeoff_cycle_side}")
+        return bool(a and b)
 
     def _do_no_takeoff_small_logout(self):
         """不起飞模式小退：换机场 → 重进游戏 → 恢复处理。
@@ -1005,22 +916,9 @@ class WoaBot:
         is_mode3 = self.enable_no_takeoff_mode and self._matches_filter_mode3(screen)
 
         if self.enable_no_takeoff_mode:
-            strategy = self._get_no_takeoff_strategy()
-            if strategy == 'landing_stand_cycle':
-                current_side = self._get_mode3_side(screen) if is_mode3 else None
-                if current_side != self._no_takeoff_cycle_side:
-                    side_name = '待降落' if self._no_takeoff_cycle_side == 'landing' else '停机坪'
-                    self.log(f"📋 [不起飞] 应用{side_name}筛选")
-                    want_arrival = (self._no_takeoff_cycle_side == 'landing')
-                    mode3_state = {
-                        'arrival': want_arrival, 'ground': not want_arrival,
-                        'departure': False, 'pending': True
-                    }
-                    self._apply_filter_state(mode3_state)
-            else:
-                if not is_mode2:
-                    self.log("📋 [不起飞] stand_only → 切换停机坪筛选")
-                    self._apply_filter_state(mode2_state)
+            if not is_mode3:
+                self.log("📋 [不起飞] 应用待降落+停机坪筛选")
+                self._apply_filter_state(self.FILTER_MODE_STATES['mode3'])
             return
 
         if self.enable_filter_stand_only_when_tower_open and all(self._tower_active_slots):
@@ -1601,6 +1499,11 @@ class WoaBot:
         self._next_staff_recovery_probe_time = 0.0
         self.last_checked_avail_staff = -1
         self.last_window_close_time = time.time()
+        # 同步 Web 面板状态（当前实例）
+        if _WEB_PANEL_AVAILABLE and _wp_bot_states is not None:
+            s = _wp_bot_states.setdefault(self.instance_id, {"running": False, "paused": False, "log": "", "label": f"实例 {self.instance_id}", "screenshot_path": f"latest_frame_{self.instance_id}.jpg"})
+            s["running"] = True
+            s["paused"] = False
         # 初始化计数器
         self.consecutive_timeout_count = 0
         self.consecutive_errors = 0
@@ -1691,6 +1594,10 @@ class WoaBot:
     def stop(self):
         self.running = False
         self.paused = False  # 停止时清除暂停状态
+        # 同步 Web 面板状态（当前实例）
+        if _WEB_PANEL_AVAILABLE and _wp_bot_states is not None and self.instance_id in _wp_bot_states:
+            _wp_bot_states[self.instance_id]["running"] = False
+            _wp_bot_states[self.instance_id]["paused"] = False
         self.log(">>> 正在停止脚本...")
         self._print_session_stats()
         self._save_stats_to_csv()
@@ -1738,6 +1645,9 @@ class WoaBot:
         if self.paused:
             return
         self.paused = True
+        # 同步 Web 面板状态（当前实例）
+        if _WEB_PANEL_AVAILABLE and _wp_bot_states is not None and self.instance_id in _wp_bot_states:
+            _wp_bot_states[self.instance_id]["paused"] = True
         self.log("⏸️ [暂停] 脚本已暂停，点击「继续」恢复运行")
 
     def resume(self):
@@ -1747,6 +1657,9 @@ class WoaBot:
         if not self.paused:
             return
         self.paused = False
+        # 同步 Web 面板状态（当前实例）
+        if _WEB_PANEL_AVAILABLE and _wp_bot_states is not None and self.instance_id in _wp_bot_states:
+            _wp_bot_states[self.instance_id]["paused"] = False
         # 重置界面检测计时，防止暂停期间累计的"未检测到主界面"触发防卡死
         self.last_seen_main_interface_time = time.time()
         self.last_periodic_check_time = 0.0
@@ -1875,9 +1788,6 @@ class WoaBot:
         self._next_hourly_notice_time = time.time() + 3600.0
         # 启动时显示赞助公告
         self._show_sponsor_notice(0)
-        if self.enable_no_takeoff_mode:
-            self._no_takeoff_cycle_side = 'landing'
-            self._no_takeoff_cycle_next_switch_time = time.time() + self._no_takeoff_switch_interval
         self._periodic_15s_check(force_initial_filter_check=True)
         if self.enable_no_takeoff_mode:
             self._schedule_no_takeoff_auto_logout()
@@ -1945,12 +1855,6 @@ class WoaBot:
                     if self._request_switch_mode1:
                         self._request_switch_mode1 = False
                         self._force_switch_filter_mode1()
-                    # 不起飞模式：轮切定时切换
-                    if (self.enable_no_takeoff_mode and
-                        self._get_no_takeoff_strategy() == 'landing_stand_cycle' and
-                        now_ts >= self._no_takeoff_cycle_next_switch_time):
-                        self._toggle_no_takeoff_cycle_side(reason="定时切换")
-                        self._periodic_15s_check(force_initial_filter_check=True)
                     # 不起飞模式：自动小退
                     if (self.enable_no_takeoff_mode and
                         self._no_takeoff_auto_logout_next_time > 0 and
@@ -3631,6 +3535,12 @@ class WoaBot:
                 self.sleep(1.0)
             return False
         self._scan_screenshot_fails = 0
+        # 推送截图到 Web 控制面板（如果可用，按当前实例）
+        if _WEB_PANEL_AVAILABLE and _wp_update_frame is not None:
+            try:
+                _wp_update_frame(screen, self.instance_id)
+            except Exception:
+                pass
 
         # ── 阶段 0：快速状态检测 ──
         state = self._quick_detect_state(screen)
@@ -3752,11 +3662,6 @@ class WoaBot:
             valid.append(t)
 
         if not valid:
-            if self.enable_no_takeoff_mode:
-                strat = self._get_no_takeoff_strategy()
-                if strat == 'landing_stand_cycle':
-                    self._toggle_no_takeoff_cycle_side(reason="当前分组无任务")
-                    self._periodic_15s_check(force_initial_filter_check=True)
             if not self._no_candidate_closed:
                 self._no_candidate_closed = True
                 self.close_window()

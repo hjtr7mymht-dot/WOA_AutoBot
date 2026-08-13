@@ -47,6 +47,8 @@ from core import (
     SIDEBAR_CATEGORIES,
     REQUIRED_GUARD_MODULES,
     CORE_FILE_FINGERPRINTS,
+    FUSE_SIGNAL_PATH, FUSE_REVOKE_KEYWORD,
+    FUSE_CHECK_INTERVAL_SEC, FUSE_FIRST_CHECK_DELAY_SEC,
     DEFAULT_FONT, MONO_FONT, MUMU_PORTS,
 )
 
@@ -540,6 +542,14 @@ class MultiTextRedirector(object):
     def flush(self):
         pass
 
+    def isatty(self):
+        """兼容 uvicorn 等库对 stdout.isatty() 的调用"""
+        return False
+
+    def fileno(self):
+        """兼容某些库对 stdout.fileno() 的调用"""
+        raise OSError("MultiTextRedirector does not have a file descriptor")
+
 
 class TeeToFile:
     """调试模式下将日志输出到控件和文件（后台线程异步写入，不阻塞主/GUI线程）。"""
@@ -736,7 +746,6 @@ class Application(ttkb.Window):
             legacy_logout_interval = self.config.get("no_takeoff_logout_min", self.config.get("no_takeoff_logout_max", 30))
         self.var_no_takeoff_logout_enabled = tk.BooleanVar(
             value=self.config.get("no_takeoff_logout_enabled", False))
-        self.var_no_takeoff_switch_interval = tk.StringVar(value=str(self.config.get("no_takeoff_switch_interval", 15)))
         self.var_no_takeoff_auto_logout_interval = tk.StringVar(value=str(self.config.get("no_takeoff_auto_logout_interval", 30)))
         self.var_standalone_logout_interval = tk.StringVar(value=str(legacy_logout_interval or 30))
         self.var_cancel_stand_filter = tk.BooleanVar(value=self.config.get("cancel_stand_filter", True))
@@ -773,6 +782,7 @@ class Application(ttkb.Window):
         ):
             self.config.pop(legacy_key, None)
         self.var_mini_top = tk.BooleanVar(value=False)
+        self.var_web_panel_enabled = tk.BooleanVar(value=bool(self.config.get("web_panel_enabled", False)))
         self.var_runtime_status = tk.StringVar(value="待命")
         self.var_device_status = tk.StringVar(value="等待扫描设备")
         self.var_system_status = tk.StringVar(value="环境检查中")
@@ -806,6 +816,17 @@ class Application(ttkb.Window):
         self._guard_integrity_ok = True
         self._startup_update_checked = False
         self._startup_update_popup_shown = False
+
+        # ── 远程熔断（防倒卖）状态 ──
+        self._fuse_blown = False
+        self._fuse_reason = ""
+        self._fuse_check_count = 0
+        self._next_fuse_check_time = 0.0
+        # 从持久化配置恢复熔断状态（一旦熔断，无法恢复）
+        if self.config.get("fuse_blown", False):
+            self._fuse_blown = True
+            self._fuse_reason = self.config.get("fuse_reason", "未知原因")
+            self._next_fuse_check_time = 0.0  # 已熔断，不需要再检查
 
         if self.config.get("adb_path"):
             set_custom_adb_path(self.config["adb_path"])
@@ -877,6 +898,11 @@ class Application(ttkb.Window):
         self.after(2200, self._startup_online_update_check)
         self.after(3000, self._startup_silent_announcement_check)
         self.after(3500, self._check_file_integrity)
+        # 启动时立即检查持久化的熔断状态
+        if self._fuse_blown:
+            self.after(500, self._enforce_persisted_fuse)
+        # 远程熔断：延迟首次检查，给网络充足时间，且避免与版本检测争抢
+        self.after(int(FUSE_FIRST_CHECK_DELAY_SEC * 1000), self._schedule_fuse_check)
         self.bind("<Map>", self._on_window_map)
         self.protocol("WM_DELETE_WINDOW", self._on_closing)
 
@@ -1007,6 +1033,14 @@ class Application(ttkb.Window):
         """主线程回调：收到后台 tick 结果后，发起通知（通知本身也是跨线程的）。"""
         if isinstance(result, Exception):
             return
+
+        # ── 熔断守卫：每次 tick 检查熔断状态，若已熔断立即停用 ──
+        if self._is_fuse_active():
+            if self.bot and self.bot.running:
+                self.stop_bot()
+                print(">>> [熔断] 运行时检测到熔断信号，已停止脚本")
+            return
+
         if result.get("stats"):
             title, detail = result["stats"]
             self._send_mobile_notify(title, detail, force=True)
@@ -1338,10 +1372,6 @@ class Application(ttkb.Window):
         self.config["no_takeoff_logout_enabled"] = self.var_no_takeoff_logout_enabled.get()
         self.config["cancel_stand_filter"] = bool(self.var_cancel_stand_filter.get())
         try:
-            self.config["no_takeoff_switch_interval"] = max(3.0, min(300.0, float(self.var_no_takeoff_switch_interval.get())))
-        except Exception:
-            self.config["no_takeoff_switch_interval"] = 15.0
-        try:
             self.config["no_takeoff_auto_logout_interval"] = max(1.0, min(120.0, float(self.var_no_takeoff_auto_logout_interval.get())))
         except Exception:
             self.config["no_takeoff_auto_logout_interval"] = 30.0
@@ -1380,6 +1410,7 @@ class Application(ttkb.Window):
         self.config["gold_remind_last_daily_hour"] = int(getattr(self, "_gold_remind_last_daily_hour", -1))
         self.config["gold_remind_last_weekly_week"] = int(getattr(self, "_gold_remind_last_weekly_week", -1))
         self.config["public_adb_targets"] = str(self.var_public_adb_targets.get() or "").strip()
+        self.config["web_panel_enabled"] = bool(self.var_web_panel_enabled.get())
         # 自定义随机偏移
         try:
             self.config["click_jitter"] = max(1, min(30, int(self.var_click_jitter.get())))
@@ -1485,16 +1516,6 @@ class Application(ttkb.Window):
                 self.var_tower_status.set(base)
         else:
             self.var_tower_status.set("—")
-            """格式化倒计时，带颜色标记：>60s 正常，<60s 警告，<30s 紧急"""
-            if deadline is None or deadline <= 0:
-                return "—"
-            remain = max(0, int(deadline - now))
-            if remain <= 0:
-                return "即将触发"
-            m, s = divmod(remain, 60)
-            if m > 0:
-                return f"{m}分{s:02d}秒"
-            return f"{s}秒"
 
         # 下次小退（取两者中最近的一个）
         if bot and getattr(bot, "running", False):
@@ -2418,6 +2439,11 @@ class Application(ttkb.Window):
         self.btn_scan = ttkb.Button(ctrl_left, text="🔄 刷新设备", bootstyle="outline-info",
                                      command=self.refresh_devices, width=10, padding=(6, 3))
         self.btn_scan.pack(side=LEFT, padx=(0, 12))
+        # Web 控制面板开关
+        self.cb_web_panel = ttkb.Checkbutton(ctrl_left, text="🌐 Web面板",
+                                             variable=self.var_web_panel_enabled,
+                                             bootstyle="info-round-toggle")
+        self.cb_web_panel.pack(side=LEFT, padx=(0, 12))
         
         # 控制按钮组
         ctrl_right = ttkb.Frame(ctrl_bar)
@@ -2703,7 +2729,7 @@ class Application(ttkb.Window):
                    "应用", self.on_confirm_tower_delay, "0=关闭延时，最大144次")
         _section_label(tab2, "挂机策略", "info")
         _toggle(tab2, "🛩️ 不起飞模式", self.var_no_takeoff_mode,
-                "只处理降落+停机位，不处理起飞\n4号塔台单开时自动在待降落/停机位间轮切")
+                "只处理降落+停机位，不处理起飞\n自动同时开启待降落+停机坪筛选，不再轮切")
         _toggle(tab2, "🔄 独立小退控制", self.var_no_takeoff_logout_enabled,
                 "独立按固定间隔执行重进释放内存")
 
@@ -3146,6 +3172,202 @@ class Application(ttkb.Window):
             self._call_main_thread(_report)
 
         threading.Thread(target=_worker, daemon=True).start()
+
+    # ═══════════════════════════════════════════════════════════
+    # 远程熔断系统（防倒卖/防盗版）
+    # ═══════════════════════════════════════════════════════════
+
+    def _enforce_persisted_fuse(self):
+        """启动时强制执行已持久化的熔断状态（UI 就绪后调用）"""
+        if not self._fuse_blown or getattr(self, "_is_closing", False):
+            return
+        # 直接应用熔断 UI 效果（不重复写配置）
+        for btn in [self.btn_main_start, self.btn_mini_start]:
+            try:
+                btn.configure(state="disabled", text="⛔ 已停用")
+            except Exception:
+                pass
+        self.var_runtime_status.set("⛔ 已停用")
+        self.var_online_status.set("停用")
+        self.var_online_detail.set("软件已被远程停用，请查看公告")
+        # 在终端打印醒目的告警
+        print("")
+        print("═" * 62)
+        print("  ⛔  软件已被远程停用（持久化状态）")
+        print("═" * 62)
+        print(f"  原因：{self._fuse_reason}")
+        print(f"  本软件完全免费，仅限从 {OFFICIAL_REPO_URL} 获取")
+        print("═" * 62)
+        print("")
+
+    def _schedule_fuse_check(self):
+        """调度下次熔断检查（启动时首次，之后周期性）"""
+        if getattr(self, "_is_closing", False):
+            return
+        if self._fuse_blown:
+            return  # 已熔断，不重复检查
+        if time.time() < self._next_fuse_check_time:
+            # 还没到时间，稍后再试
+            self.after(30000, self._schedule_fuse_check)
+            return
+        if self._online_validation_running:
+            self.after(5000, self._schedule_fuse_check)
+            return
+        self._run_fuse_check()
+
+    def _run_fuse_check(self):
+        """在后台线程执行远程熔断信号检测"""
+        if self._fuse_blown or getattr(self, "_is_closing", False):
+            return
+        self._fuse_check_count += 1
+        count_snapshot = self._fuse_check_count
+
+        # 构建信号文件的多源 URL（与版本检测使用相同的多源回退策略）
+        sources = self._build_online_sources(FUSE_SIGNAL_PATH)
+
+        def _worker():
+            fuse_triggered = False
+            fuse_reason = ""
+            detail_info = ""
+
+            try:
+                text, source_name, url = self._fetch_online_text(sources, timeout=8)
+                detail_info = f"来源 {source_name}"
+                # 检查是否包含撤权关键词（不区分大小写）
+                if text and FUSE_REVOKE_KEYWORD.upper() in text.upper():
+                    fuse_triggered = True
+                    fuse_reason = f"远程撤权信号（{source_name}）"
+            except Exception as exc:
+                err_msg = str(exc)
+                detail_info = f"错误: {err_msg[:120]}"
+                # 判断是否为仓库不存在（404）或彻底不可达
+                # GitHub Raw 和 jsDelivr 返回 404 时意味着仓库可能被删除/设为私有
+                if "404" in err_msg or "Not Found" in err_msg:
+                    # 检查是否所有源都返回 404（而非仅网络故障）
+                    all_404 = True
+                    for sname, surl in sources:
+                        try:
+                            headers = {"User-Agent": f"WOA-AutoBot/{LOCAL_VERSION}"}
+                            req = urllib.request.Request(surl, headers=headers)
+                            ctx_kwargs = {}
+                            if getattr(sys, 'frozen', False):
+                                try:
+                                    import certifi, ssl
+                                    ctx_kwargs['context'] = ssl.create_default_context(cafile=certifi.where())
+                                except Exception:
+                                    pass
+                            urllib.request.urlopen(req, timeout=5, **ctx_kwargs)
+                            all_404 = False  # 至少有一个源可达
+                            break
+                        except Exception as sub_err:
+                            if "404" not in str(sub_err) and "Not Found" not in str(sub_err):
+                                all_404 = False  # 有其他类型的网络错误（非404）
+                            # 继续检查下一个源
+                    if all_404:
+                        fuse_triggered = True
+                        fuse_reason = "官方仓库已不可达（404），可能已被删除或设为私有"
+                    else:
+                        # 有些源可达但熔断信号文件 404 → 可能是文件尚未创建，不触发熔断
+                        pass
+
+            def _finish():
+                if getattr(self, "_is_closing", False):
+                    return
+                if self._fuse_check_count != count_snapshot:
+                    return  # 后续检查已覆盖
+                if self._fuse_blown:
+                    return
+
+                if fuse_triggered:
+                    self._blow_fuse(fuse_reason)
+                else:
+                    # 安排下次检查（无论本次成功或失败）
+                    self._next_fuse_check_time = time.time() + FUSE_CHECK_INTERVAL_SEC
+                    self.after(30000, self._schedule_fuse_check)
+                    if detail_info:
+                        print(f">>> [熔断检查] ✅ 未触发，{detail_info}")
+
+            self._call_main_thread(_finish)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _blow_fuse(self, reason):
+        """永久熔断：停止一切操作，阻止软件继续使用"""
+        if self._fuse_blown:
+            return
+        self._fuse_blown = True
+        self._fuse_reason = reason
+
+        # 持久化熔断状态（一旦写入，无法通过删除配置恢复）
+        self.config["fuse_blown"] = True
+        self.config["fuse_reason"] = reason
+        self.save_config()
+
+        # 通知 main_adb 模块全局熔断（立即终止所有运行中的 Bot 实例）
+        try:
+            import main_adb as _madb
+            _madb.global_fuse_signal(reason)
+        except Exception:
+            pass
+
+        # 停止正在运行的 Bot
+        if self.bot and self.bot.running:
+            try:
+                self.bot.running = False
+            except Exception:
+                pass
+
+        # 永久禁用启动按钮
+        for btn in [self.btn_main_start, self.btn_mini_start]:
+            try:
+                btn.configure(state="disabled", text="⛔ 已停用")
+            except Exception:
+                pass
+
+        # 更新状态显示
+        self.var_runtime_status.set("⛔ 已停用")
+        self.var_online_status.set("停用")
+        self.var_online_detail.set("软件已被远程停用，请查看公告")
+
+        # 输出醒目的终端告警
+        print("")
+        print("═" * 62)
+        print("  ⛔  软件已被远程停用")
+        print("═" * 62)
+        print(f"  原因：{reason}")
+        print("")
+        print("  本软件完全免费，仅限从官方 GitHub 仓库获取：")
+        print(f"  {OFFICIAL_REPO_URL}")
+        print("")
+        print("  如果您是通过淘宝、闲鱼、拼多多、微信、QQ群等")
+        print("  任何第三方渠道付费获得的，您已被骗！")
+        print("  请立即申请退款并向平台举报该卖家。")
+        print("")
+        print("  本软件永远不会收费。任何收费行为均为倒卖。")
+        print("═" * 62)
+        print("")
+
+        # 弹出醒目的停用提示窗口
+        fuse_message = (
+            f"WOA AutoBot 已被远程停用\n\n"
+            f"原因：{reason}\n\n"
+            f"本软件为完全免费的公益项目，唯一官方渠道为：\n"
+            f"{OFFICIAL_REPO_URL}\n\n"
+            f"如果您是从淘宝、闲鱼、拼多多、微信、QQ群等\n"
+            f"第三方渠道付费获得的，说明您已被骗！\n\n"
+            f"请立即：\n"
+            f"1. 向交易平台申请退款\n"
+            f"2. 举报该卖家/倒卖者\n"
+            f"3. 从官方 GitHub 免费下载正版\n\n"
+            f"警告：本软件永久免费，绝不会收费。"
+        )
+        self._call_main_thread(lambda: messagebox.showwarning("⛔ 软件已停用", fuse_message, parent=self))
+
+    def _is_fuse_active(self):
+        """检查熔断是否激活（供 main_adb.py 运行时调用）"""
+        return self._fuse_blown
+
+    # ═══════════════════════════════════════════════════════════
 
     def open_personal_website(self):
         webbrowser.open("https://hjtr7mymht-dot.github.io/")
@@ -4338,12 +4560,8 @@ class Application(ttkb.Window):
                          bootstyle="success-round-toggle").pack(side=LEFT)
         self.create_info_icon(f_no_takeoff_enable,
                               "不起飞模式（基于像素检测，独立于 OCR）：\n"
-                              "• 塔台全部未开启 → 自动在「降落」与「停机坪」之间轮切\n"
-                              "• 4号塔台单独开启 → 自动在「待降落」与「停机坪」之间轮切\n"
-                              "  轮切间隔由下方参数控制，默认每15秒切换一次。\n"
-                              "• 塔台全开(1-4号) → 只处理停机位待处理。\n"
-                              "• 策略稳定性保护：像素波动不会导致误切换，\n"
-                              "  进入轮切需连续3次确认，退出轮切需连续8次确认。\n"
+                              "• 自动同时开启「待降落」与「停机坪」筛选，不再轮切。\n"
+                              "• 只处理降落与停机位任务，不处理起飞。\n"
                               "• 开启后会自动启用该模式独有的小退调度，\n"
                               "  到达间隔后自动重进释放内存。\n"
                               "• 像素检测优先于OCR，不受OCR读取波动影响。\n"
@@ -4351,27 +4569,20 @@ class Application(ttkb.Window):
 
         f_no_takeoff_custom = ttkb.Frame(tab_runtime_left)
         f_no_takeoff_custom.pack(fill=X, pady=5)
-        ttkb.Label(f_no_takeoff_custom, text="轮切间隔(秒):").pack(side=LEFT)
-        e_nt_switch = ttkb.Entry(f_no_takeoff_custom, textvariable=self.var_no_takeoff_switch_interval, width=6)
-        e_nt_switch.pack(side=LEFT, padx=(5, 10))
         ttkb.Label(f_no_takeoff_custom, text="自动小退间隔(分钟):").pack(side=LEFT)
         e_nt_auto_logout = ttkb.Entry(f_no_takeoff_custom, textvariable=self.var_no_takeoff_auto_logout_interval, width=6)
         e_nt_auto_logout.pack(side=LEFT, padx=(5, 10))
 
         def apply_no_takeoff_profile():
             try:
-                switch_interval = max(3.0, min(300.0, float(e_nt_switch.get().strip())))
                 logout_interval = max(1.0, min(120.0, float(e_nt_auto_logout.get().strip())))
             except ValueError:
                 messagebox.showerror("错误", "不起飞模式时间设置必须为数字", parent=win)
                 return
-            self.var_no_takeoff_switch_interval.set(f"{switch_interval:g}")
             self.var_no_takeoff_auto_logout_interval.set(f"{logout_interval:g}")
-            self.config["no_takeoff_switch_interval"] = switch_interval
             self.config["no_takeoff_auto_logout_interval"] = logout_interval
             self.save_config()
             self.sync_all_configs_to_bot(from_advanced_save=True)
-            print(f">>> [不起飞模式] 轮切间隔已更新: {switch_interval:g} 秒")
             print(f">>> [不起飞模式] 自动小退间隔已更新: {logout_interval:g} 分钟")
 
         ttkb.Button(f_no_takeoff_custom, text="确定", bootstyle="success-outline", command=apply_no_takeoff_profile, width=8).pack(side=LEFT)
@@ -4553,16 +4764,13 @@ class Application(ttkb.Window):
             self.config.pop("filter_switch_min", None)
             self.config.pop("filter_switch_max", None)
             try:
-                nt_switch = max(3.0, min(300.0, float(e_nt_switch.get().strip())))
                 nt_logout = max(1.0, min(120.0, float(e_nt_auto_logout.get().strip())))
                 logout_single = max(1.0, min(120.0, float(e_logout_single.get().strip())))
             except (ValueError, AttributeError):
                 messagebox.showerror("错误", "不起飞模式或小退时间必须为数字", parent=win)
                 return
-            self.var_no_takeoff_switch_interval.set(f"{nt_switch:g}")
             self.var_no_takeoff_auto_logout_interval.set(f"{nt_logout:g}")
             self.var_standalone_logout_interval.set(f"{logout_single:g}")
-            self.config["no_takeoff_switch_interval"] = nt_switch
             self.config["no_takeoff_auto_logout_interval"] = nt_logout
             self.config["standalone_logout_interval"] = logout_single
             self.config.pop("no_takeoff_logout_min", None)
@@ -4611,8 +4819,6 @@ class Application(ttkb.Window):
                 changed.append(("统计汇报周期", f"每 {self.config.get('mobile_stats_report_hours', 6)} 小时"))
             if old_cfg.get("public_adb_targets") != self.config.get("public_adb_targets"):
                 changed.append(("公网 ADB 地址列表", f"{len(self._parse_public_adb_targets(public_adb_targets))} 项"))
-            if old_cfg.get("no_takeoff_switch_interval") != self.config.get("no_takeoff_switch_interval"):
-                changed.append(("不起飞轮切间隔", f"{self.config.get('no_takeoff_switch_interval', 15)} 秒"))
             if old_cfg.get("no_takeoff_auto_logout_interval") != self.config.get("no_takeoff_auto_logout_interval"):
                 changed.append(("不起飞自动小退间隔", f"{self.config.get('no_takeoff_auto_logout_interval', 30)} 分钟"))
             if old_cfg.get("standalone_logout_interval") != self.config.get("standalone_logout_interval"):
@@ -4726,6 +4932,17 @@ class Application(ttkb.Window):
 
         self.var_runtime_status.set("准备启动")
         self.save_config()
+
+        # ── Web 控制面板 ──
+        if self.var_web_panel_enabled.get():
+            try:
+                from web_panel import start_web_panel
+                start_web_panel()
+                print(">>> [Web面板] 已随 Bot 一同启动")
+            except ImportError:
+                print(">>> [Web面板] 缺少依赖 (fastapi/uvicorn)，跳过启动。请运行: pip install fastapi uvicorn")
+            except Exception as e:
+                print(f">>> [Web面板] 启动失败: {e}")
 
         try:
             self._connect_public_adb_targets(debug=False)
@@ -4905,7 +5122,6 @@ class Application(ttkb.Window):
                 self.config.get("slide_min", 250), self.config.get("slide_max", 500), log_change=not no_log)
             self.bot.set_thinking_time_mode(self.config.get("thinking_mode", 0), log_change=not no_log)
             self.bot.set_no_takeoff_mode(self.var_no_takeoff_mode.get())
-            self.bot.set_no_takeoff_switch_interval(self.config.get("no_takeoff_switch_interval", 15))
             self.bot.set_no_takeoff_auto_logout_interval(self.config.get("no_takeoff_auto_logout_interval", 30))
             self.bot.set_standalone_logout_interval(self.config.get("standalone_logout_interval", 30))
             self.bot.set_standalone_logout_enabled(self.config.get("no_takeoff_logout_enabled", False))
