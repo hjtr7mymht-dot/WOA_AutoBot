@@ -1,0 +1,144 @@
+# WOA AutoBot — GitHub Actions CI/CD
+# ============================================================
+# 自动编译 Windows .exe 和 macOS .app，Tag 推送时自动发布 Release
+#
+# 安全说明：
+#   - GITHUB_TOKEN 由 GitHub 自动提供，无需手动配置
+#   - 所有密钥/令牌均通过 GitHub Secrets 注入，不会提交到 git
+#   - 如需自托管 Runner 或额外密钥，在仓库 Settings → Secrets 中添加
+
+name: Build & Release
+
+on:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+    inputs:
+      create_release:
+        description: '创建 GitHub Release'
+        type: boolean
+        default: false
+
+env:
+  PYTHON_VERSION: '3.11'
+  APP_NAME: WOA_AutoBot
+
+# ============================================================
+# Jobs
+# ============================================================
+jobs:
+
+  # ── Windows .exe 编译 ─────────────────────────────────────
+  build-windows:
+    name: Windows — PyInstaller .exe
+    runs-on: windows-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 设置 Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: PyInstaller 编译
+        run: |
+          pyinstaller -y --clean WOA_AutoBot.spec 2>&1
+          echo "=== 编译产物 ==="
+          dir dist\${{ env.APP_NAME }}\
+
+      - name: 打包为 ZIP
+        run: |
+          Compress-Archive -Path "dist\${{ env.APP_NAME }}\*" -DestinationPath "${{ env.APP_NAME }}_Windows.zip"
+
+      - name: 上传 Workflow Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.APP_NAME }}_Windows
+          path: ${{ env.APP_NAME }}_Windows.zip
+          retention-days: 30
+
+  # ── macOS .app 编译 ───────────────────────────────────────
+  build-macos:
+    name: macOS — PyInstaller .app
+    runs-on: macos-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 设置 Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: PyInstaller 编译
+        run: |
+          pyinstaller -y --clean WOA_AutoBot_mac.spec 2>&1
+          echo "=== 编译产物 ==="
+          ls -la dist/
+
+      - name: 打包为 ZIP
+        run: |
+          cd dist
+          zip -r "../${{ env.APP_NAME }}_macOS.zip" "${{ env.APP_NAME }}.app"
+
+      - name: 上传 Workflow Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.APP_NAME }}_macOS
+          path: ${{ env.APP_NAME }}_macOS.zip
+          retention-days: 30
+
+  # ── GitHub Release 发布 ───────────────────────────────────
+  # 仅在推送 Tag（v*）或手动触发时执行
+  release:
+    name: 发布 GitHub Release
+    needs: [build-windows, build-macos]
+    runs-on: ubuntu-latest
+    if: |
+      github.event_name == 'workflow_dispatch' && github.event.inputs.create_release == 'true'
+      || startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - name: 下载全部 Artifacts
+        uses: actions/download-artifact@v4
+
+      - name: 读取版本号
+        id: version
+        run: |
+          VER="${{ github.ref_name }}"
+          VER="${VER#v}"
+          echo "version=$VER" >> $GITHUB_OUTPUT
+          echo "版本: $VER"
+
+      - name: 创建 Release 并上传资产
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "WOA AutoBot v${{ steps.version.outputs.version }}"
+          tag_name: ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          files: |
+            ${{ env.APP_NAME }}_Windows/${{ env.APP_NAME }}_Windows.zip
+            ${{ env.APP_NAME }}_macOS/${{ env.APP_NAME }}_macOS.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,115 @@
+# WOA AutoBot 闭源专有许可协议
+
+**版权所有 © 2024-2026 WOA AutoBot 作者。保留所有权利（All Rights Reserved）。**
+
+---
+
+## 简体中文（以本语言版本为准）
+
+本协议（"协议"）是您（个人或实体）与 **WOA AutoBot 作者**（"作者"）之间就 **WOA AutoBot**（"本软件"）使用所订立的合法协议。下载、安装或使用本软件即表示您同意受本协议条款约束。
+
+本软件为**闭源专有软件**：作者不公开、不提供、不授权获取本软件的任何源代码、设计文档或其他实现材料。本协议不构成任何开源许可。
+
+### 1. 授予的权利
+
+在遵守本协议的前提下，作者仅授予您一项有限的、非排他性、不可转让、不可再许可的权利：
+
+1.1 **个人使用** — 从作者官方渠道获取本软件，并在您个人拥有的设备上安装、运行本软件，用于非商业的个人目的。
+
+除此之外，作者未授予任何其他权利。所有未明示授予的权利均由作者保留。
+
+### 2. 禁止行为（重点）
+
+**以下行为均被明确禁止：**
+
+2.1 **获取或传播源代码** — 您不得以任何方式获取、复制、公布、传播、公开分享本软件的源代码或其任何部分。
+
+2.2 **逆向工程** — 您不得对本软件进行反编译、反汇编、脱壳、动态注入或其他形式的逆向工程，亦不得试图还原其源代码、算法或内部数据结构。
+
+2.3 **修改与衍生** — 您不得修改、翻译、改编本软件，或基于本软件创作衍生作品；不得替换、移除或绕过其内置的功能校验、完整性检查与在线验证机制。
+
+2.4 **再分发** — 您不得复制、上传、转载、镜像或以任何形式向第三方提供本软件（包括原版与任何形式的修改版），除非事先取得作者的书面许可。
+
+2.5 **商业利用** — 您不得将本软件或其任何部分用于商业目的，包括但不限于**出售、转售、出租、许可、捆绑分发**，或以"会员费""服务费""授权费""代挂服务"等名义变相收费。禁止在淘宝、闲鱼、拼多多、微信群、QQ群等任何渠道销售或变相销售。
+
+2.6 **冒充作者** — 您不得声称自己是本软件的作者，不得移除或篡改软件内的作者标识、资助入口与官方渠道信息。
+
+2.7 **商标使用** — 本协议不授予您使用作者名称、商标或标识的任何权利。
+
+### 3. 作者保留的权利
+
+3.1 本软件的全部著作权及其他知识产权（包括源代码、二进制程序、界面设计、文档、图标与素材）均归作者所有。
+
+3.2 **所有商业性权利（包括但不限于出售、授权、商业分发、商业托管、商业支持服务）完全且排他地保留给作者本人。**
+
+3.3 作者可以自行决定是否、何时、以何种条件向特定个人或实体单独授予书面许可。
+
+### 4. 无担保与免责
+
+4.1 本软件按"现状"提供，不提供任何明示或暗示的保证，包括但不限于适销性、特定用途适用性与不侵权的保证。
+
+4.2 在任何情况下，作者均不对因使用或无法使用本软件而产生的任何直接、间接、偶然或后果性损害承担责任。
+
+4.3 使用本软件可能违反第三方服务或游戏的用户协议，相关风险与后果由您自行承担。
+
+### 5. 终止
+
+5.1 如果您违反本协议的任何条款，您被授予的权利将立即自动终止，无需另行通知。
+
+5.2 终止后，您必须立即停止使用并删除本软件的所有副本。
+
+5.3 作者保留对违反本协议的行为追究法律责任的权利。
+
+### 6. 其他
+
+6.1 本协议构成双方就本软件达成的完整协议，取代此前的一切口头或书面约定。
+
+6.2 如果本协议的任何条款被认定为无效或不可执行，其余条款仍然有效。
+
+6.3 本协议受中华人民共和国法律管辖。
+
+---
+
+## English (for reference only; the Chinese version prevails)
+
+**Copyright © 2024-2026 The WOA AutoBot Author. All Rights Reserved.**
+
+This software is **proprietary and closed-source**. The Author does not publish, provide, or license access to any source code, design documents, or other implementation materials. This Agreement is not an open-source license.
+
+### 1. Granted Rights
+
+1.1 **Personal Use** — A limited, non-exclusive, non-transferable, non-sublicensable right to install and run one copy of the Software obtained from the Author's official channel, on devices you own, for personal non-commercial purposes only.
+
+No other rights are granted. All rights not expressly granted are reserved by the Author.
+
+### 2. Prohibited Conduct
+
+2.1 **Source Code** — Obtaining, copying, publishing, or distributing the source code, in whole or in part, is prohibited.
+2.2 **Reverse Engineering** — Decompiling, disassembling, unpacking, injecting into, or otherwise reverse-engineering the Software is prohibited.
+2.3 **Modification** — Modifying, translating, adapting, or creating derivative works of the Software, or removing/bypassing its integrity checks, feature guards, or online verification, is prohibited.
+2.4 **Redistribution** — Copying, uploading, mirroring, or otherwise making the Software available to third parties without prior written permission is prohibited.
+2.5 **Commercial Exploitation** — Selling, reselling, renting, sublicensing, bundling, or charging any fee (including "membership", "service", or "authorization" fees) for the Software is prohibited.
+2.6 **Impersonation** — Claiming authorship, or removing or altering the Author's attribution, donation entry, or official channel information, is prohibited.
+2.7 **Trademarks** — No rights to the Author's name, trademarks, or logos are granted.
+
+### 3. Author's Reserved Rights
+
+All copyright and other intellectual property rights in the Software (source code, binaries, UI design, documentation, icons, and assets) are owned by the Author. **All commercial rights are exclusively reserved by the Author.**
+
+### 4. Disclaimer
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND NON-INFRINGEMENT. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, OR CONSEQUENTIAL DAMAGES ARISING FROM THE USE OF OR INABILITY TO USE THE SOFTWARE.
+
+### 5. Termination
+
+Any violation automatically and immediately terminates your rights. You must cease use and delete all copies. The Author reserves the right to pursue legal remedies for any breach.
+
+### 6. Miscellaneous
+
+This Agreement is the entire agreement between the parties regarding the Software and is governed by the laws of the People's Republic of China. If any provision is held invalid or unenforceable, the remaining provisions remain in effect.
+
+---
+
+**官方唯一发布渠道：由作者本人或其指定渠道发布的官方发行包。**
+
+**如您通过任何付费渠道获得本软件，请立即退款并举报。**

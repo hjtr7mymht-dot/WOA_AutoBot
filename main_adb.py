@@ -1,0 +1,3923 @@
+import cv2
+import numpy as np
+import time
+import random
+import threading
+import sys
+import os
+import gc
+import traceback
+from adb_controller import AdbController, woa_debug_set_runtime_started, save_image_safe, read_image_safe
+from simple_ocr import StopSignal, SimpleOCR
+
+# 核心共享模块 - 消除重复定义
+from core import (FEATURE_GUARD_TOKEN, get_resource_path,
+                   SIDEBAR_CATEGORIES, SIDEBAR_SEARCH_ROI,
+                   REF_WIDTH, REF_HEIGHT)
+
+# Bot 引擎（所有方法已内联到 WoaBot 类中，bot/ 包中的 Mixin 已归档）
+# from bot import ConfigMixin, TowerMixin  # 已移除死继承
+
+# --- Web 控制面板（可选集成，多实例支持）---
+try:
+    from web_panel import bot_states as _wp_bot_states, update_frame as _wp_update_frame
+    _WEB_PANEL_AVAILABLE = True
+except ImportError:
+    _WEB_PANEL_AVAILABLE = False
+    _wp_bot_states = None
+    _wp_update_frame = None
+
+# 向后兼容别名
+WOA_FEATURE_GUARD_TOKEN = FEATURE_GUARD_TOKEN
+
+# ── 全局熔断标志（由 gui_launcher 设置，主循环运行时检测）──
+_GLOBAL_FUSE_BLOWN = False
+_GLOBAL_FUSE_REASON = ""
+
+def global_fuse_signal(reason=""):
+    """由 GUI 层调用，通知所有运行中的 Bot 实例立即停止。"""
+    global _GLOBAL_FUSE_BLOWN, _GLOBAL_FUSE_REASON
+    _GLOBAL_FUSE_BLOWN = True
+    _GLOBAL_FUSE_REASON = reason or "未知"
+
+def is_global_fuse_active():
+    return _GLOBAL_FUSE_BLOWN
+
+
+class WoaBot:
+    def _check_running(self):
+        # 全局熔断检查（最高优先级）
+        if _GLOBAL_FUSE_BLOWN:
+            self.running = False
+            self.log(f"⛔ [熔断] 软件已被远程停用：{_GLOBAL_FUSE_REASON}")
+            raise StopSignal()
+        # Web 面板可远程停止（按当前实例）
+        if _WEB_PANEL_AVAILABLE and _wp_bot_states:
+            s = _wp_bot_states.get(self.instance_id, {})
+            if not s.get("running", True):
+                self.running = False
+        if not self.running:
+            raise StopSignal()
+
+    def _check_paused(self):
+        """暂停时阻塞等待，直到恢复运行或停止。"""
+        # Web 面板远程暂停/恢复同步（按当前实例）
+        if _WEB_PANEL_AVAILABLE and _wp_bot_states:
+            s = _wp_bot_states.get(self.instance_id, {})
+            wp_paused = s.get("paused", False)
+            wp_running = s.get("running", True)
+            if wp_paused and not self.paused:
+                self.paused = True
+            elif not wp_paused and self.paused:
+                self.paused = False
+            if not wp_running:
+                self.running = False
+        if not self.paused:
+            return
+        # 暂停时重置界面检测计时，避免恢复后立即触发防卡死
+        self.last_seen_main_interface_time = time.time()
+        self.last_periodic_check_time = 0.0
+        while self.paused and self.running:
+            time.sleep(0.15)
+        if not self.running:
+            raise StopSignal()
+
+    def __init__(self, log_callback=None, config_callback=None, instance_id=1):
+        self.instance_id = instance_id
+        self.last_staff_log_time = 0
+        self.config_callback = config_callback
+        self.adb = None
+        self.target_device = None
+        self.running = False
+        self.paused = False
+        self._worker_thread = None
+        self.log_callback = log_callback
+        self.icon_path = get_resource_path('icon') + os.sep
+        self.last_staff_shortage_time = 0
+        self.CLOSE_X = 1153
+        self.CLOSE_Y = 181
+        self.ocr = None
+        self.stand_skip_index = 0
+        self.in_staff_shortage_mode = False
+        self._next_staff_recovery_probe_time = 0.0
+        self._staff_recovery_probe_interval = 4.0
+        self.enable_bonus_staff = False
+        self.last_bonus_staff_time = 0
+        self.BONUS_COOLDOWN = 2 * 60 * 60
+        # 每日 1500 银币换 1 金币。冷却从兑换成功时起算 24 小时，不是自然日。
+        self.enable_silver_gold = False
+        self._silver_gold_next_at = 0.0
+        self._silver_gold_retry_at = 0.0
+        self._silver_gold_missing_logged = False
+        self.SILVER_GOLD_COOLDOWN_SEC = 24 * 60 * 60 + 120
+        self.REGION_GLOBAL_STAFF = (565, 87, 80, 30)
+        self.REGION_TASK_COST = (270, 670, 330 - 270, 695 - 670)
+        self.REGION_GREEN_DOT = (405, 517, 201, 109)
+        self.next_bonus_retry_time = 0
+        self.doing_task_forbidden_until = 0
+        self.next_list_refresh_time = 0
+        self.enable_vehicle_buy = False
+        self.enable_speed_mode = False
+        self.enable_skip_staff = False
+        self.enable_delay_bribe = False
+        self.enable_random_task = False
+        self.control_method = "adb"
+        self.screenshot_method = "nemu_ipc"
+        self.mumu_path = ""
+        self.module_flags = {
+            'lifecycle': True,
+            'scanner': True,
+            'idle_recovery': True,
+            'task_doing': True,
+            'task_approach': True,
+            'task_taxiing': True,
+            'task_takeoff': True,
+            'task_stand': True,
+            'task_ice': True,
+            'task_repair': True,
+        }
+        self.branch_definitions = {
+            'full': list(self.module_flags.keys()),
+            'safe': ['lifecycle', 'scanner', 'idle_recovery', 'task_doing', 'task_approach', 'task_taxiing',
+                     'task_takeoff', 'task_stand'],
+            'ground_only': ['lifecycle', 'scanner', 'idle_recovery', 'task_doing', 'task_stand',
+                            'task_ice', 'task_repair'],
+            'air_only': ['lifecycle', 'scanner', 'idle_recovery', 'task_approach', 'task_taxiing', 'task_takeoff'],
+        }
+        self.active_branch = 'full'
+
+        self.slide_min_duration = 250
+        self.slide_max_duration = 500
+        self.REGION_MAIN_ANCHOR = (30, 30, 55, 45)
+        self.REGION_REWARD_RECOVERY = (308, 428, 1007, 311)
+        self.REWARD_FLOW_BUTTONS = ['get_award_1.png', 'get_award_2.png', 'get_award_3.png', 'get_award_4.png',
+                                    'push_back.png', 'taxi_to_runway.png', 'start_general.png']
+        self.last_seen_main_interface_time = time.time()
+        self.STUCK_TIMEOUT = 28.0
+        self._interface_check_interval = 0.35
+        self._next_interface_check_time = 0.0
+        self.auto_delay_count = 0
+        self.TOWER_CHECK_POINTS = [(656, 809), (634, 831), (634, 809), (656, 830)]
+        # BGR: 红(需延时) 绿(无需延时) 灰(塔台关闭)
+        self.TOWER_RED_BGR = (110, 112, 251)
+        self.TOWER_GREEN_BGR = (153, 219, 94)
+        self.TOWER_OFF_COLOR = (128, 111, 94)
+        # 塔台菜单中四个控制器的倒计时 OCR 区域 (x, y, w, h)，右上角顶点分别为 (320,387) (320,491) (320,595) (320,699)
+        self.TOWER_TIME_REGIONS = [
+            (320 - 110, 387, 110, 18),
+            (320 - 110, 491, 110, 18),
+            (320 - 110, 595, 110, 18),
+            (320 - 110, 699, 110, 18),
+        ]
+        # 塔台倒计时定时器：到期时间戳（0 表示未设置）
+        self._tower_delay_deadline = 0.0
+        # 四个延时按钮坐标（对应控制器1-4）
+        self.TOWER_DELAY_BUTTONS = [(362, 376), (362, 479), (362, 583), (362, 688)]
+        # 全部延时按钮
+        self.TOWER_DELAY_ALL_BTN = (362, 785)
+        # 记录哪些控制器是活跃的（启动时确定）
+        self._tower_active_slots = [False, False, False, False]
+        # 塔台是否已确认关闭（全部未开启）
+        self._tower_disabled = False
+        # 塔台图标 ROI 区域 (x, y, w, h)
+        self.TOWER_ICON_ROI = (549, 794, 53, 55)
+        # 塔台是否曾经开启过（用于"塔台关闭筛选全部"功能）
+        self._tower_was_active = False
+        # 塔台关闭后强制模式1（仅在塔台从开启变为关闭时触发）
+        self._tower_off_force_mode1 = False
+        # 塔台 OCR 连续读取为 None 的次数（用于区分"塔台关闭"和"OCR失败"）
+        self._tower_none_read_count = 0
+        # 塔台监测硬预算：从触发监测到得出结果，目标压到 2s 内。
+        self.TOWER_MONITOR_MAX_SEC = 2.0
+        self.FILTER_MENU_BTN = (1537, 37)
+        # 菜单按钮仍用像素检测（展开=深色，折叠=浅色）
+        self.COLOR_LIGHT = (203, 191, 179)
+        self.COLOR_DARK = (101, 85, 70)
+        # ─── 筛选按钮（识图模式）───
+        # 每个按钮: key, 中文标签, 点击坐标, 未选中模板, 选中模板
+        self.FILTER_BUTTONS = [
+            {'key': 'arrival',   'label': '进港',   'click': (1534, 119), 'tpl_off': 'filter_arrival_off.png',   'tpl_on': 'filter_arrival_on.png'},
+            {'key': 'ground',    'label': '机场内', 'click': (1534, 191), 'tpl_off': 'filter_ground_off.png',    'tpl_on': 'filter_ground_on.png'},
+            {'key': 'departure', 'label': '离港',   'click': (1537, 265), 'tpl_off': 'filter_departure_off.png', 'tpl_on': 'filter_departure_on.png'},
+            {'key': 'pending',   'label': '待处理', 'click': (1537, 479), 'tpl_off': 'filter_pending_off.png',   'tpl_on': 'filter_pending_on.png'},
+        ]
+        # 模式定义: 各按钮期望状态 (True=选中/ON, False=未选中/OFF)
+        self.FILTER_MODE_STATES = {
+            'mode1': {'arrival': False, 'ground': False, 'departure': False, 'pending': True},
+            'mode2': {'arrival': False, 'ground': True,  'departure': False, 'pending': True},
+            'mode3': {'arrival': True,  'ground': True,  'departure': False, 'pending': True},
+        }
+        self.enable_no_takeoff_mode = False
+        self.enable_standalone_logout = False
+        self.enable_cancel_stand_filter = False
+        self.enable_filter_stand_only_when_tower_open = False
+        self.enable_2d_mode = True
+        # 2D/3D 切换按钮（游戏右上角附近）
+        self.VIEW_2D_BTN = (1162, 44)
+        self.VIEW_3D_BTN = (1204, 44)
+        # 右侧类别栏处理开关
+        self.enable_category_processing = False
+        self.category_selection = {c["key"]: False for c in SIDEBAR_CATEGORIES}
+        self.category_cycle_interval = 15.0
+        self._current_category_index = -1
+        self._next_category_switch_time = 0.0
+        self._pending_switch_to_all = False
+        # 塔台全部开启像素稳定性确认
+        self.TOWER_STABLE_CONFIRM_COUNT = 4      # 连续确认次数
+        self._tower_all_open_stable_count = 0    # 当前连续全开计数
+        self._last_tower_all_open_state = False  # 上一次确认的全开状态
+
+        self._request_switch_mode1 = False
+        self._no_takeoff_auto_logout_interval = 30.0
+        self._no_takeoff_auto_logout_next_time = 0.0
+        self._standalone_logout_interval = 30.0
+        self._standalone_logout_next_time = 0.0
+        self._stat_approach = 0
+        self._stat_depart = 0
+        self._stat_stand_count = 0
+        self._stat_stand_staff = 0
+        self._stat_session_approach = 0
+        self._stat_session_depart = 0
+        self._stat_session_stand_count = 0
+        self._stat_session_stand_staff = 0
+        self._stat_date = None
+        self._stat_last_required_cost = None
+        self.REGION_STATUS_TITLE = (20, 320, 190, 250)
+        self.LIST_ROI_X = 1312
+        self.LIST_ROI_W = 60
+        self.LIST_ROI_H = 900
+        self.REGION_BOTTOM_ROI = (20, 750, 340, 130)
+        self.REGION_VACANT_ROI = (480, 799, 800, 220)  # 以 (489,770) 为中心
+
+        # 防卡死相关
+        self.enable_anti_stuck = True
+        self.consecutive_timeout_count = 0
+        self.last_recovery_time = 0  # 冷却时间
+        self.last_window_close_time = time.time()
+        self._anti_stuck_warn_threshold = 6
+        self._anti_stuck_trigger_count = 0
+        self._anti_stuck_stop_threshold = 6
+        self._anti_stuck_hard_stop_threshold = 12
+        self._anti_stuck_stop_requested = False
+
+        self.last_checked_avail_staff = -1
+        self.last_known_available_staff = -1
+        self.last_read_success = False
+        self.thinking_mode = 0
+        self.thinking_range = (0, 0)
+        self._task_fail_cooldown = {}
+        self._task_fail_cooldown_sec = 3.0  # 失败任务冷却时间（秒），短暂冷却避免立即重试
+        self._no_operable_count = 0
+        self._no_operable_threshold = 3
+        self._last_error_popup_check_ts = 0.0
+        self._error_popup_check_interval = 1.2
+
+        # 运行时状态（统一初始化，避免 hasattr/getattr 检查）
+        self.consecutive_errors = 0
+        self._scan_screenshot_fails = 0
+        self._no_candidate_closed = False
+        self._last_thinking_desc = None
+        self.last_staff_check_time = 0
+        self.last_periodic_check_time = 0.0
+        self._run_start_time = None  # _do_main_loop 中实际赋值
+
+        self.ICON_ROIS = {
+            'cross_runway.png': self.REGION_BOTTOM_ROI,
+            'get_award_1.png': self.REGION_BOTTOM_ROI,
+            'get_award_2.png': self.REGION_REWARD_RECOVERY,
+            'get_award_3.png': self.REGION_REWARD_RECOVERY,
+            'get_award_4.png': self.REGION_REWARD_RECOVERY,
+            'landing_permitted.png': self.REGION_BOTTOM_ROI,
+            'landing_prohibited.png': self.REGION_BOTTOM_ROI,
+            'push_back.png': self.REGION_BOTTOM_ROI,
+            'stand_confirm.png': self.REGION_BOTTOM_ROI,
+            'start_ground_support.png': self.REGION_BOTTOM_ROI,
+            'start_ice.png': self.REGION_BOTTOM_ROI,
+            'takeoff.png': self.REGION_BOTTOM_ROI,
+            'takeoff_by_gliding.png': self.REGION_BOTTOM_ROI,
+            'taxi_to_runway.png': self.REGION_BOTTOM_ROI,
+            'start_general.png': self.REGION_BOTTOM_ROI,
+            'wait.png': self.REGION_BOTTOM_ROI,
+            'go_repair.png': self.REGION_BOTTOM_ROI,
+            'start_repair.png': self.REGION_BOTTOM_ROI,
+            'ground_support_done.png': self.REGION_BOTTOM_ROI,
+            'stand_vacant_off.png': self.REGION_VACANT_ROI,
+            'stand_vacant_on.png': self.REGION_VACANT_ROI,
+            'green_dot.png': self.REGION_GREEN_DOT
+        }
+
+        self.task_templates = {}
+        task_files = [
+            'pending_ice.png', 'pending_repair.png', 'pending_doing.png',
+            'pending_approach.png', 'pending_taxiing.png', 'pending_takeoff.png',
+            'pending_stand.png'
+        ]
+        for tf in task_files:
+            p = self.icon_path + tf
+            if os.path.exists(p):
+                self.task_templates[tf] = read_image_safe(p)
+
+    def set_random_task_mode(self, enabled, log_change=True):
+        if self.enable_random_task == enabled:
+            return
+        self.enable_random_task = enabled
+        if log_change:
+            self.log(f">>> [配置] 随机任务选择: {'已开启' if enabled else '已关闭'}")
+
+    def set_no_takeoff_mode(self, enabled):
+        if self.enable_no_takeoff_mode == enabled:
+            return
+        self.enable_no_takeoff_mode = enabled
+        self.log(f">>> [配置] 不起飞模式: {'已开启' if enabled else '已关闭'}")
+        if enabled:
+            self._schedule_no_takeoff_auto_logout()
+        else:
+            self._no_takeoff_auto_logout_next_time = 0.0
+            self._request_switch_mode1 = True
+
+    def set_no_takeoff_auto_logout_interval(self, minutes):
+        try:
+            interval = float(minutes)
+        except (TypeError, ValueError):
+            interval = 30.0
+        interval = max(1.0, min(120.0, interval))
+        if self._no_takeoff_auto_logout_interval == interval:
+            return
+        self._no_takeoff_auto_logout_interval = interval
+        self.log(f">>> [配置] 不起飞模式自动小退间隔: {interval:g} 分钟")
+        if self.enable_no_takeoff_mode:
+            self._schedule_no_takeoff_auto_logout()
+
+    def set_standalone_logout_enabled(self, enabled):
+        if self.enable_standalone_logout == enabled:
+            return
+        self.enable_standalone_logout = enabled
+        self.log(f">>> [配置] 独立小退: {'已开启' if enabled else '已关闭'}")
+        if enabled:
+            self._schedule_standalone_logout()
+        else:
+            self._standalone_logout_next_time = 0.0
+
+    def set_standalone_logout_interval(self, minutes):
+        try:
+            interval = float(minutes)
+        except (TypeError, ValueError):
+            interval = 30.0
+        interval = max(1.0, min(120.0, interval))
+        if self._standalone_logout_interval == interval:
+            return
+        self._standalone_logout_interval = interval
+        self.log(f">>> [配置] 独立小退间隔: {interval:g} 分钟")
+        if self.enable_standalone_logout:
+            self._schedule_standalone_logout()
+
+    def set_cancel_stand_filter_when_tower_off(self, enabled):
+        if self.enable_cancel_stand_filter == enabled:
+            return
+        self.enable_cancel_stand_filter = enabled
+        self.log(f">>> [配置] 塔台关闭时取消停机位筛选: {'已开启' if enabled else '已关闭'}")
+
+    def set_filter_stand_only_when_tower_open(self, enabled):
+        if self.enable_filter_stand_only_when_tower_open == enabled:
+            return
+        self.enable_filter_stand_only_when_tower_open = enabled
+        if not enabled and not self.enable_no_takeoff_mode:
+            self._request_switch_mode1 = True
+        self.log(f">>> [配置] 塔台全开时仅停机位待处理: {'已开启' if enabled else '已关闭'}")
+
+    def set_2d_mode(self, enabled):
+        if self.enable_2d_mode == enabled:
+            return
+        self.enable_2d_mode = enabled
+        self.log(f">>> [配置] 2D界面模式: {'已开启' if enabled else '已关闭（3D模式）'}")
+
+    def _ensure_view_mode(self):
+        """确保游戏视角为期望的2D/3D模式。使用模板匹配检测当前按钮状态并切换。"""
+        screen = self.adb.get_screenshot() if self.adb else None
+        if screen is None:
+            return
+        # 用 on/off 模板检测 2D 按钮状态
+        import cv2, os
+        def _match_btn(tpl_name, x, y, margin=28):
+            tpl, tw, th = self._validate_template_roi(tpl_name, (0, 0, margin*2, margin*2), log_label=f"视角按钮{tpl_name}")
+            if tpl is None:
+                return 0.0
+            sx = max(0, x - margin)
+            sy = max(0, y - margin)
+            sw = min(margin * 2, screen.shape[1] - sx)
+            sh = min(margin * 2, screen.shape[0] - sy)
+            if sw < tw or sh < th:
+                return 0.0
+            roi = screen[sy:sy+sh, sx:sx+sw]
+            try:
+                res = cv2.matchTemplate(roi, tpl, cv2.TM_CCOEFF_NORMED)
+                return float(cv2.minMaxLoc(res)[1])
+            except Exception:
+                return 0.0
+
+        # 2D 按钮模板: 2D_on=深色=当前在2D模式, 2D_off=亮色=不在2D模式
+        vx, vy = self.VIEW_2D_BTN
+        score_2d_on = _match_btn('2D_on.png', vx, vy)
+        score_2d_off = _match_btn('2D_off.png', vx, vy)
+        is_2d = score_2d_on > score_2d_off and score_2d_on > 0.55
+
+        if self.enable_2d_mode and not is_2d:
+            self.log("🖥️ [视角] 当前为3D模式，切换至2D...")
+            self._click_filter_point(vx, vy)
+        elif not self.enable_2d_mode and is_2d:
+            self.log("🖥️ [视角] 当前为2D模式，切换至3D...")
+            # 点击3D按钮
+            v3x, v3y = self.VIEW_3D_BTN
+            self._click_filter_point(v3x, v3y)
+
+    def _color_diff(self, a, b):
+        return sum(abs(int(a[i]) - int(b[i])) for i in range(3))
+
+    def _is_pixel_light(self, screen, x, y):
+        try:
+            b, g, r = screen[y, x]
+            return self._color_diff((b, g, r), self.COLOR_LIGHT) < 80
+        except Exception:
+            return False
+
+    def _is_pixel_dark(self, screen, x, y):
+        try:
+            b, g, r = screen[y, x]
+            return self._color_diff((b, g, r), self.COLOR_DARK) < 80
+        except Exception:
+            return False
+
+    def _is_tower_off(self, screen):
+        """四个检测点全部为灰色才表示塔台关闭"""
+        tb, tg, tr = self.TOWER_OFF_COLOR
+        for (x, y) in self.TOWER_CHECK_POINTS:
+            try:
+                b, g, r = screen[y, x]
+                if self._color_diff((b, g, r), (tb, tg, tr)) > 70:
+                    return False
+            except Exception:
+                return False
+        return True
+
+    def _is_tower_icon_visible(self):
+        """检测塔台图标是否可见（ROI 内匹配 tower.png）"""
+        return self.safe_locate('tower.png', confidence=0.8, region=self.TOWER_ICON_ROI) is not None
+
+    def _is_point_red(self, b, g, r):
+        """检测点是否为红色（需延时）：R 主导，与绿/灰区分"""
+        rb, rg, rr = self.TOWER_RED_BGR
+        diff_red = self._color_diff((b, g, r), (rb, rg, rr))
+        diff_green = self._color_diff((b, g, r), self.TOWER_GREEN_BGR)
+        diff_gray = self._color_diff((b, g, r), self.TOWER_OFF_COLOR)
+        return diff_red < 90 and diff_red <= diff_green and diff_red <= diff_gray
+
+    # ─── 筛选按钮识图引擎 ────────────────────────────────
+
+    def _filter_btn(self, key):
+        for btn in self.FILTER_BUTTONS:
+            if btn['key'] == key:
+                return btn
+        return None
+
+    def _validate_template_roi(self, template_name, roi, log_label=""):
+        """校验模板尺寸是否适配 ROI，返回 (tpl, tpl_w, tpl_h) 或 (None, 0, 0)。
+        模板超过 ROI 时记录警告日志，便于排查匹配失败。
+        使用 read_image_safe（np.fromfile+imdecode）替代 cv2.imread，支持中文路径。"""
+        tpl_path = self.icon_path + template_name
+        if not os.path.exists(tpl_path):
+            if log_label:
+                self.log(f"🔍 [模板] {log_label}: 文件不存在 {template_name}")
+            return None, 0, 0
+        tpl = read_image_safe(tpl_path)
+        if tpl is None:
+            if log_label:
+                self.log(f"🔍 [模板] {log_label}: 无法读取 {template_name}")
+            return None, 0, 0
+        th, tw = tpl.shape[:2]
+        x, y, rw, rh = roi
+        rw = int(rw); rh = int(rh)
+        if rw < tw or rh < th:
+            if log_label:
+                self.log(f"🔍 [模板] {log_label}: ROI({rw}×{rh}) < 模板({tw}×{th})，将无法匹配！")
+            return None, tw, th
+        return tpl, tw, th
+
+    def _match_template_score(self, screen, template_name, roi):
+        import cv2
+        tpl, tw, th = self._validate_template_roi(template_name, roi, log_label=template_name)
+        if tpl is None:
+            return None
+        x, y, w, h = roi
+        x = max(0, int(x)); y = max(0, int(y))
+        if y + h > screen.shape[0] or x + w > screen.shape[1]:
+            return None
+        search = screen[y:y + h, x:x + w]
+        if search.shape[0] < tpl.shape[0] or search.shape[1] < tpl.shape[1]:
+            self.log(f"🔍 [模板] {template_name}: 截图ROI({search.shape[1]}×{search.shape[0]}) < 模板({tw}×{th})，边界裁剪导致无法匹配")
+            return None
+        try:
+            res = cv2.matchTemplate(search, tpl, cv2.TM_CCOEFF_NORMED)
+            _, max_val, _, _ = cv2.minMaxLoc(res)
+            return float(max_val)
+        except Exception:
+            return None
+
+    def _detect_filter_button_state(self, screen, btn):
+        """用 on/off 模板比对一个按钮的选中状态，返回 True=选中, False=未选中, None=无法判断"""
+        cx, cy = btn['click']
+        margin = 36  # 扩大搜索范围提高匹配鲁棒性
+        roi = (cx - margin, cy - margin, margin * 2, margin * 2)
+        score_on = self._match_template_score(screen, btn['tpl_on'], roi)
+        score_off = self._match_template_score(screen, btn['tpl_off'], roi)
+        if score_on is not None or score_off is not None:
+            if score_on is None:
+                return False
+            if score_off is None:
+                return True
+            # 降低判定阈值使相近分数也能正确区分
+            if score_on >= score_off:
+                return True
+            if score_off - score_on > 0.06:
+                return False
+            return True
+        # ── 模板缺失/匹配失败 → 像素回退 ──
+        # 深色圆底=选中(on), 亮色圆底=未选中(off)
+        # 取 5×5 邻域均值提高抗锯齿能力
+        h, w = screen.shape[:2]
+        if cx >= w or cy >= h:
+            return None
+        samples = []
+        for ox in (-2, -1, 0, 1, 2):
+            for oy in (-2, -1, 0, 1, 2):
+                nx, ny = cx + ox, cy + oy
+                if 0 <= nx < w and 0 <= ny < h:
+                    px = screen[ny, nx]
+                    if len(px) >= 3:
+                        b, g, r = int(px[0]), int(px[1]), int(px[2])
+                    else:
+                        b = g = r = int(px[0])
+                    samples.append((b, g, r))
+        if not samples:
+            return None
+        avg_b = sum(s[0] for s in samples) / len(samples)
+        avg_g = sum(s[1] for s in samples) / len(samples)
+        avg_r = sum(s[2] for s in samples) / len(samples)
+        # 与亮色/深色参考值比较
+        # COLOR_LIGHT=(203,191,179) BGR → 亮灰圆底 → 未选中(off)
+        # COLOR_DARK=(101,85,70) BGR   → 深灰圆底 → 选中(on)
+        diff_light = abs(avg_b - self.COLOR_LIGHT[0]) + abs(avg_g - self.COLOR_LIGHT[1]) + abs(avg_r - self.COLOR_LIGHT[2])
+        diff_dark  = abs(avg_b - self.COLOR_DARK[0])  + abs(avg_g - self.COLOR_DARK[1])  + abs(avg_r - self.COLOR_DARK[2])
+        # 放宽颜色容差以提高低画质下的识别率
+        if diff_dark < diff_light and diff_dark < 100:
+            return True   # 接近深色 → 已选中(on)
+        if diff_light < diff_dark and diff_light < 100:
+            return False  # 接近亮色 → 未选中(off)
+        return None       # 无法判断，不操作
+
+    def _detect_filter_state(self, screen):
+        """返回所有按钮的当前状态 dict: {key: True/False/None}"""
+        state = {}
+        for btn in self.FILTER_BUTTONS:
+            state[btn['key']] = self._detect_filter_button_state(screen, btn)
+        return state
+
+    def _filter_state_matches(self, state, expected):
+        """检查实际状态是否匹配期望状态"""
+        for key, want_selected in expected.items():
+            current = state.get(key)
+            if current is None:
+                return False
+            if current != want_selected:
+                return False
+        return True
+
+    def _ensure_filter_menu_open(self):
+        """确保筛选菜单已展开（菜单按钮深色=已展开），返回截图"""
+        for _ in range(6):
+            screen = self.adb.get_screenshot()
+            if screen is None:
+                return None
+            mx, my = self.FILTER_MENU_BTN
+            if self._is_pixel_dark(screen, mx, my):
+                return screen
+            self._click_filter_point(mx, my)
+            self.sleep(0.18)
+        return self.adb.get_screenshot()
+
+    def _apply_filter_state(self, expected_state, max_rounds=8):
+        """循环将筛选状态修正为目标状态"""
+        for _ in range(max_rounds):
+            screen = self.adb.get_screenshot()
+            if screen is None:
+                return
+            mx, my = self.FILTER_MENU_BTN
+            if self._is_pixel_light(screen, mx, my):
+                self._click_filter_point(mx, my)
+                self.sleep(0.18)
+                continue
+            all_ok = True
+            for btn in self.FILTER_BUTTONS:
+                key = btn['key']
+                want = expected_state.get(key)
+                if want is None:
+                    continue
+                current = self._detect_filter_button_state(screen, btn)
+                if current is None:
+                    # 无法判断状态 → 跳过不点，避免盲点误触
+                    continue
+                if current != want:
+                    self._click_filter_point(*btn['click'])
+                    self.sleep(0.12)
+                    all_ok = False
+                    break
+            if all_ok:
+                return
+
+    def _matches_filter_mode3(self, screen):
+        """不起飞模式：菜单深色、待处理选中、离港不选，进港与机场内同时选中"""
+        mx, my = self.FILTER_MENU_BTN
+        if not self._is_pixel_dark(screen, mx, my):
+            return False
+        state = self._detect_filter_state(screen)
+        if state.get('pending') != True:
+            return False
+        if state.get('departure') != False:
+            return False
+        a = state.get('arrival')
+        b = state.get('ground')
+        if a is None or b is None:
+            return False
+        return bool(a and b)
+
+    def _do_no_takeoff_small_logout(self):
+        """不起飞模式小退：换机场 → 重进游戏 → 恢复处理。
+        流程：点击主界面 → 换机场 → 等待 → 点击开始 → 等待主界面 → 重检测塔台/筛选。"""
+        self._check_running()
+        loc = self.safe_locate('main_interface.png', region=self.REGION_MAIN_ANCHOR, confidence=0.8)
+        if not loc:
+            self.log("📋 [小退] 未找到主界面按钮，跳过")
+            return
+        self.adb.click(loc[0], loc[1], random_offset=8)
+        self.sleep(0.6)
+        # 重试查找更改机场按钮（等待界面过渡完成）
+        found_airport = False
+        for _ in range(5):
+            self._check_running()
+            if self.find_and_click('change_airport.png', confidence=0.75, wait=0):
+                found_airport = True
+                break
+            self.sleep(0.25)
+        if not found_airport:
+            self.log("📋 [小退] 未找到更改机场按钮，跳过")
+            return
+        self.sleep(4.0)
+        # 等待 first_start_2 按钮（最多30s）
+        t0 = time.time()
+        while time.time() - t0 < 30.0:
+            self._check_running()
+            if self.find_and_click('first_start_2.png', wait=0.3):
+                break
+            self.sleep(0.3)
+        self.sleep(10.0)
+        # 等待主界面出现（最多90s）
+        wait_main = time.time()
+        while time.time() - wait_main < 90.0:
+            self._check_running()
+            if self.safe_locate('main_interface.png', region=self.REGION_MAIN_ANCHOR, confidence=0.8):
+                self.log("📋 [小退] 已返回主界面")
+                self.sleep(0.5)
+                try:
+                    self._init_tower_countdown()
+                except StopSignal:
+                    raise
+                except Exception as e:
+                    self.log(f"🗼 [塔台] ⚠️ 小退后重检测失败: {e}")
+                self._periodic_15s_check(force_initial_filter_check=True)
+                return
+            self.sleep(0.6)
+        self.log("📋 [小退] 90s 内未检测到主界面，由后续流程处理")
+
+    def _schedule_no_takeoff_auto_logout(self):
+        self._no_takeoff_auto_logout_next_time = time.time() + self._no_takeoff_auto_logout_interval * 60.0
+
+    def _schedule_standalone_logout(self):
+        self._standalone_logout_next_time = time.time() + self._standalone_logout_interval * 60.0
+
+    def _force_switch_filter_mode1(self):
+        """强制切换至模式1（仅待处理）- 识图版"""
+        if not self.safe_locate('main_interface.png', region=self.REGION_MAIN_ANCHOR, confidence=0.8):
+            return
+        screen = self._ensure_filter_menu_open()
+        if screen is None:
+            return
+        state = self._detect_filter_state(screen)
+        mode1 = self.FILTER_MODE_STATES['mode1']
+        if self._filter_state_matches(state, mode1):
+            return
+        self.log("📋 [筛选] 强制切换至模式1(仅待处理)...")
+        self._apply_filter_state(mode1)
+
+    def _click_filter_point(self, x, y):
+        self.adb.click(x, y, random_offset=10)
+
+    # ─── 分辨率自适应工具 ────────────────────────────────
+    def _get_raw_resolution(self):
+        """获取设备实际分辨率 (宽, 高)，无数据时回退到 1600×900。"""
+        if self.adb is None:
+            return REF_WIDTH, REF_HEIGHT
+        rw = int(getattr(self.adb, '_raw_screen_w', 0) or REF_WIDTH)
+        rh = int(getattr(self.adb, '_raw_screen_h', 0) or REF_HEIGHT)
+        return rw, rh
+
+    def _scale_to_device(self, ref_x, ref_y):
+        """将 1600×900 参考坐标映射到设备物理坐标（绕过 logical→device 二次缩放）。"""
+        rw, rh = self._get_raw_resolution()
+        return int(ref_x * rw / REF_WIDTH), int(ref_y * rh / REF_HEIGHT)
+
+    def _scale_to_logical(self, ref_x, ref_y):
+        """保持归一化空间坐标不变（截图已归一化为 1600×900）。"""
+        return ref_x, ref_y
+
+    # ─── 右侧类别栏切换（先点后验：保证至少点击一次，再像素验证重试）──────
+
+    def _click_category(self, cat, debug_label, want_selected=None):
+        """点击右侧类别栏按钮。
+        
+        核心思路（修复"显示已切换但实际未点击"的问题）：
+        - 不预判按钮状态（像素可能误判），始终至少点击一次
+        - 点击后截图验证，不在目标状态则重试（最多 5 次）
+        - want_selected: True=选中, False=取消, None=仅点击不验证
+        """
+        # ── 1. 定位按钮（归一化 1600×900 空间）──
+        click_x, click_y = None, None
+        # 优先使用 icon_on（深灰选中态，模板匹配对比度更高），回退兼容旧 icon 字段
+        icon_name = cat.get("icon_on", "") or cat.get("icon", "")
+        if icon_name:
+            icon_path = self.icon_path + icon_name
+            if os.path.exists(icon_path):
+                screen = self.adb.get_screenshot()
+                if screen is not None:
+                    sx, sy, sw, sh = SIDEBAR_SEARCH_ROI
+                    if screen.shape[0] >= sy + sh and screen.shape[1] >= sx + sw:
+                        roi = screen[sy:sy+sh, sx:sx+sw]
+                        result = self.adb.locate_image(icon_path, confidence=0.65, screen_image=roi)
+                        if result:
+                            click_x, click_y = result[0] + sx, result[1] + sy
+
+        if click_x is None:
+            fb = cat.get("fallback_pos")
+            if fb:
+                click_x, click_y = fb[0], fb[1]
+
+        if click_x is None:
+            self.log(f"📂 [类别] ⚠️ {debug_label}：无法定位按钮")
+            return False
+
+        dev_click_x, dev_click_y = self._scale_to_device(click_x, click_y)
+        rw, rh = self._get_raw_resolution()
+
+        # ── 2. 仅点击模式 ──
+        if want_selected is None:
+            self.adb._adb_click_fallback(dev_click_x, dev_click_y)
+            self.sleep(0.2)
+            return True
+
+        # ── 3. 先点后验模式（点击前后像素差值对比，不依赖特定颜色）──
+        verify_pos = cat.get("verify_pos")
+        if verify_pos and len(verify_pos) == 2:
+            vx, vy = verify_pos[0], verify_pos[1]
+        else:
+            vx, vy = click_x, click_y
+
+        for attempt in range(3):
+            # ====== 取点击前像素 ======
+            screen_before = self.adb.get_screenshot()
+            if screen_before is None:
+                break
+            try:
+                b1, g1, r1 = screen_before[vy, vx]
+            except (IndexError, Exception):
+                break
+
+            # ====== 点击 ======
+            self.adb._adb_click_fallback(dev_click_x, dev_click_y)
+            self.sleep(0.2)
+
+            # ====== 取点击后像素 ======
+            screen_after = self.adb.get_screenshot()
+            if screen_after is None:
+                continue
+            try:
+                b2, g2, r2 = screen_after[vy, vx]
+            except (IndexError, Exception):
+                continue
+
+            # ====== 计算像素变化量 ======
+            delta = abs(int(b1) - int(b2)) + abs(int(g1) - int(g2)) + abs(int(r1) - int(r2))
+
+            if delta > 40:
+                self.log(f"📂 [类别] ✓ {debug_label}：第{attempt+1}次点击生效 "
+                         f"Δ={delta} device=({dev_click_x},{dev_click_y})")
+                return True
+
+            self.log(f"📂 [类别] 🔘 {debug_label}：第{attempt+1}次点击像素无变化 "
+                     f"Δ={delta} device=({dev_click_x},{dev_click_y}) res={rw}×{rh}")
+
+        # 3 次重试后仍无变化 — 可能 verify_pos 位置不佳，但点击已发送，信任设备
+        self.log(f"📂 [类别] ✓ {debug_label}：已点击（像素验证不稳定但操作已执行）")
+        return True
+
+    def _switch_to_category(self, category_index):
+        """互斥切换右侧类别栏按钮。
+        - category_index = -1 → 点击当前选中类别以取消选择（恢复显示全部飞机）
+        - category_index >= 0 → 选中对应类别（游戏内类别为互斥切换，无需手动取消旧类别）
+        """
+        # ── 全部模式：点击当前选中类别以取消 ──
+        if category_index < 0 or category_index >= len(SIDEBAR_CATEGORIES):
+            old_idx = self._current_category_index
+            if old_idx >= 0 and old_idx < len(SIDEBAR_CATEGORIES):
+                old_cat = SIDEBAR_CATEGORIES[old_idx]
+                # 点击已选中的类别按钮 → 取消选中 → 游戏恢复显示全部飞机
+                self._click_category(old_cat, f"取消 {old_cat['label']}", want_selected=False)
+            self._current_category_index = -1
+            self.log("📂 [类别] 🔘 取消当前类别，恢复「全部待处理」")
+            return
+
+        # ── 选中目标类别 ──
+        cat = SIDEBAR_CATEGORIES[category_index]
+        self._click_category(cat, f"选中 {cat['label']}", want_selected=True)
+        self.sleep(0.1)
+        self._current_category_index = category_index
+
+    def _cycle_to_next_category(self):
+        """轮换到下一个已启用的类别。返回 (category_index, label)，-1 表示无可用类别。"""
+        enabled = [i for i, c in enumerate(SIDEBAR_CATEGORIES) if self.category_selection.get(c["key"], False)]
+        if not enabled:
+            self._current_category_index = -1
+            return -1, "无"
+
+        # 仅 1 个类别 → 确保选中即可，无需轮换
+        if len(enabled) == 1:
+            only_idx = enabled[0]
+            if self._current_category_index != only_idx:
+                self._switch_to_category(only_idx)
+            label = SIDEBAR_CATEGORIES[only_idx]["label"]
+            return only_idx, label
+
+        # 找到当前索引在 enabled 列表中的位置，取下一个
+        try:
+            cur_pos = enabled.index(self._current_category_index) if self._current_category_index in enabled else -1
+        except ValueError:
+            cur_pos = -1
+        next_pos = (cur_pos + 1) % len(enabled)
+        next_index = enabled[next_pos]
+        self._switch_to_category(next_index)
+        label = SIDEBAR_CATEGORIES[next_index]["label"]
+        return next_index, label
+
+    def _periodic_15s_check(self, force_initial_filter_check=False):
+        now = time.time()
+        if not force_initial_filter_check and now - self.last_periodic_check_time < 8.0:
+            return
+        self.last_periodic_check_time = now
+
+        # 1. 检测主界面
+        if self.safe_locate('main_interface.png', region=self.REGION_MAIN_ANCHOR, confidence=0.8):
+            self.last_seen_main_interface_time = time.time()
+
+        # 1.5 2D/3D 视角切换检测
+        self._ensure_view_mode()
+
+        # 2. 中间领奖区防卡死：快速扫描（最多5次）
+        rx, ry, rw, rh = self.REGION_REWARD_RECOVERY
+        for _ in range(5):
+            screen = self.adb.get_screenshot()
+            if screen is None:
+                break
+            roi = screen[ry:ry + rh, rx:rx + rw]
+            clicked = False
+            for btn in self.REWARD_FLOW_BUTTONS:
+                res = self.adb.locate_image(self.icon_path + btn, confidence=0.65, screen_image=roi)
+                if res:
+                    self.log(f"🚨 [15s周期检测] 在领奖区域内发现 {btn}，点击恢复...")
+                    self.adb.click(res[0] + rx, res[1] + ry, random_offset=6)
+                    self.sleep(0.3)
+                    clicked = True
+                    break
+            if not clicked:
+                break
+
+        # 3. 筛选状态检查 - 识图版
+        if not self.safe_locate('main_interface.png', region=self.REGION_MAIN_ANCHOR, confidence=0.8):
+            return
+        screen = self._ensure_filter_menu_open()
+        if screen is None:
+            return
+
+        filter_state = self._detect_filter_state(screen)
+        mode1_state = self.FILTER_MODE_STATES['mode1']
+        mode2_state = self.FILTER_MODE_STATES['mode2']
+        is_mode1 = self._filter_state_matches(filter_state, mode1_state)
+        is_mode2 = self._filter_state_matches(filter_state, mode2_state)
+        is_mode3 = self.enable_no_takeoff_mode and self._matches_filter_mode3(screen)
+
+        if self.enable_no_takeoff_mode:
+            if not is_mode3:
+                self.log("📋 [不起飞] 应用待降落+停机坪筛选")
+                self._apply_filter_state(self.FILTER_MODE_STATES['mode3'])
+            return
+
+        if self.enable_filter_stand_only_when_tower_open and all(self._tower_active_slots):
+            if not is_mode2:
+                self.log("📋 [筛选] 塔台全开，强制切换至模式2(仅停机位)...")
+                self._apply_filter_state(mode2_state)
+            return
+
+        if (not self.enable_filter_stand_only_when_tower_open) and all(self._tower_active_slots) and is_mode2:
+            self.log("📋 [筛选] 已关闭塔台全开仅停机位，恢复模式1(仅待处理)...")
+            self._apply_filter_state(mode1_state)
+            return
+
+        if not any(self._tower_active_slots) and not self._tower_disabled:
+            if is_mode2:
+                self.log("📋 [筛选] 塔台状态未初始化，默认切换至仅待处理...")
+                self._tower_disabled = True
+                self._apply_filter_state(mode1_state)
+            return
+
+        need_mode1_only = self._tower_off_force_mode1
+        if need_mode1_only and not is_mode1:
+            self.log("📋 [筛选] 切换至仅待处理... (塔台已关闭)")
+            self._apply_filter_state(mode1_state)
+            return
+
+        if is_mode1 or is_mode2:
+            return
+        self.log("📋 [筛选] 状态异常，默认切换至仅待处理...")
+        self._apply_filter_state(mode1_state)
+
+    def _nemu_ipc_debug_save_mismatch(self, nemu_img, adb_img):
+        """nemu_ipc 与 ADB 截图不匹配时保存对比图，便于排查"""
+        try:
+            import datetime
+            debug_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "nemu_ipc_debug")
+            os.makedirs(debug_dir, exist_ok=True)
+            ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            p_n = os.path.join(debug_dir, f"mismatch_nemu_{ts}.png")
+            p_a = os.path.join(debug_dir, f"mismatch_adb_{ts}.png")
+            save_image_safe(p_n, nemu_img)
+            save_image_safe(p_a, adb_img)
+            self.log(f"📋 [调试] 已保存对比图: {p_n} / {p_a}")
+        except Exception as e:
+            self.log(f"📋 [调试] 保存对比图失败: {e}")
+
+    def _droidcast_raw_debug_save_mismatch(self, droidcast_img, adb_img):
+        """DroidCast_raw 与 ADB 截图不匹配时保存对比图，便于排查"""
+        try:
+            import datetime
+            debug_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "droidcast_raw_debug")
+            os.makedirs(debug_dir, exist_ok=True)
+            ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            p_d = os.path.join(debug_dir, f"mismatch_droidcast_{ts}.png")
+            p_a = os.path.join(debug_dir, f"mismatch_adb_{ts}.png")
+            save_image_safe(p_d, droidcast_img)
+            save_image_safe(p_a, adb_img)
+            self.log(f"📋 [调试] 已保存对比图: {p_d} / {p_a}")
+        except Exception as e:
+            self.log(f"📋 [调试] 保存对比图失败: {e}")
+
+    def _save_list_roi_debug(self, full_screen, list_roi_img, lx, ly, lw, lh):
+        """任务列表检测为 0 时保存调试图（WOA_DEBUG=1 或 LIST_DETECT_DEBUG=1）"""
+        try:
+            base = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else os.path.dirname(os.path.abspath(__file__))
+            debug_dir = os.path.join(base, "list_detect_debug")
+            os.makedirs(debug_dir, exist_ok=True)
+            ts = time.strftime("%Y%m%d_%H%M%S")
+            p_full = os.path.join(debug_dir, f"list_debug_full_{ts}.png")
+            p_roi = os.path.join(debug_dir, f"list_debug_roi_{ts}.png")
+            # 兼容中文路径的保存方式
+            save_image_safe(p_full, full_screen)
+            save_image_safe(p_roi, list_roi_img)
+            self.log(f"📋 [调试] 任务列表调试图已保存至: {debug_dir}")
+        except Exception as e:
+            self.log(f"📋 [调试] 保存 list_detect 截图失败: {e}")
+
+    def _run_pending_detection(self, list_roi_img):
+        """按行识别：每行只保留该行内置信度最高的类型，避免跨行竞争导致相似图标误判。"""
+        base_defs = [
+            ('pending_ice.png', self.handle_ice_task, 0.76, 'ice', 'task_ice'),
+            ('pending_repair.png', self.handle_repair_task, 0.76, 'repair', 'task_repair'),
+            ('pending_doing.png', self.handle_vehicle_check_task, 0.80, 'doing', 'task_doing'),
+            ('pending_approach.png', self.handle_approach_task, 0.72, 'approach', 'task_approach'),
+            ('pending_taxiing.png', self.handle_taxiing_task, 0.76, 'taxiing', 'task_taxiing'),
+            ('pending_takeoff.png', self.handle_takeoff_task, 0.76, 'takeoff', 'task_takeoff'),
+            ('pending_stand.png', self.handle_stand_task, 0.76, 'stand', 'task_stand')
+        ]
+        try:
+            conf_override = float(os.environ.get("LIST_DETECT_CONF", "0"))
+        except ValueError:
+            conf_override = 0
+        task_defs = [
+            (n, h, conf_override if conf_override > 0 else c, t)
+            for n, h, c, t, module_name in base_defs
+            if self._is_module_enabled(module_name)
+        ]
+        ROW_HEIGHT = 24
+
+        all_matches = []
+        for img_name, handler, conf, t_type in task_defs:
+            found = self._fast_locate_all(list_roi_img, img_name, confidence=conf)
+            for item in found:
+                rel_cx, rel_cy = item['center']
+                abs_cx = rel_cx + self.LIST_ROI_X
+                abs_cy = rel_cy
+                type_for_logic = 'stand' if t_type == 'stand' else ('doing' if t_type == 'doing' else 'other')
+                all_matches.append({
+                    'y': rel_cy, 'center': (abs_cx, abs_cy), 'handler': handler, 'name': img_name,
+                    'score': item['score'], 'type': type_for_logic, 'raw_type': t_type
+                })
+
+        if not all_matches:
+            return [], []
+
+        # 按 y 先排序，再线性分组，避免 used+全表扫描导致的 O(n^2) 开销。
+        all_matches.sort(key=lambda d: d['y'])
+        final_tasks = []
+        i = 0
+        n = len(all_matches)
+        while i < n:
+            row = [all_matches[i]]
+            row_anchor = all_matches[i]['y']
+            j = i + 1
+            while j < n and abs(all_matches[j]['y'] - row_anchor) <= ROW_HEIGHT:
+                row.append(all_matches[j])
+                j += 1
+            best = max(row, key=lambda x: x['score'])
+            final_tasks.append(best)
+            i = j
+
+        return all_matches, final_tasks
+
+    def _fast_locate_all(self, screen_roi, template_name, confidence=0.8):
+        """快速多目标模板匹配，支持自适应阈值回退以应对低对比度场景。
+        
+        策略：
+        1. 主阈值 = max(confidence - 0.03, 0.65)，略低于调用方置信度以容忍轻微形变
+        2. 无匹配时使用回退阈值 = max(confidence - 0.08, 0.62) 二次尝试
+        3. 8px 网格桶去重，避免相邻重复命中，兼顾分辨率与去重效果
+        """
+        if template_name not in self.task_templates:
+            return []
+
+        template = self.task_templates[template_name]
+        if template is None:
+            return []
+
+        try:
+            res = cv2.matchTemplate(screen_roi, template, cv2.TM_CCOEFF_NORMED)
+        except Exception:
+            return []
+
+        h, w = template.shape[:2]
+
+        # 主阈值：略微宽松以容忍游戏画面轻微变化
+        primary_conf = max(confidence - 0.03, 0.65)
+        ys, xs = np.where(res >= primary_conf)
+
+        # 自适应回退：主阈值无结果时，放宽到更低阈值再试一次
+        if len(xs) == 0:
+            fallback_conf = max(confidence - 0.08, 0.62)
+            if fallback_conf < primary_conf:
+                ys, xs = np.where(res >= fallback_conf)
+
+        if len(xs) == 0:
+            return []
+
+        # 8px 网格桶聚合重复命中，保留每个桶内最高分
+        bucket_size = 8
+        best_by_bucket = {}
+        for x, y in zip(xs, ys):
+            key = (int(x) // bucket_size, int(y) // bucket_size)
+            score = float(res[y, x])
+            old = best_by_bucket.get(key)
+            if old is None or score > old['score']:
+                best_by_bucket[key] = {
+                    'box': (int(x), int(y), w, h),
+                    'center': (int(x) + w // 2, int(y) + h // 2),
+                    'score': score,
+                }
+        return list(best_by_bucket.values())
+
+    def _locate_on_screen(self, image_name, screen, confidence=0.8, region=None):
+        if screen is None:
+            return None
+        if region is None:
+            return self.adb.locate_image(self.icon_path + image_name, confidence=confidence, screen_image=screen)
+        x, y, w, h = region
+        x = max(0, int(x))
+        y = max(0, int(y))
+        roi = screen[y:y + h, x:x + w]
+        result = self.adb.locate_image(self.icon_path + image_name, confidence=confidence, screen_image=roi)
+        if result:
+            return result[0] + x, result[1] + y
+        return None
+
+    def _batch_locate_on_screen(self, screen, specs):
+        """在同一帧内做多图匹配，降低重复截图与重复匹配开销。"""
+        if screen is None:
+            return {key: None for key, _, _, _ in specs}
+        results = {}
+        for key, image_name, confidence, region in specs:
+            results[key] = self._locate_on_screen(image_name, screen, confidence=confidence, region=region)
+        return results
+
+    def set_thinking_time_mode(self, mode_index, log_change=True):
+        mode_index = int(mode_index)
+        if self.thinking_mode == mode_index:
+            return
+        self.thinking_mode = mode_index
+        if self.thinking_mode == 1:
+            self.thinking_range = (0.1, 0.4)
+            desc = "短 (0.1s-0.4s)"
+        elif self.thinking_mode == 2:
+            self.thinking_range = (0.3, 1.0)
+            desc = "中 (0.3s-1.0s)"
+        elif self.thinking_mode == 3:
+            self.thinking_range = (0.8, 2.0)
+            desc = "长 (0.8s-2.0s)"
+        else:
+            self.thinking_range = (0, 0)
+            desc = "关闭"
+        prev = self._last_thinking_desc
+        if prev == desc:
+            if self.adb:
+                self.adb.set_thinking_strategy(*self.thinking_range)
+            return
+        self._last_thinking_desc = desc
+        if self.adb:
+            self.adb.set_thinking_strategy(*self.thinking_range)
+        if log_change:
+            self.log(f">>> [配置] 思考时间: {desc}")
+
+    def set_bonus_staff_feature(self, enabled):
+        if self.enable_bonus_staff == enabled: return
+        self.enable_bonus_staff = enabled
+        self.log(f">>> [配置] 自动领取地勤: {'已开启' if enabled else '已关闭'}")
+
+    def set_silver_gold_exchange(self, enabled, next_at=None, log_change=True):
+        """每日 1500 银币换 1 金币。next_at 为下次允许兑换的时间戳。"""
+        enabled = bool(enabled)
+        changed = self.enable_silver_gold != enabled
+        self.enable_silver_gold = enabled
+        if next_at is not None:
+            try:
+                nxt = float(next_at)
+            except (TypeError, ValueError):
+                nxt = 0.0
+            if nxt > self._silver_gold_next_at:
+                self._silver_gold_next_at = nxt
+        if not (log_change and changed):
+            return
+        if not enabled:
+            self.log(">>> [配置] 每日银币换金币: 已关闭")
+            return
+        remain = self._silver_gold_next_at - time.time()
+        if remain > 60:
+            self.log(f">>> [配置] 每日银币换金币: 已开启，冷却中，约 {remain / 3600.0:.1f} 小时后兑换")
+        else:
+            self.log(">>> [配置] 每日银币换金币: 已开启，即将尝试 1500 银币换 1 金币")
+
+    def set_vehicle_buy_feature(self, enabled):
+        if self.enable_vehicle_buy == enabled: return
+        self.enable_vehicle_buy = enabled
+        self.log(f">>> [配置] 自动购买车辆: {'已开启' if enabled else '已关闭'}")
+
+    def set_speed_mode(self, enabled):
+        if self.enable_speed_mode == enabled: return
+        self.enable_speed_mode = enabled
+        self.log(f">>> [配置] 跳过二次校验: {'已开启' if enabled else '已关闭'}")
+
+    def set_skip_staff_verify(self, enabled):
+        if self.enable_skip_staff == enabled: return
+        self.enable_skip_staff = enabled
+        self.log(f">>> [配置] 跳过地勤验证: {'已开启' if enabled else '已关闭'}")
+
+    def set_auto_delay(self, count):
+        count = int(count)
+        old_count = self.auto_delay_count
+        self.auto_delay_count = count
+        # 如果从禁用变为启用，重新初始化塔台状态
+        if old_count <= 0 and count > 0:
+            self.log(f">>> [配置] 自动延时塔台已启用 ({count} 次)，重新初始化塔台状态")
+            self._tower_disabled = False
+            self._tower_delay_deadline = 0.0  # 触发重新检查
+        elif old_count > 0 and count <= 0:
+            self.log(f">>> [配置] 自动延时塔台已关闭")
+            self._tower_delay_deadline = 0.0
+
+    def set_delay_bribe(self, enabled):
+        if self.enable_delay_bribe == enabled: return
+        self.enable_delay_bribe = enabled
+        self.log(f">>> [配置] 延误飞机贿赂: {'已开启' if enabled else '已关闭'}")
+
+    # ─── 右侧类别栏处理 ──────────────────────────────────
+    def set_category_processing(self, enabled, selection=None):
+        """启用/禁用右侧类别栏处理，selection 为 {key: bool} 字典"""
+        was_processing = self.enable_category_processing or self._current_category_index >= 0
+        self.enable_category_processing = bool(enabled)
+        if selection is not None and isinstance(selection, dict):
+            for c in SIDEBAR_CATEGORIES:
+                key = c["key"]
+                self.category_selection[key] = bool(selection.get(key, False))
+        if self.enable_category_processing:
+            enabled_keys = [c["label"] for c in SIDEBAR_CATEGORIES if self.category_selection.get(c["key"], False)]
+            if enabled_keys:
+                self.log(f">>> [配置] 类别栏处理已开启: {', '.join(enabled_keys)}")
+                self._current_category_index = -1
+                self._next_category_switch_time = time.time() + 0.5
+            else:
+                self.log(f">>> [配置] 类别栏处理已开启，但未选择任何类别，等待配置")
+                if was_processing:
+                    self._pending_switch_to_all = True
+        else:
+            self.log(f">>> [配置] 类别栏处理已关闭")
+            if was_processing:
+                self._pending_switch_to_all = True
+
+    def set_anti_stuck_config(self, enabled, threshold=None, log_change=True):
+        enabled = bool(enabled)
+        changed = (self.enable_anti_stuck != enabled)
+        self.enable_anti_stuck = enabled
+
+        if threshold is not None:
+            try:
+                val = int(threshold)
+            except (TypeError, ValueError):
+                val = self._anti_stuck_warn_threshold
+            val = max(3, min(20, val))
+            if self._anti_stuck_warn_threshold != val:
+                self._anti_stuck_warn_threshold = val
+                changed = True
+            stop_val = max(self._anti_stuck_warn_threshold, val)
+            if self._anti_stuck_stop_threshold != stop_val:
+                self._anti_stuck_stop_threshold = stop_val
+                changed = True
+            hard_val = max(self._anti_stuck_stop_threshold + 2, val * 2)
+            if self._anti_stuck_hard_stop_threshold != hard_val:
+                self._anti_stuck_hard_stop_threshold = hard_val
+                changed = True
+
+        if not self.enable_anti_stuck:
+            self._anti_stuck_trigger_count = 0
+            self._anti_stuck_stop_requested = False
+            self.consecutive_timeout_count = 0
+
+        if log_change and changed:
+            state = "已开启" if self.enable_anti_stuck else "已关闭"
+            self.log(
+                f">>> [配置] 防卡死: {state}，阈值={self._anti_stuck_warn_threshold}，自动停机阈值={self._anti_stuck_hard_stop_threshold}"
+            )
+
+    def set_slide_duration_range(self, min_d, max_d, log_change=True):
+        min_d = int(min_d)
+        max_d = int(max_d)
+        if self.slide_min_duration == min_d and self.slide_max_duration == max_d:
+            return
+        self.slide_min_duration = min_d
+        self.slide_max_duration = max_d
+        if log_change:
+            self.log(f">>> [配置] 滑块随机耗时: {self.slide_min_duration}ms - {self.slide_max_duration}ms")
+
+    def set_device(self, device_serial):
+        self.target_device = device_serial
+
+    def set_control_method(self, method):
+        m = (method or "adb").lower()
+        valid = ("adb", "uiautomator2")
+        if m not in valid:
+            m = "adb"
+        if self.control_method != m:
+            self.control_method = m
+
+    def set_screenshot_method(self, method):
+        m = (method or "adb").lower()
+        if m not in ("adb", "nemu_ipc", "uiautomator2", "droidcast_raw"):
+            m = "adb"
+        if self.screenshot_method != m:
+            self.screenshot_method = m
+
+    def set_mumu_path(self, path):
+        self.mumu_path = (path or "").strip()
+        if self.adb:
+            self.adb.set_mumu_path(self.mumu_path)
+
+    def set_click_jitter(self, click_jitter, swipe_jitter):
+        """设置点击/滑动的随机偏移量（模拟人手操作）。"""
+        try:
+            click_jitter = max(1, min(30, int(click_jitter)))
+        except (TypeError, ValueError):
+            click_jitter = 6
+        try:
+            swipe_jitter = max(1, min(40, int(swipe_jitter)))
+        except (TypeError, ValueError):
+            swipe_jitter = 8
+        if self.adb:
+            self.adb.default_click_jitter = click_jitter
+            self.adb.default_swipe_jitter = swipe_jitter
+            self.log(f">>> [配置] 随机偏移: 点击±{click_jitter}px, 滑动±{swipe_jitter}px")
+
+    def _is_module_enabled(self, module_name):
+        if not self.module_flags.get(module_name, True):
+            return False
+        branch_modules = self.branch_definitions.get(self.active_branch, self.branch_definitions['full'])
+        return module_name in branch_modules
+
+    def set_module_enabled(self, module_name, enabled, log_change=True):
+        if module_name not in self.module_flags:
+            return
+        enabled = bool(enabled)
+        if self.module_flags[module_name] == enabled:
+            return
+        self.module_flags[module_name] = enabled
+        if log_change:
+            self.log(f">>> [模块] {module_name}: {'启用' if enabled else '禁用'}")
+
+    def set_module_flags(self, flags, log_change=True):
+        if not isinstance(flags, dict):
+            return
+        for name, enabled in flags.items():
+            self.set_module_enabled(str(name), bool(enabled), log_change=log_change)
+
+    def set_active_branch(self, branch_name, log_change=True):
+        branch = (branch_name or 'full').strip().lower()
+        if branch not in self.branch_definitions:
+            branch = 'full'
+        if self.active_branch == branch:
+            return
+        self.active_branch = branch
+        if log_change:
+            self.log(f">>> [分支] 当前执行分支: {self.active_branch}")
+
+    def log(self, message):
+        if not message or not str(message).strip():
+            return
+        try:
+            print(message)
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except Exception:
+            pass
+        if self.log_callback:
+            try:
+                self.log_callback(message)
+            except (KeyboardInterrupt, SystemExit):
+                raise
+            except Exception:
+                pass
+
+        if not self.enable_anti_stuck:
+            return
+
+        # 【核心修正】智能防卡死逻辑
+        # 1. 过滤掉恢复日志本身，防止递归触发
+        if "防卡死" in message: return
+        # 类别切换/配置日志含 ⚠️（如"⚠️ 机队"），不触发防卡死
+        if "[类别]" in message or "📂" in message: return
+
+        # 2. 统计警告次数
+        if "⚠️" in message or "超时" in message:
+            self.consecutive_timeout_count += 1
+        elif "✅" in message or "成功" in message:
+            self.consecutive_timeout_count = 0
+
+        # 3. 触发条件：连续告警超过阈值 + 冷却时间已过
+        if self.consecutive_timeout_count >= self._anti_stuck_warn_threshold:
+            if time.time() - self.last_recovery_time > 16:
+                self._record_anti_stuck_trigger("检测到连续多次卡顿，尝试紧急寻找领奖图标")
+                self.consecutive_timeout_count = 0
+                self.last_recovery_time = time.time()
+                self._attempt_emergency_reward_recovery()
+            else:
+                self.consecutive_timeout_count = 0  # 冷却中，暂时重置
+
+    def _record_anti_stuck_trigger(self, reason):
+        if not self.enable_anti_stuck:
+            return
+        self._anti_stuck_trigger_count += 1
+        self.log(f"🚨 [防卡死] {reason}，累计 {self._anti_stuck_trigger_count}/{self._anti_stuck_stop_threshold} 次")
+        if self._anti_stuck_trigger_count < self._anti_stuck_stop_threshold:
+            return
+        self.log("🛠️ [防卡死] 已达到自修复阈值，开始执行恢复流程...")
+        if self._attempt_self_heal_and_resume():
+            self._anti_stuck_trigger_count = 0
+            self._anti_stuck_stop_requested = False
+            self.consecutive_timeout_count = 0
+            self.last_seen_main_interface_time = time.time()
+            self.log("✅ [防卡死] 界面恢复正常，脚本已自动继续运行")
+            return
+
+        self.log("⚠️ [防卡死] 本轮自修复未完全恢复，将继续监控并重试")
+        if self._anti_stuck_trigger_count < self._anti_stuck_hard_stop_threshold:
+            return
+
+        if self._anti_stuck_stop_requested:
+            return
+        self._anti_stuck_stop_requested = True
+        self.log("🛑 [防卡死] 长时间无法恢复，脚本已停止，请检查模拟器界面或当前机场状态")
+        self.running = False
+        if self.config_callback:
+            try:
+                self.config_callback("bot_stopped", "防卡死多次触发且自修复失败，已自动停止")
+            except Exception:
+                pass
+
+    def _attempt_self_heal_and_resume(self):
+        if self._is_main_interface_ready(retries=2, interval=0.3):
+            return True
+
+        for _ in range(3):
+            self._attempt_emergency_reward_recovery(max_rounds=4)
+            if self._is_main_interface_ready(retries=2, interval=0.4):
+                return True
+
+            if self.wait_and_click('back.png', timeout=1.2, click_wait=0.4, random_offset=2):
+                self.log("   -> [自修复] 点击 Back")
+            if self.wait_and_click('cancel.png', timeout=1.2, click_wait=0.4):
+                self.log("   -> [自修复] 点击 Cancel")
+            if self._is_main_interface_ready(retries=2, interval=0.4):
+                return True
+
+            self.log("   -> [自修复] 执行盲点关闭尝试")
+            self.close_window()
+            self.sleep(0.8)
+            if self._is_main_interface_ready(retries=2, interval=0.5):
+                return True
+
+        return False
+
+    def _is_main_interface_ready(self, retries=1, interval=0.0):
+        retries = max(1, int(retries))
+        for i in range(retries):
+            if self.safe_locate('main_interface.png', region=self.REGION_MAIN_ANCHOR, confidence=0.8):
+                return True
+            if interval > 0 and i < retries - 1:
+                self.sleep(interval)
+        return False
+
+    def _attempt_emergency_reward_recovery(self, max_rounds=3):
+        # 全屏搜索领奖图标
+        targets = ['get_award_1.png', 'get_award_2.png', 'get_award_3.png', 'get_award_4.png']
+        max_rounds = max(1, int(max_rounds))
+        # 尝试循环检测，确保如果点到第1步能接着点第2步
+        for _ in range(max_rounds):
+            clicked = False
+            for t in targets:
+                # 使用 region=None 进行全屏搜索，降低一点阈值以防图标变灰或变暗
+                res = self.safe_locate(t, confidence=0.65, region=None)
+                if res:
+                    self.log(f"   -> 🚨 紧急恢复：点击 {t}")
+                    self.adb.click(res[0], res[1])
+                    self.sleep(1.5)  # 点击后多等一会儿
+                    clicked = True
+                    break
+            if not clicked:
+                break
+
+    def wait_and_click(self, image_name, timeout=3.0, click_wait=0.2, confidence=0.8, random_offset=5):
+        self._check_running()
+        start_time = time.time()
+        use_roi = False
+        roi_x, roi_y, roi_w, roi_h = 0, 0, 0, 0
+        if image_name in self.ICON_ROIS:
+            use_roi = True
+            roi_x, roi_y, roi_w, roi_h = self.ICON_ROIS[image_name]
+
+        # 实时识图：使用缓存截图 + 更快的轮询间隔 (60ms)
+        poll_interval = 0.06
+        while time.time() - start_time < timeout:
+            self._check_running()
+            screen = self.adb.get_screenshot_cached(max_age_ms=50)
+            if screen is None:
+                time.sleep(poll_interval)
+                continue
+            if use_roi:
+                if roi_y + roi_h > screen.shape[0] or roi_x + roi_w > screen.shape[1]:
+                    time.sleep(poll_interval)
+                    continue
+                search_img = screen[roi_y:roi_y + roi_h, roi_x:roi_x + roi_w]
+                offset_x, offset_y = roi_x, roi_y
+            else:
+                search_img = screen
+                offset_x, offset_y = 0, 0
+
+            result = self.adb.locate_image(self.icon_path + image_name, confidence=confidence, screen_image=search_img)
+            if result:
+                self._check_running()
+                real_x = result[0] + offset_x
+                real_y = result[1] + offset_y
+                self.adb.click(real_x, real_y, random_offset=random_offset)
+                if click_wait > 0: self.sleep(click_wait)
+                return True
+            time.sleep(poll_interval)
+        return False
+
+    def start(self):
+        if self.running: return
+        self.stand_skip_index = 0
+        self.in_staff_shortage_mode = False
+        self._next_staff_recovery_probe_time = 0.0
+        self.last_checked_avail_staff = -1
+        self.last_window_close_time = time.time()
+        # 同步 Web 面板状态（当前实例）
+        if _WEB_PANEL_AVAILABLE and _wp_bot_states is not None:
+            s = _wp_bot_states.setdefault(self.instance_id, {"running": False, "paused": False, "log": "", "label": f"实例 {self.instance_id}", "screenshot_path": f"latest_frame_{self.instance_id}.jpg"})
+            s["running"] = True
+            s["paused"] = False
+        # 初始化计数器
+        self.consecutive_timeout_count = 0
+        self.consecutive_errors = 0
+        self.last_recovery_time = 0
+        self._next_interface_check_time = 0.0
+        self._anti_stuck_warn_threshold = max(3, int(self._anti_stuck_warn_threshold))
+        self._anti_stuck_stop_threshold = max(self._anti_stuck_warn_threshold, int(self._anti_stuck_stop_threshold))
+        self._anti_stuck_hard_stop_threshold = max(self._anti_stuck_stop_threshold + 2, int(self._anti_stuck_hard_stop_threshold))
+        self._anti_stuck_trigger_count = 0
+        self._anti_stuck_stop_requested = False
+        self._no_operable_count = 0
+        # 重置塔台状态
+        self._tower_disabled = False
+        self._tower_was_active = False
+        self._tower_off_force_mode1 = False
+        self._tower_delay_deadline = 0.0
+        self._tower_active_slots = [False, False, False, False]
+        self._tower_none_read_count = 0
+
+        if not self.target_device:
+            self.log("❌ 未选择设备！")
+            return
+        self.running = True
+        self.log(f">>> 连接设备: {self.target_device} ...")
+        try:
+            self.adb = AdbController(
+                target_device=self.target_device,
+                control_method=self.control_method,
+                screenshot_method=self.screenshot_method,
+                instance_id=self.instance_id,
+            )
+            self.adb.set_mumu_path(self.mumu_path)
+            method_probe = self.adb.ensure_methods_usable()
+            if self.config_callback:
+                self.adb.set_nemu_folder_callback(
+                    lambda folder: self.config_callback("mumu_path", folder)
+                )
+            self.adb.set_thinking_strategy(*self.thinking_range)
+            self.ocr = SimpleOCR(self.adb, self.icon_path)
+            self.log("✅ OCR 模块已加载")
+            test_img = self.adb.get_screenshot()
+            if test_img is None:
+                self.log("❌ 连接成功但无法获取画面！")
+                self.running = False
+                try:
+                    if self.adb:
+                        self.adb.close()
+                except Exception:
+                    pass
+                return
+            h, w = test_img.shape[:2]
+            res_info = self.adb.get_resolution_info() if hasattr(self.adb, 'get_resolution_info') else None
+            if res_info:
+                raw_w, raw_h = res_info.get('raw', (w, h))
+                self.log(f"✅ 画面正常，脚本启动 (设备分辨率: {raw_w}x{raw_h} -> 逻辑分辨率: {w}x{h})")
+            else:
+                self.log(f"✅ 画面正常，脚本启动 (逻辑分辨率: {w}x{h})")
+            ctrl_map = {"adb": "ADB", "uiautomator2": "uiautomator2"}
+            ctrl = ctrl_map.get(self.adb.control_method, "ADB")
+            shot = self.adb.screenshot_method if self.adb.screenshot_method != "adb" else "ADB"
+            self.log(f">>> [模式] 触控: {ctrl}, 截图: {shot}")
+            if method_probe.get("repaired"):
+                self.log(">>> [模式] 已自动修复不可用方案，当前使用稳定回退组合")
+            if os.environ.get("WOA_DEBUG", "").strip().lower() in ("1", "true", "yes"):
+                try:
+                    debug_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "woa_debug") if not getattr(sys, "frozen", False) else os.path.join(os.path.dirname(sys.executable), "woa_debug")
+                    self.log(f">>> [WOA_DEBUG] 已开启，仅在启动时执行方案测试，结果保存至: {debug_dir}")
+                except Exception:
+                    self.log(">>> [WOA_DEBUG] 已开启，仅在启动时执行方案测试")
+                self.log(">>> [WOA_DEBUG] 正在进行截图与触控方案测试...")
+                self.adb.run_all_method_tests()
+                woa_debug_set_runtime_started()
+                self.log(">>> [WOA_DEBUG] 方案测试完成，开始主循环")
+                os.environ.pop("WOA_DEBUG", None)
+            thread = threading.Thread(target=self._main_loop)
+            thread.daemon = True
+            self._worker_thread = thread
+            thread.start()
+        except Exception as e:
+            self.log(f"❌ 启动失败: {e}")
+            self.running = False
+            try:
+                if hasattr(self, 'adb') and self.adb:
+                    self.adb.close()
+            except Exception:
+                pass
+
+    def stop(self):
+        self.running = False
+        self.paused = False  # 停止时清除暂停状态
+        # 同步 Web 面板状态（当前实例）
+        if _WEB_PANEL_AVAILABLE and _wp_bot_states is not None and self.instance_id in _wp_bot_states:
+            _wp_bot_states[self.instance_id]["running"] = False
+            _wp_bot_states[self.instance_id]["paused"] = False
+        self.log(">>> 正在停止脚本...")
+        self._print_session_stats()
+        self._save_stats_to_csv()
+        self.next_bonus_retry_time = 0
+        adb_ref = getattr(self, 'adb', None)
+        if adb_ref:
+            threading.Thread(target=self._async_close_adb, args=(adb_ref,), daemon=True).start()
+        # 清理模板缓存与强制 GC，释放多开场景下的内存占用
+        try:
+            if adb_ref:
+                adb_ref._template_cache.clear()
+        except Exception:
+            pass
+        import gc
+        gc.collect()
+
+    def _show_sponsor_notice(self, hours=0):
+        """输出醒目赞助公告（GUI 终端自动渲染为金色加粗，跨平台兼容）。
+        hours=0 表示首次启动，>0 表示已运行时长。"""
+        W = 58  # 框内宽度（两个 ║ 之间的字符数）
+        B = lambda s: f"║{s:<{W}}║"  # 左对齐自动补齐到 W 宽度
+
+        self.log("")
+        self.log(f"╔{'═' * W}╗")
+        self.log(B(""))
+        self.log(B("  ⭐  WOA AutoBot — 永久免费开源项目  ⭐"))
+        self.log(B(""))
+        self.log(B("  若本脚本对您有帮助，欢迎自愿赞助支持维护与开发更新"))
+        self.log(B("  赞助方式：闲鱼搜索用户「MythZx」或主界面赞助窗口"))
+        self.log(B("  官方仓库：github.com/hjtr7mymht-dot/WOA_AutoBot"))
+        self.log(B("  QQ 反馈群：1067076460"))
+        self.log(B(""))
+        if hours > 0:
+            self.log(B(f"  已连续运行 {hours} 小时，感谢您的信任与支持！"))
+        else:
+            self.log(B("  感谢您的使用，本工具将努力为您提供稳定服务！"))
+        self.log(B(""))
+        self.log(f"╚{'═' * W}╝")
+        self.log("")
+
+    def pause(self):
+        """暂停脚本运行，保留所有状态，可通过 resume() 恢复。"""
+        if not self.running:
+            return
+        if self.paused:
+            return
+        self.paused = True
+        # 同步 Web 面板状态（当前实例）
+        if _WEB_PANEL_AVAILABLE and _wp_bot_states is not None and self.instance_id in _wp_bot_states:
+            _wp_bot_states[self.instance_id]["paused"] = True
+        self.log("⏸️ [暂停] 脚本已暂停，点击「继续」恢复运行")
+
+    def resume(self):
+        """恢复暂停的脚本。"""
+        if not self.running:
+            return
+        if not self.paused:
+            return
+        self.paused = False
+        # 同步 Web 面板状态（当前实例）
+        if _WEB_PANEL_AVAILABLE and _wp_bot_states is not None and self.instance_id in _wp_bot_states:
+            _wp_bot_states[self.instance_id]["paused"] = False
+        # 重置界面检测计时，防止暂停期间累计的"未检测到主界面"触发防卡死
+        self.last_seen_main_interface_time = time.time()
+        self.last_periodic_check_time = 0.0
+        self.last_window_close_time = time.time()
+        self.log("▶️ [继续] 脚本已恢复运行")
+
+    def _print_session_stats(self):
+        start = self._run_start_time
+        if start is not None:
+            secs = max(0, int(time.time() - start))
+            h, rest = divmod(secs, 3600)
+            m, s = divmod(rest, 60)
+            if h > 0:
+                dur = f"{h}小时{m}分{s}秒"
+            else:
+                dur = f"{m}分{s}秒"
+            self.log(f"[统计] 本次运行时长: {dur}")
+        a = self._stat_session_approach
+        d = self._stat_session_depart
+        sc = self._stat_session_stand_count
+        ss = self._stat_session_stand_staff
+        if a + d + sc == 0:
+            return
+        self.log(f"[统计] ═══════════════════════════════════")
+        self.log(f"[统计]  ✈ 进场飞机:  {a} 架次")
+        self.log(f"[统计]  ✈ 离场飞机:  {d} 架次")
+        self.log(f"[统计]  ✈ 分配地勤:  {sc} 架次 / {ss} 人次")
+        self.log(f"[统计] ═══════════════════════════════════")
+
+    def _add_stats_to_csv_date(self, target_date, a, d, sc, ss):
+        """将 (a,d,sc,ss) 累加到 CSV 中 target_date 所在行。若 a+d+sc==0 则不写。
+        所有实例共用同一个 woa_stats.csv，使用文件锁防止并发写入冲突。
+        CSV 路径统一使用 get_app_data_dir()，与 GUI 端读取路径保持一致。"""
+        import csv
+        if a + d + sc == 0:
+            return
+        try:
+            from platform_utils import lock_file, unlock_file
+            from core.platform import get_app_data_dir
+            base_dir = get_app_data_dir()
+            os.makedirs(base_dir, exist_ok=True)
+            csv_path = os.path.join(base_dir, "woa_stats.csv")
+            lock_path = csv_path + ".lock"
+            header = ["date", "approach", "depart", "stand_count", "stand_staff"]
+            # 使用文件锁保证多实例安全
+            with open(lock_path, "w") as lf:
+                lf.write("1")
+                lf.flush()
+                lock_file(lf)
+                try:
+                    rows = []
+                    if os.path.isfile(csv_path):
+                        with open(csv_path, "r", encoding="utf-8-sig") as f:
+                            reader = csv.reader(f)
+                            for i, row in enumerate(reader):
+                                if i == 0 and row and row[0].strip().lower() == "date":
+                                    continue
+                                if len(row) >= 5:
+                                    rows.append(row)
+                    found = False
+                    for row in rows:
+                        if row[0] == target_date:
+                            row[1] = str(int(row[1]) + a)
+                            row[2] = str(int(row[2]) + d)
+                            row[3] = str(int(row[3]) + sc)
+                            row[4] = str(int(row[4]) + ss)
+                            found = True
+                            break
+                    if not found:
+                        rows.append([target_date, str(a), str(d), str(sc), str(ss)])
+                    with open(csv_path, "w", encoding="utf-8-sig", newline="") as f:
+                        writer = csv.writer(f)
+                        writer.writerow(header)
+                        writer.writerows(rows)
+                finally:
+                    unlock_file(lf)
+        except Exception as e:
+            self.log(f"⚠️ 保存统计数据失败: {e}")
+
+    def _save_stats_to_csv(self):
+        """停止时将当日累计写入 CSV（本次运行 0 点后的部分）"""
+        a, d, sc, ss = self._stat_approach, self._stat_depart, self._stat_stand_count, self._stat_stand_staff
+        today = time.strftime("%Y-%m-%d")
+        self._add_stats_to_csv_date(today, a, d, sc, ss)
+
+    @staticmethod
+    def _async_close_adb(adb):
+        try:
+            adb.close()
+        except Exception:
+            pass
+
+    def _main_loop(self):
+        try:
+            self._do_main_loop()
+        except StopSignal:
+            pass
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException:
+            self._write_thread_crash_report()
+            traceback.print_exc()
+
+    def _write_thread_crash_report(self):
+        """从工作线程安全地写入崩溃报告（不碰 tkinter）"""
+        try:
+            from gui_launcher import _write_crash_report
+            exc_type, exc_value, exc_tb = sys.exc_info()
+            if exc_type:
+                path = _write_crash_report(exc_type, exc_value, exc_tb)
+                if path:
+                    self.log(f"🛑 [严重错误] 脚本异常退出，日志已保存至: {path}")
+        except (ImportError, AttributeError):
+            exc_type, exc_value, _ = sys.exc_info()
+            self.log(f"🛑 [严重错误] 崩溃报告模块不可用: {exc_type.__name__ if exc_type else 'Unknown'}: {exc_value}")
+        except Exception:
+            traceback.print_exc()
+
+    def _do_main_loop(self):
+        self._run_start_time = time.time()
+        self._stat_date = time.strftime("%Y-%m-%d")
+        self.log("[DEBUG] 主循环线程已启动")
+        self.sleep(0.3)
+        self.last_periodic_check_time = 0.0
+        # 每小时醒目公告定时器（首次启动后 1 小时触发）
+        self._next_hourly_notice_time = time.time() + 3600.0
+        # 启动时显示赞助公告
+        self._show_sponsor_notice(0)
+        self._periodic_15s_check(force_initial_filter_check=True)
+        if self.enable_no_takeoff_mode:
+            self._schedule_no_takeoff_auto_logout()
+        if self.enable_standalone_logout:
+            self._schedule_standalone_logout()
+        # 启动时读取塔台倒计时
+        try:
+            self._init_tower_countdown()
+        except StopSignal:
+            raise
+        except Exception as e:
+            self.log(f"🗼 [塔台] ⚠️ 初始化塔台失败: {e}，跳过")
+            self._tower_disabled = True
+        idle_count = 0
+        gc_counter = 0
+        while self.running:
+            try:
+                # ── 暂停检查（最高优先级）──
+                self._check_paused()
+                
+                if self._handle_server_error_popup():
+                    idle_count = 0
+                    continue
+
+                # ── 类别轮换（最高优先级，每轮主循环都检查）──
+                now_ts = time.time()
+                # 优先处理来自 set_category_processing 的"切回全部"请求
+                if self._pending_switch_to_all:
+                    self._pending_switch_to_all = False
+                    self._switch_to_category(-1)
+                elif self.enable_category_processing:
+                    any_enabled = any(self.category_selection.get(c["key"], False) for c in SIDEBAR_CATEGORIES)
+                    if any_enabled and now_ts >= self._next_category_switch_time:
+                        enabled_count = sum(1 for c in SIDEBAR_CATEGORIES if self.category_selection.get(c["key"], False))
+                        if enabled_count >= 2:
+                            idx, label = self._cycle_to_next_category()
+                            self._next_category_switch_time = now_ts + self.category_cycle_interval
+                            self.log(f"📂 [类别] 切换处理类别 → {label}")
+                        else:
+                            # 仅 1 个类别 → 确保选中，不进入轮换循环
+                            self._cycle_to_next_category()
+                    elif not any_enabled and self._current_category_index != -1:
+                        self._switch_to_category(-1)
+                elif self._current_category_index != -1:
+                    self._switch_to_category(-1)
+                now_date = time.strftime("%Y-%m-%d")
+                if self._stat_date and now_date != self._stat_date:
+                    a, d, sc, ss = self._stat_approach, self._stat_depart, self._stat_stand_count, self._stat_stand_staff
+                    self._add_stats_to_csv_date(self._stat_date, a, d, sc, ss)
+                    if a + d + sc > 0:
+                        self.log(f"[统计] 已跨 0 点，将 {self._stat_date} 的统计写入 CSV（进场 {a} / 离场 {d} / 地勤 {sc} 架 {ss} 人次）")
+                    self._stat_approach = 0
+                    self._stat_depart = 0
+                    self._stat_stand_count = 0
+                    self._stat_stand_staff = 0
+                    self._stat_date = now_date
+                if self._is_module_enabled('lifecycle'):
+                    now_ts = time.time()
+                    # 每小时醒目公告
+                    if now_ts >= self._next_hourly_notice_time:
+                        self._next_hourly_notice_time = now_ts + 3600.0
+                        hours = int((now_ts - self._run_start_time) / 3600)
+                        self._show_sponsor_notice(hours)
+                    # 请求切换回模式1（来自配置变更）
+                    if self._request_switch_mode1:
+                        self._request_switch_mode1 = False
+                        self._force_switch_filter_mode1()
+                    # 不起飞模式：自动小退
+                    if (self.enable_no_takeoff_mode and
+                        self._no_takeoff_auto_logout_next_time > 0 and
+                        now_ts >= self._no_takeoff_auto_logout_next_time):
+                        self.log("📋 [不起飞] 到达自动小退间隔，执行小退")
+                        self._do_no_takeoff_small_logout()
+                        self._schedule_no_takeoff_auto_logout()
+                    # 独立小退
+                    if (self.enable_standalone_logout and
+                        self._standalone_logout_next_time > 0 and
+                        now_ts >= self._standalone_logout_next_time):
+                        self.log("📋 [小退] 独立小退触发")
+                        self._do_no_takeoff_small_logout()
+                        self._schedule_standalone_logout()
+                    # 塔台倒计时
+                    if self._check_tower_countdown():
+                        idle_count = 0
+                        continue
+                if self._maybe_daily_silver_gold():
+                    idle_count = 0
+                    continue
+                did_work = self.scan_and_process() if self._is_module_enabled('scanner') else False
+                if did_work:
+                    # 任务完成 → 极速继续扫描
+                    self.sleep(0.008)
+                    idle_count = 0
+                else:
+                    if self._is_module_enabled('idle_recovery'):
+                        # 自适应空闲：短缺模式下放宽间隔降低 CPU
+                        if self.in_staff_shortage_mode:
+                            self.sleep(0.06)
+                        else:
+                            self.sleep(0.030)
+                        idle_count += 1
+                        # 约 1.5s 无任务 → 关窗防止卡在过渡界面
+                        if idle_count >= 50:
+                            self.close_window()
+                            idle_count = 0
+                    else:
+                        self.sleep(0.020)
+                        idle_count = 0
+                # GC 频率降低，减少卡顿感
+                gc_counter += 1
+                if gc_counter > 200:
+                    gc.collect()
+                    gc_counter = 0
+            except StopSignal:
+                self.log(">>> [系统] 停止指令，终止...")
+                break
+            except (KeyboardInterrupt, SystemExit):
+                break
+            except Exception as e:
+                # 出现异常，打印堆栈
+                traceback.print_exc()
+                error_msg = f"❌ 运行出错: {e}"
+                self.log(error_msg)
+                
+                # 如果连续出错，主动触发系统的异常处理逻辑（生成报告并重启或停止）
+                self.consecutive_errors += 1
+                
+                if self.consecutive_errors >= 6:
+                    self.log("🛑 检测到持续报错，脚本将终止运行以防止僵死状态")
+                    self._write_thread_crash_report()
+                    self.running = False
+                    break
+                
+                try:
+                    self.sleep(1.5)
+                except (StopSignal, KeyboardInterrupt, SystemExit):
+                    break
+                except Exception:
+                    break
+            else:
+                # 如果成功运行一轮，重置连续错误计数
+                self.consecutive_errors = 0
+        self.log(">>> 脚本已完全停止")
+        try:
+            if hasattr(self, 'adb') and self.adb:
+                self.adb.close()
+        except Exception:
+            pass
+
+    def random_sleep(self, min_s, max_s):
+        self._check_running()
+        self.sleep(random.uniform(min_s, max_s))
+        self._check_running()
+
+    def sleep(self, seconds):
+        end_time = time.time() + seconds
+        while time.time() < end_time:
+            self._check_running()
+            remaining = end_time - time.time()
+            sleep_time = min(0.1, remaining)
+            if sleep_time > 0: time.sleep(sleep_time)
+
+    def close_window(self):
+        if self.adb is None:
+            return
+        self.adb.double_click(self.CLOSE_X, self.CLOSE_Y, random_offset=30)
+        self.last_window_close_time = time.time()
+        self.sleep(0.05)
+
+    def find_and_click(self, image_name, confidence=0.78, wait=0.35, random_offset=10):
+        self._check_running()
+        screen = self.adb.get_screenshot_cached(max_age_ms=40)
+        if screen is None: return False
+        search_img = screen
+        offset_x, offset_y = 0, 0
+        if image_name in self.ICON_ROIS:
+            roi = self.ICON_ROIS[image_name]
+            x, y, w, h = roi
+            if y + h <= screen.shape[0] and x + w <= screen.shape[1]:
+                search_img = screen[y:y + h, x:x + w]
+                offset_x, offset_y = x, y
+        result = self.adb.locate_image(self.icon_path + image_name, confidence=confidence, screen_image=search_img)
+        if result:
+            self._check_running()
+            real_x = result[0] + offset_x
+            real_y = result[1] + offset_y
+            self.adb.click(real_x, real_y, random_offset=random_offset)
+            self.sleep(wait)
+            return True
+        return False
+
+    def safe_locate(self, image_name, confidence=0.8, region=None):
+        self._check_running()
+        if self.adb is None:
+            return None
+        if region is None:
+            return self.adb.locate_image(self.icon_path + image_name, confidence=confidence)
+        screen = self.adb.get_screenshot_cached(max_age_ms=40)
+        if screen is None: return None
+        x, y, w, h = region
+        x = max(0, int(x))
+        y = max(0, int(y))
+        if y + h > screen.shape[0] or x + w > screen.shape[1]:
+            return None
+        search_img = screen[y:y + h, x:x + w]
+        result = self.adb.locate_image(self.icon_path + image_name, confidence=confidence, screen_image=search_img)
+        if result:
+            return (result[0] + x, result[1] + y)
+        return None
+
+    def _iter_region_fallbacks(self, region, pad_x=0, pad_y=0):
+        x, y, w, h = region
+        candidates = [region]
+        if pad_x > 0 or pad_y > 0:
+            candidates.extend([
+                (x - pad_x, y - pad_y, w + pad_x * 2, h + pad_y * 2),
+                (x - pad_x, y, w + pad_x * 2, h),
+                (x, y - pad_y, w, h + pad_y * 2),
+                (x + pad_x // 2, y, w, h),
+                (x - pad_x // 2, y, w, h),
+            ])
+        unique = []
+        for candidate in candidates:
+            if candidate not in unique:
+                unique.append(candidate)
+        return unique
+
+    def check_global_staff(self, screen_image=None):
+        for region in self._iter_region_fallbacks(self.REGION_GLOBAL_STAFF, pad_x=18, pad_y=10):
+            text = self.ocr.recognize_number(region, mode='global', screen_image=screen_image)
+            if not text:
+                continue
+            result = self.ocr.parse_staff_count(text)
+            if result:
+                return result[2]
+        return None
+
+    def _verify_and_redirect(self, expected_status_img):
+        if self.enable_speed_mode: return True
+        status_map = [
+            ('status_stand.png', self.handle_stand_task),
+            ('status_takeoff.png', self.handle_takeoff_task),
+            ('status_taxiing.png', self.handle_taxiing_task),
+            ('status_approach.png', self.handle_approach_task),
+            ('pending_approach.png', self.handle_approach_task),
+            ('status_ice.png', self.handle_ice_task),
+            ('status_doing.png', self.handle_vehicle_check_task)
+        ]
+
+        # 构建别名：属于同一 handler 的图标互为等价
+        _handler_aliases = {}
+        for img, h in status_map:
+            _handler_aliases.setdefault(h, []).append(img)
+        _expected_aliases = _handler_aliases.get(
+            dict(status_map).get(expected_status_img), [expected_status_img])
+
+        x, y, w, h = self.REGION_STATUS_TITLE
+
+        def _scan_statuses(full_screen):
+            specs = [(img, img, 0.7, (x, y, w, h)) for img, _ in status_map]
+            return self._batch_locate_on_screen(full_screen, specs)
+
+        for attempt in range(2):
+            full_screen = self.adb.get_screenshot()
+            if full_screen is None: continue
+            status_hits = _scan_statuses(full_screen)
+            # 接受期望图标或其别名
+            if any(status_hits.get(alias) for alias in _expected_aliases):
+                return True
+            if attempt == 0:
+                self.sleep(0.08)
+
+        self.log(f"   -> 状态校验不匹配 ({expected_status_img})，尝试纠错...")
+        full_screen = self.adb.get_screenshot()
+        if full_screen is None: return False
+        status_hits = _scan_statuses(full_screen)
+        found = next((img for img, _ in status_map if status_hits.get(img)), None)
+        if found:
+            for img, handler in status_map:
+                if img == found:
+                    if img == 'status_doing.png' and time.time() <= self.doing_task_forbidden_until:
+                        self.log("   -> ⏳ Doing 任务尚在6秒冷却中，关闭窗口")
+                        self.close_window()
+                        return False
+                    self.log(f"   -> ↪️ 自动跳转至: {img}")
+                    try:
+                        handler()
+                    except TypeError:
+                        handler(None)
+                    return False
+        # 过渡画面可能还未完全渲染，稍等后最终尝试
+        self.sleep(0.15)
+        full_screen = self.adb.get_screenshot()
+        if full_screen is not None:
+            status_hits = _scan_statuses(full_screen)
+            if status_hits.get(expected_status_img):
+                return True
+            # 任何已知状态都接受，自行跳转
+            found = next((img for img, _ in status_map if status_hits.get(img)), None)
+            if found:
+                for img, handler in status_map:
+                    if img == found:
+                        if img == 'status_doing.png' and time.time() <= self.doing_task_forbidden_until:
+                            self.log("   -> ⏳ Doing 任务尚在6秒冷却中，关闭窗口")
+                            self.close_window()
+                            return False
+                        self.log(f"   -> ↪️ 自动跳转至: {img}")
+                        try:
+                            handler()
+                        except TypeError:
+                            handler(None)
+                        return False
+        self.log("   -> 未知状态，平滑退出")
+        self.close_window()
+        return False
+
+    def _update_staff_tracker(self, val):
+        if val is None:
+            if self.last_read_success:
+                self.log(f"⚠️ [状态监测] 可用地勤读取失败")
+                self.last_read_success = False
+            return
+        if not self.last_read_success:
+            self.log(f"📊 [状态监测] 读取恢复: {val}")
+            self.last_read_success = True
+            self.last_checked_avail_staff = val
+        elif val != self.last_checked_avail_staff:
+            if self.last_checked_avail_staff == -1:
+                self.log(f"📊 [状态监测] 当前可用地勤: {val}")
+            else:
+                self.log(f"📊 [状态监测] 可用地勤: {self.last_checked_avail_staff} -> {val}")
+            self.last_checked_avail_staff = val
+
+    def _read_tower_times(self, open_menu=True, fast=False, budget_start=None, budget_sec=None):
+        """OCR 读取四个控制器的倒计时，返回 [秒数, ...] 列表（读取失败的为 None）
+        open_menu=True 时智能判断是否需要关窗再打开塔台菜单；False 时假设菜单已打开。
+        注意：此方法不关闭菜单，由调用方负责。"""
+        def _budget_exhausted(guard=0.0):
+            if budget_start is None or budget_sec is None:
+                return False
+            return (time.time() - budget_start) >= max(0.0, budget_sec - guard)
+
+        if open_menu:
+            # 快速模式下尽量避免关窗，优先直接尝试打开塔台菜单。
+            if not fast:
+                if self._is_tower_icon_visible():
+                    self.log("🗼 [塔台] 塔台图标可见，直接打开菜单...")
+                else:
+                    self.log("🗼 [塔台] 塔台图标不可见，先关闭窗口...")
+                    self.close_window()
+                    self.sleep(0.25)
+            if not self._open_tower_menu(fast=fast, budget_start=budget_start, budget_sec=budget_sec):
+                return [None, None, None, None]
+        else:
+            if not fast:
+                self.log("🗼 [塔台] 菜单已打开，直接读取...")
+        times = [None, None, None, None]
+        raw_by_slot = [set() for _ in range(4)]
+        passes = 1 if fast else 2
+        for _ in range(passes):
+            if _budget_exhausted(guard=0.2):
+                break
+            screen = self.adb.get_screenshot()
+            if screen is None:
+                self.log("🗼 [塔台] ⚠️ 截图失败，无法读取控制器时间")
+                continue
+            for i, region in enumerate(self.TOWER_TIME_REGIONS):
+                best_secs = times[i]
+                candidates = list(self._iter_region_fallbacks(region, pad_x=(8 if fast else 12), pad_y=4))
+                if fast:
+                    candidates = candidates[:2]
+                for candidate in candidates:
+                    if _budget_exhausted(guard=0.15):
+                        break
+                    text = self.ocr.recognize_number(candidate, mode='task', screen_image=screen)
+                    if text:
+                        raw_by_slot[i].add(text)
+                    secs = self.ocr.parse_tower_time(text)
+                    if secs is None:
+                        continue
+                    # 取更大值可减少 OCR 漏位把 8m35s 误读成 35s 的情况。
+                    if best_secs is None or secs > best_secs:
+                        best_secs = secs
+                times[i] = best_secs
+            if all(v is not None for v in times):
+                break
+            if not fast:
+                self.sleep(0.12)
+            else:
+                self.sleep(0.03)
+
+        if not fast:
+            for i in range(4):
+                if times[i] is not None:
+                    self.log(f"   塔台控制器 {i+1}: {times[i]}s")
+                else:
+                    raw_preview = ", ".join(sorted(raw_by_slot[i])) if raw_by_slot[i] else "无"
+                    self.log(f"   塔台控制器 {i+1}: 无有效数字 (raw={raw_preview})")
+        return times
+
+    def _handle_server_error_popup(self, force=False):
+        """处理游戏内部错误弹窗，检测到 `error_ok.png` 时自动点击“好的”。"""
+        now = time.time()
+        if not force and now - self._last_error_popup_check_ts < self._error_popup_check_interval:
+            return False
+        self._last_error_popup_check_ts = now
+
+        screen = self.adb.get_screenshot()
+        ok_pos = self._locate_on_screen('error_ok.png', screen, confidence=0.75)
+        if not ok_pos:
+            return False
+
+        self.log("⚠️ [异常弹窗] 检测到服务器错误弹窗，正在点击“好的”关闭...")
+        for _ in range(3):
+            self.adb.click(ok_pos[0], ok_pos[1], random_offset=8)
+            self.sleep(0.18)
+            next_screen = self.adb.get_screenshot()
+            next_ok = self._locate_on_screen('error_ok.png', next_screen, confidence=0.75)
+            if not next_ok:
+                self.log("✅ [异常弹窗] 错误弹窗已关闭")
+                return True
+            ok_pos = next_ok
+        self.log("⚠️ [异常弹窗] 尝试关闭失败，将在后续循环继续处理")
+        return True
+
+    def _open_tower_menu(self, fast=False, budget_start=None, budget_sec=None):
+        """点击(646,822)打开塔台菜单，并通过 ROI 内检测 tower_1.png 校验是否成功。
+        最多重试2次（间隔2s），返回 True/False。"""
+        import cv2
+        def _budget_exhausted(guard=0.0):
+            if budget_start is None or budget_sec is None:
+                return False
+            return (time.time() - budget_start) >= max(0.0, budget_sec - guard)
+
+        max_attempts = 1 if fast else 2
+        click_wait = 0.18 if fast else 0.45
+        retry_wait = 0.12 if fast else 0.5
+        for attempt in range(max_attempts):
+            if _budget_exhausted(guard=0.2):
+                break
+            self.adb.click(646, 822)
+            self.sleep(click_wait)
+            screen = self.adb.get_screenshot()
+            if screen is not None:
+                # ROI: (32,271) 到 (90,327)
+                roi = screen[271:327, 32:90]
+                tpl_path = self.icon_path + 'tower_1.png'
+                tpl = self.adb._template_cache.get(tpl_path)
+                if tpl is None:
+                    tpl = self.adb._read_image_safe(tpl_path)
+                    if tpl is not None:
+                        self.adb._template_cache[tpl_path] = tpl
+                if tpl is not None:
+                    result = cv2.matchTemplate(roi, tpl, cv2.TM_CCOEFF_NORMED)
+                    _, max_val, _, _ = cv2.minMaxLoc(result)
+                    if max_val >= 0.8:
+                        return True
+            if attempt < max_attempts - 1:
+                self.log(f"🗼 [塔台] 菜单未打开，{attempt+1}/2 次重试...")
+                self.sleep(retry_wait)
+        self.log("🗼 [塔台] ⚠️ 菜单打开失败，2次尝试均未检测到 tower_1.png")
+        return False
+
+    def _close_tower_menu(self, fast=False):
+        """关闭塔台菜单"""
+        timeout = 0.45 if fast else 1.4
+        click_wait = 0.08 if fast else 0.25
+        self.log("🗼 [塔台] 关闭塔台菜单...")
+        if not self.wait_and_click('back.png', timeout=timeout, click_wait=click_wait, random_offset=2):
+            self.log("🗼 [塔台] 未找到返回按钮，使用 close_window 关闭")
+            self.close_window()
+
+    def _init_tower_countdown(self):
+        """启动时读取塔台倒计时，判断哪些控制器活跃，设置定时器。
+        先通过 tower.png 可见性 + 像素灰度判断塔台是否关闭，避免不必要的菜单操作。"""
+        self.log("🗼 [塔台] 启动初始化：检测塔台图标...")
+        # 第一步：检测 ROI 内是否有 tower.png
+        icon_visible = self._is_tower_icon_visible()
+        if not icon_visible:
+            # 图标不可见，可能被窗口遮挡，先关窗再检测
+            self.log("🗼 [塔台] 塔台图标不可见，尝试关闭窗口后重新检测...")
+            self.close_window()
+            self.sleep(0.5)
+            icon_visible = self._is_tower_icon_visible()
+        if not icon_visible:
+            # 关窗后仍不可见，无法确认塔台状态，跳过
+            self.log("🗼 [塔台] 关窗后塔台图标仍不可见，无法确认塔台状态，跳过初始化")
+            return
+        # 第二步：图标可见，用像素检测判断塔台是否全灰（关闭）
+        screen = self.adb.get_screenshot()
+        if screen is not None and self._is_tower_off(screen):
+            self._tower_disabled = True
+            self._tower_delay_deadline = 0.0
+            self._tower_active_slots = [False, False, False, False]
+            self.log("🗼 [塔台] 塔台图标全灰，判定塔台已关闭，不打开菜单")
+            if self.enable_no_takeoff_mode:
+                self.log("⚠️ [塔台] 不起飞模式已开启但塔台未开启，建议打开塔台控制器4以处理推出")
+            return
+        if not self._is_main_interface_ready(retries=2, interval=0.15):
+            self._tower_delay_deadline = time.time() + 12.0
+            self.log("🗼 [塔台] 当前非主界面，初始化延后 12s 再检测")
+            return
+        # 第三步：塔台非灰色，打开菜单读取时间
+        self.log("🗼 [塔台] 塔台图标可见且非灰色，打开菜单读取控制器状态...")
+        if not self._open_tower_menu():
+            self.log("🗼 [塔台] ⚠️ 菜单打开失败，跳过初始化")
+            self._close_tower_menu()
+            return
+        times = self._read_tower_times(open_menu=False)
+        # 判断活跃状态
+        active = [t is not None and t > 0 for t in times]
+        active_count = sum(active)
+        self.log(f"🗼 [塔台] OCR 结果: {times}，活跃数: {active_count}/4")
+        if active_count == 0:
+            self._tower_disabled = True
+            self._tower_delay_deadline = 0.0
+            self._tower_active_slots = [False, False, False, False]
+            self.log("🗼 [塔台] 四个控制器均未开启，塔台已关闭，以后不再打开菜单")
+            if self.enable_no_takeoff_mode:
+                self.log("⚠️ [塔台] 不起飞模式已开启但塔台未开启，建议打开塔台控制器4以获得最佳效果")
+            self._close_tower_menu()
+            return
+        self._tower_active_slots = active
+        self._tower_disabled = False
+        self._tower_was_active = True
+        slots_str = ",".join([str(i+1) for i, a in enumerate(active) if a])
+        valid_times = [t for t, a in zip(times, active) if a]
+        min_time = min(valid_times)
+        max_time = max(valid_times)
+        if self.auto_delay_count > 0:
+            # 任意活跃控制器 < 3min → 立即「全部激活」
+            urgent_slots = [i+1 for i in range(4) if active[i] and times[i] is not None and times[i] < 180]
+            if urgent_slots:
+                self.log(f"🗼 [塔台] ⚠️ 控制器 {urgent_slots} 剩余不足3分钟，立即全部激活！")
+                self._perform_tower_delay(menu_already_open=True)
+                return
+            # 提前3分钟触发
+            trigger_in = max(0, min_time - 180)
+            self._tower_delay_deadline = time.time() + trigger_in
+            mins, secs = divmod(int(min_time), 60)
+            self.log(f"🗼 [塔台] 自动延时(剩余{self.auto_delay_count}次)，活跃: [{slots_str}]")
+            self.log(f"🗼 [塔台] 最短剩余 {mins}m{secs}s，将在 {int(trigger_in)}s 后触发延时检查")
+        else:
+            # 自动延时未开启：在最长时间到期后+10s 再打开菜单确认状态
+            trigger_in = max_time + 10
+            self._tower_delay_deadline = time.time() + trigger_in
+            mins, secs = divmod(int(max_time), 60)
+            self.log(f"🗼 [塔台] 自动延时未开启，活跃控制器: [{slots_str}]")
+            self.log(f"🗼 [塔台] 最长剩余 {mins}m{secs}s，将在 {int(trigger_in)}s 后重新确认塔台状态")
+        self._close_tower_menu()
+
+    def _check_tower_countdown(self):
+        """定期检查塔台倒计时：
+        - 监控模式 (delay=0): 打开菜单确认塔台状态，更新活跃槽位
+        - 延时模式 (delay>0): 到期 → 打开菜单 → 点击「全部激活」"""
+        monitor_start = time.time()
+        monitor_budget = self.TOWER_MONITOR_MAX_SEC
+
+        if self._tower_delay_deadline <= 0:
+            if self.auto_delay_count > 0:
+                try:
+                    self._init_tower_countdown()
+                except Exception as e:
+                    self.log(f"🗼 [塔台] ⚠️ 重新初始化失败: {e}")
+            if self._tower_delay_deadline <= 0 or self._tower_disabled:
+                return False
+        if time.time() < self._tower_delay_deadline:
+            return False
+        if not self._is_main_interface_ready(retries=1, interval=0.08):
+            self._tower_delay_deadline = time.time() + 8.0
+            self.log("🗼 [塔台] 不在主界面，延后 8s")
+            return False
+        if not self._is_tower_icon_visible():
+            self._tower_delay_deadline = time.time() + 5.0
+            self.log("🗼 [塔台] 未检测到塔台图标，延后 5s")
+            return False
+        self._tower_delay_deadline = 0.0
+
+        # ─── 监控模式：仅确认塔台状态 ───
+        if self.auto_delay_count <= 0:
+            self.log("🗼 [塔台] 监控到期，打开菜单确认状态...")
+            times = self._read_tower_times(open_menu=True, fast=True,
+                                           budget_start=monitor_start, budget_sec=monitor_budget)
+            active = [t is not None and t > 0 for t in times]
+            active_count = sum(active)
+            self.log(f"🗼 [塔台] OCR: {times}，活跃: {active_count}/4")
+
+            if active_count == 0:
+                if any(t is None for t in times) and any(self._tower_active_slots):
+                    self._tower_none_read_count += 1
+                    if self._tower_none_read_count >= 3:
+                        self.log("🗼 [塔台] 连续3次OCR空，判定塔台已关闭")
+                        self._tower_disabled = True
+                        self._tower_active_slots = [False, False, False, False]
+                        self._tower_none_read_count = 0
+                        if self._tower_was_active and self.enable_cancel_stand_filter:
+                            self._tower_off_force_mode1 = True
+                    else:
+                        self._tower_delay_deadline = time.time() + 8.0
+                        self._close_tower_menu(fast=True)
+                        return True
+                else:
+                    self._tower_none_read_count = 0
+                    self._tower_disabled = True
+                    self._tower_active_slots = [False, False, False, False]
+                    self.log("🗼 [塔台] 全部关闭")
+                    if self._tower_was_active and self.enable_cancel_stand_filter:
+                        self._tower_off_force_mode1 = True
+            else:
+                self._tower_none_read_count = 0
+                self._tower_active_slots = active
+                valid_times = [t for t, a in zip(times, active) if a]
+                max_time = max(valid_times)
+                self._tower_delay_deadline = time.time() + max_time + 10
+                slots_str = ",".join(str(i+1) for i, a in enumerate(active) if a)
+                self.log(f"🗼 [塔台] 活跃: [{slots_str}]，{int(max_time)}s 后再次确认")
+            self._close_tower_menu(fast=True)
+            return True
+
+        # ─── 延时模式：到期 → 打开菜单 → 全部激活 → OCR 验证 ───
+        self.log("🗼 [塔台] 延时倒计时到期，打开菜单...")
+        times = self._read_tower_times(open_menu=True, fast=True,
+                                       budget_start=monitor_start, budget_sec=monitor_budget)
+        active = [t is not None and t > 0 for t in times]
+        if sum(active) == 0:
+            if any(t is None for t in times) and any(self._tower_active_slots):
+                self._tower_delay_deadline = time.time() + 8.0
+                self._close_tower_menu(fast=True)
+                return True
+            self._tower_disabled = True
+            self._tower_active_slots = [False, False, False, False]
+            self.log("🗼 [塔台] 全部关闭")
+            if self._tower_was_active and self.enable_cancel_stand_filter:
+                self._tower_off_force_mode1 = True
+            self._close_tower_menu(fast=True)
+            return True
+
+        self._tower_active_slots = active
+        self.log(f"🗼 [塔台] 活跃: {[i+1 for i,a in enumerate(active) if a]}，OCR: {times}")
+
+        # 判断是否需要延时：任一活跃控制器 < 10min
+        any_need = any(active[i] and times[i] is not None and times[i] < 600 for i in range(4))
+        if not any_need:
+            valid_times = [t for t, a in zip(times, active) if a and t is not None and t > 0]
+            if valid_times:
+                self._tower_delay_deadline = time.time() + max(0, min(valid_times) - 600)
+                self.log(f"🗼 [塔台] 均>=10min，{int(max(0,min(valid_times)-600))}s后重检")
+            self._close_tower_menu(fast=True)
+            return True
+
+        # 执行「全部激活」
+        self.log("🗼 [塔台] 检测到需要延时，执行「全部激活」")
+        self._perform_tower_delay(menu_already_open=True)
+        self._close_tower_menu(fast=True)
+
+    # ========== 塔台延时：全部激活策略 ==========
+
+    def _do_delay_all(self):
+        """点击「全部激活」按钮并确认延时弹窗（含二次确认）。返回 True/False。
+        流程：全部激活 → 一次确认(delay/delay_1) → 二次确认(yes.png@715,546)"""
+        self.log("   🗼 点击「全部激活」按钮")
+        self.adb.click(*self.TOWER_DELAY_ALL_BTN)
+        self.sleep(0.5)
+
+        # ── 第一阶段：等待一次确认弹窗（delay.png / delay_1.png）──
+        t0 = time.time()
+        first_ok = False
+        while time.time() - t0 < 6.0:
+            self._check_running()
+            for btn in ('delay.png', 'delay_1.png'):
+                if self.wait_and_click(btn, timeout=0.5, click_wait=0.3, random_offset=2):
+                    first_ok = True
+                    break
+            if first_ok:
+                break
+            self.sleep(0.15)
+        if not first_ok:
+            self.log("   🗼 ⚠️ 一次确认弹窗未出现")
+            return False
+
+        # ── 第二阶段：等待二次确认弹窗（yes.png @ 715,546）──
+        self.sleep(0.4)
+        t1 = time.time()
+        second_ok = False
+        while time.time() - t1 < 5.0:
+            self._check_running()
+            screen = self.adb.get_screenshot()
+            if screen is not None:
+                yes_pos = self._locate_on_screen('yes.png', screen, confidence=0.75)
+                if yes_pos:
+                    # 点击二次确认按钮（优先使用模板匹配位置，回退到固定坐标）
+                    self.log("   🗼 点击二次确认 (yes.png)")
+                    self.adb.click(yes_pos[0], yes_pos[1], random_offset=8)
+                    self.sleep(0.4)
+                    # 验证弹窗消失
+                    verify = self.adb.get_screenshot()
+                    if verify is not None and not self._locate_on_screen('yes.png', verify, confidence=0.75):
+                        second_ok = True
+                        break
+                    # 仍在，用固定坐标点击重试
+                    self.adb.click(715, 546, random_offset=8)
+                    self.sleep(0.4)
+                    verify2 = self.adb.get_screenshot()
+                    if verify2 is not None and not self._locate_on_screen('yes.png', verify2, confidence=0.75):
+                        second_ok = True
+                        break
+                else:
+                    # 模板匹配未找到，尝试固定坐标盲点
+                    self.adb.click(715, 546, random_offset=8)
+                    self.sleep(0.4)
+                    verify3 = self.adb.get_screenshot()
+                    if verify3 is not None and not self._locate_on_screen('yes.png', verify3, confidence=0.75):
+                        second_ok = True
+                        break
+            self.sleep(0.3)
+
+        if second_ok:
+            self.log("   🗼 ✅ 二次确认完成")
+            return True
+
+        # ── 兜底：检查是否弹窗已自行消失 ──
+        screen = self.adb.get_screenshot()
+        if screen is not None:
+            has_delay = any(self._locate_on_screen(b, screen, confidence=0.75)
+                           for b in ('delay.png', 'delay_1.png', 'yes.png'))
+            if not has_delay:
+                self.log("   🗼 ℹ️ 确认弹窗已自行消失，视为成功")
+                return True
+
+        self.log("   🗼 ⚠️ 二次确认超时")
+        return False
+
+    def _check_delay_by_ocr(self, pre_times):
+        """OCR 对比延时前后时间：若任意活跃控制器时间变长则判定成功。"""
+        self.sleep(0.6)
+        post_times = self._read_tower_times(open_menu=False)
+        for i in range(4):
+            if not self._tower_active_slots[i]:
+                continue
+            before, after = pre_times[i], post_times[i]
+            if before is not None and after is not None and after > before:
+                self.log(f"🗼 OCR验证: 控制器{i+1} {before}s→{after}s ✅")
+                return True
+        return False
+
+    def _perform_tower_delay(self, menu_already_open=False):
+        """执行塔台延时：打开菜单(如需) → 点击「全部激活」→ 确认 → OCR 验证。
+        失败时最多关窗重试 2 次。
+        menu_already_open=True 时假设菜单已打开、无需关窗重开。"""
+        self.log(f"🗼 [塔台] 开始延时操作，菜单已打开: {menu_already_open}")
+        # 确保菜单打开
+        if not menu_already_open:
+            self.close_window()
+            self.sleep(0.3)
+            if not self._open_tower_menu():
+                self.log("🗼 [塔台] ⚠️ 菜单打开失败，30s 后再次尝试")
+                self._tower_delay_deadline = time.time() + 30
+                return
+
+        pre_times = self._read_tower_times(open_menu=False)
+        self.log(f"🗼 [塔台] 延时前时间: {pre_times}")
+
+        # 主流程：点击全部激活 → 确认 → OCR 验证
+        ok = self._do_delay_all()
+        if not ok:
+            ok = self._check_delay_by_ocr(pre_times)
+
+        # 重试：关窗后重新点击（最多 2 次）
+        for retry in range(2):
+            if ok:
+                break
+            self.log(f"🗼 [塔台] ⚠️ 延时未确认，关窗重试 ({retry+1}/2)...")
+            self.close_window()
+            self.sleep(0.5)
+            ok = self._do_delay_all()
+            if not ok:
+                ok = self._check_delay_by_ocr(pre_times)
+
+        # 重试失败：退回主界面，重新打开菜单（1 次）
+        if not ok:
+            self.log("🗼 [塔台] ⚠️ 关窗重试仍失败，退回主界面后重开菜单...")
+            self.close_window()
+            self.sleep(0.3)
+            self.wait_and_click('back.png', timeout=3.0, click_wait=0.5, random_offset=2)
+            self.sleep(0.5)
+            if self._open_tower_menu():
+                ok = self._do_delay_all()
+                if not ok:
+                    ok = self._check_delay_by_ocr(pre_times)
+
+        # 延时后处理
+        if ok:
+            self.auto_delay_count -= 1
+            if self.config_callback:
+                self.config_callback("auto_delay_count", self.auto_delay_count)
+            self.log(f"🗼 [塔台] ✅ 全部激活完成，剩余延时次数: {self.auto_delay_count}")
+            self.sleep(1.0)
+            times = self._read_tower_times(open_menu=False)
+            valid_times = [t for t, a in zip(times, self._tower_active_slots) if a and t is not None and t > 0]
+            if valid_times and self.auto_delay_count > 0:
+                trigger_in = max(0, min(valid_times) - 180)
+                self._tower_delay_deadline = time.time() + trigger_in
+                self.log(f"🗼 [塔台] 最短 {min(valid_times)}s，{int(trigger_in)}s 后下次延时")
+            elif valid_times:
+                trigger_in = max(valid_times) + 10
+                self._tower_delay_deadline = time.time() + trigger_in
+                self.log(f"🗼 [塔台] 延时次数用完，监控模式，{int(trigger_in)}s 后确认状态")
+            else:
+                self._tower_delay_deadline = 0.0
+                self.log("🗼 [塔台] ⚠️ 未读到有效时间")
+            self._close_tower_menu()
+        else:
+            self.log("🗼 [塔台] ❌ 全部重试失败，30s 后再次尝试")
+            self._tower_delay_deadline = time.time() + 30
+            self._close_tower_menu()
+
+    def _check_and_perform_auto_delay(self, screen=None):
+        """红灯最高优先级检测：发现任意塔台红灯 → 立即打开菜单 → 点击「全部激活」。"""
+        if self.auto_delay_count <= 0 or self._tower_disabled:
+            return False
+        if time.time() < self.doing_task_forbidden_until:
+            return False
+        if not self._is_tower_icon_visible():
+            return False
+
+        if screen is None:
+            screen = self.adb.get_screenshot()
+        if screen is None:
+            return False
+
+        is_triggered = False
+        for (x, y) in self.TOWER_CHECK_POINTS:
+            try:
+                b, g, r = screen[y, x]
+                if self._is_point_red(int(b), int(g), int(r)):
+                    is_triggered = True
+                    break
+            except Exception:
+                pass
+
+        if is_triggered:
+            self.log("🚨 [最高优] 监测到塔台红灯！立即打开菜单全部激活")
+            self.close_window()
+            self.sleep(0.3)
+            if not self._open_tower_menu():
+                self.log("🗼 [塔台] ⚠️ 红灯触发但菜单打开失败，跳过")
+                return True
+
+            times = self._read_tower_times(open_menu=False)
+            active = [t is not None and t > 0 for t in times]
+            self._tower_active_slots = active
+            self.log(f"🗼 [塔台] 活跃: {[i+1 for i,a in enumerate(active) if a]}，OCR: {times}")
+
+            if any(active):
+                self._perform_tower_delay(menu_already_open=True)
+            else:
+                self._tower_delay_deadline = time.time() + 30
+                self._close_tower_menu()
+            return True
+        return False
+
+    def _exit_vehicle_buy_scene(self, max_rounds=4):
+        """尝试从车辆购买界面安全退回，避免在购买页卡死。"""
+        max_rounds = max(1, int(max_rounds))
+        for _ in range(max_rounds):
+            self._check_running()
+            screen = self.adb.get_screenshot()
+            if screen is None:
+                self.sleep(0.15)
+                continue
+
+            has_buy = self._locate_on_screen('buy_vehicle.png', screen, confidence=0.78)
+            has_confirm = self._locate_on_screen('buy_vehicle_confirm.png', screen, confidence=0.78)
+            if not has_buy and not has_confirm:
+                return True
+
+            # 依次尝试返回、取消和右上角关闭，尽量兼容不同弹窗层级。
+            if self.wait_and_click('back.png', timeout=0.9, click_wait=0.3, random_offset=2):
+                continue
+            if self.wait_and_click('cancel.png', timeout=0.9, click_wait=0.3):
+                continue
+            self.close_window()
+            self.sleep(0.25)
+
+        verify_screen = self.adb.get_screenshot()
+        if verify_screen is None:
+            return False
+        still_buy = self._locate_on_screen('buy_vehicle.png', verify_screen, confidence=0.78)
+        still_confirm = self._locate_on_screen('buy_vehicle_confirm.png', verify_screen, confidence=0.78)
+        return not (still_buy or still_confirm)
+
+    def handle_vehicle_check_task(self, target_pos=None):
+        self.sleep(0.2)
+        self.log(">>> [任务] 检查 Doing 状态...")
+        screen = self.adb.get_screenshot()
+        batch_hits = self._batch_locate_on_screen(screen, [
+            ('red_warning', 'red_warning.png', 0.75, None),
+            ('ground_done', 'ground_support_done.png', 0.8, self.REGION_BOTTOM_ROI),
+        ])
+        red_warn = batch_hits.get('red_warning')
+        if red_warn:
+            self._no_operable_count = 0
+            if self.enable_vehicle_buy:
+                self.log("   -> 🚨 发现车辆不足，准备购买")
+                self.adb.click(red_warn[0], red_warn[1], random_offset=6)
+                self.sleep(0.5)
+                bought = False
+                if self.wait_and_click('buy_vehicle.png', timeout=2.0, click_wait=1.0):
+                    if self.wait_and_click('buy_vehicle_confirm.png', timeout=3.0, click_wait=0.5):
+                        self.log("   -> ✅ 购买确认成功")
+                        bought = True
+                    elif self.wait_and_click('back.png', timeout=3.0, click_wait=0.5, random_offset=2):
+                        self.log("   -> 🛑 金钱不足，取消购买")
+                        self.enable_vehicle_buy = False
+                        if self.config_callback: self.config_callback("vehicle_buy", False)
+                else:
+                    self.log("   -> 未找到购买按钮")
+                if not self._exit_vehicle_buy_scene():
+                    self.log("⚠️ [Doing] 购买界面未能正常退出，触发临时冷却避免循环卡死")
+                    self.doing_task_forbidden_until = time.time() + 8.0
+                    return False
+                self.close_window()
+                return True if bought else False
+            else:
+                self.log("   -> 🚨 发现车辆不足但未开启购买，跳过当前任务")
+                self.close_window()
+                return False
+        if screen is not None:
+            res_done = batch_hits.get('ground_done')
+            if res_done:
+                self._no_operable_count = 0
+                self.log("   -> 🕒 发现延误/完成飞机")
+                if self.enable_delay_bribe:
+                    agent_loc = self._locate_on_screen('stand_agent_false.png', screen)
+                    if agent_loc:
+                        self.log("   -> [贿赂] 点击服务代理...")
+                        self.adb.click(agent_loc[0], agent_loc[1])
+                        self.sleep(0.25)
+                        bribe_ok = False
+                        verify_start = time.time()
+                        while time.time() - verify_start < 2.0:
+                            self._check_running()
+                            verify_screen = self.adb.get_screenshot()
+                            if self._locate_on_screen('stand_agent_true.png', verify_screen, confidence=0.8):
+                                bribe_ok = True
+                                break
+                            self.sleep(0.1)
+                        if bribe_ok:
+                            self.log("   -> [贿赂] 代理已激活")
+                        else:
+                            self.log("   -> [贿赂] 激活未确认，跳过结束服务避免误推出")
+                            self.close_window()
+                            return False
+                self.adb.click(res_done[0], res_done[1])
+                self.log("   -> ✅ 点击结束服务")
+                self.sleep(0.5)
+                return True
+        self._no_operable_count += 1
+        self.log(f"   -> 未发现可操作项目 ({self._no_operable_count}/{self._no_operable_threshold})")
+        self.close_window()
+        if self._no_operable_count >= self._no_operable_threshold:
+            self.log("📋 [调度] 未发现可操作项目达到阈值，切换下个任务")
+            self._no_operable_count = 0
+            return False
+        return True
+
+    def handle_approach_task(self, target_pos=None):
+        self.sleep(0.15 + random.uniform(0, 0.1))
+        # _verify_and_redirect 失败时已关窗，直接退出不继续
+        if not self._verify_and_redirect('status_approach.png'):
+            return False
+        self.log(">>> [任务] 处理进场...")
+
+        is_fast = getattr(self.adb, 'screenshot_method', 'adb') in ('nemu_ipc', 'uiautomator2')
+        # 延长超时：机位分配→确认→等待降落按钮需要更长时间
+        approach_deadline = time.time() + (3.0 if is_fast else 6.0) + random.uniform(0, 0.8)
+        assigned_stand = False
+        _stand_just_assigned = False  # 标记刚分配机位，跳过当轮 B 检测
+
+        def _rclick(x, y, r=8):
+            """拟人点击：高斯偏移 ±r px"""
+            self.adb.click(int(random.gauss(x, r/3)), int(random.gauss(y, r/3)))
+
+        def _rwait(base, jitter=0.08):
+            """拟人等待：base + 随机抖动"""
+            self.sleep(base + random.uniform(0, jitter))
+
+        while time.time() < approach_deadline:
+            self._check_running()
+            screen = self.adb.get_screenshot()
+            if screen is None:
+                time.sleep(random.uniform(0.06, 0.10))
+                continue
+
+            # ── 步骤 A：全屏检测机位选择界面 → 点击 ──
+            if not assigned_stand:
+                has_off = self.adb.locate_image(self.icon_path + 'stand_vacant_off.png',
+                                                confidence=0.7, screen_image=screen)
+                has_on  = self.adb.locate_image(self.icon_path + 'stand_vacant_on.png',
+                                                confidence=0.7, screen_image=screen)
+                if has_off or has_on:
+                    self.log("   -> 分配机位 @ (490,770)")
+                    _rclick(490, 770)
+                    _rwait(0.3)
+                    vfy = self.adb.get_screenshot()
+                    if vfy is not None and self.adb.locate_image(
+                        self.icon_path + 'stand_vacant_on.png', confidence=0.7, screen_image=vfy):
+                        self.log("   -> ✓ 机位已选中")
+                    assigned_stand = True
+                    _stand_just_assigned = True
+                    # 刚分配完机位，跳过本轮 B 检测（用的是旧截图），下一轮再查
+                    continue
+
+            # ── 步骤 B：已分配机位 → 全屏找确认/降落按钮 ──
+            if assigned_stand and not _stand_just_assigned:
+                # B1：全屏检查降落按钮
+                lp = self.adb.locate_image(self.icon_path + 'landing_permitted.png',
+                                           confidence=0.7, screen_image=screen)
+                if lp:
+                    _rclick(lp[0], lp[1])
+                    self._stat_approach += 1
+                    self._stat_session_approach += 1
+                    _rwait(0.05, 0.03)
+                    return True
+                lpro = self.adb.locate_image(self.icon_path + 'landing_prohibited.png',
+                                             confidence=0.65, screen_image=screen)
+                if lpro:
+                    self.log("   -> 🚫 跑道被占用，禁止降落")
+                    return True
+
+                # B2：全屏找确认按钮（降低阈值提高检出率）
+                sc = self._locate_on_screen('stand_confirm.png', screen, confidence=0.7)
+                if sc:
+                    self.log("   -> 点击确认机位")
+                    _rclick(sc[0], sc[1])
+                    _rwait(0.3, 0.1)
+
+                # B3：全屏等待降落按钮（循环中也检测 stand_confirm 兜底）
+                post_deadline = time.time() + (6.0 if is_fast else 10.0) + random.uniform(0, 1.5)
+                while time.time() < post_deadline:
+                    self._check_running()
+                    s2 = self.adb.get_screenshot()
+                    if s2 is None:
+                        time.sleep(random.uniform(0.08, 0.12)); continue
+                    if self._locate_on_screen('main_interface.png', s2,
+                                              confidence=0.8, region=self.REGION_MAIN_ANCHOR):
+                        self.log("   -> ℹ️ 窗口已关闭，判定为塔台接管")
+                        return True
+                    # B3 中也检测 stand_confirm，兜底 B2 可能的漏检
+                    sc2 = self._locate_on_screen('stand_confirm.png', s2, confidence=0.7)
+                    if sc2:
+                        self.log("   -> B3兜底：点击确认机位")
+                        _rclick(sc2[0], sc2[1])
+                        _rwait(0.3, 0.1)
+                        continue
+                    lp2 = self.adb.locate_image(self.icon_path + 'landing_permitted.png',
+                                                confidence=0.7, screen_image=s2)
+                    if lp2:
+                        _rclick(lp2[0], lp2[1])
+                        self._stat_approach += 1
+                        self._stat_session_approach += 1
+                        _rwait(0.05, 0.03)
+                        return True
+                    lpro2 = self.adb.locate_image(self.icon_path + 'landing_prohibited.png',
+                                                  confidence=0.65, screen_image=s2)
+                    if lpro2:
+                        self.log("   -> 🚫 跑道被占用，禁止降落")
+                        return True
+                    time.sleep(random.uniform(0.08, 0.12))
+                self.log("   -> ℹ️ 超时未检测到降落按钮，关闭窗口")
+                self.close_window()
+                return True
+
+            # 清除"刚分配"标记（下一轮正常进入 B 检测）
+            if _stand_just_assigned:
+                _stand_just_assigned = False
+
+            # ── 步骤 C：全屏搜 landing_permitted（飞机已有停机位）──
+            lp = self.adb.locate_image(self.icon_path + 'landing_permitted.png',
+                                       confidence=0.7, screen_image=screen)
+            if lp:
+                _rclick(lp[0], lp[1])
+                self._stat_approach += 1
+                self._stat_session_approach += 1
+                _rwait(0.05, 0.03)
+                return True
+
+            time.sleep(random.uniform(0.06, 0.10))
+
+        self.log("⚠️ 进场超时")
+        self.close_window()
+        self.sleep(1.0 + random.uniform(0, 0.3))
+        return False
+
+    def handle_taxiing_task(self, target_pos=None):
+        self.sleep(0.2)
+        if not self._verify_and_redirect('status_taxiing.png'): return True
+        self.log(">>> [任务] 处理跑道穿越...")
+        taxi_timeout = 1.0 if getattr(self.adb, 'screenshot_method', 'adb') in ('nemu_ipc', 'uiautomator2') else 3.0
+        if self.wait_and_click('cross_runway.png', timeout=taxi_timeout, click_wait=0): return True
+        self.log("⚠️ 未找到按钮")
+        self.close_window()
+        return False
+
+    def handle_takeoff_task(self, target_pos=None):
+        self.sleep(0.2)
+        if not self._verify_and_redirect('status_takeoff.png'): return True
+        self.log(">>> [任务] 处理离场...")
+        start_time = time.time()
+        action_buttons = ['push_back.png', 'taxi_to_runway.png', 'wait.png', 'takeoff_by_gliding.png', 'takeoff.png',
+                          'get_award_1.png', 'get_award_4.png', 'start_general.png']
+        reward_buttons = ['get_award_1.png', 'get_award_4.png']
+        sm = getattr(self.adb, 'screenshot_method', 'adb')
+        scan_timeout = 1.5 if sm in ('nemu_ipc', 'uiautomator2') else 5.0
+        while time.time() - start_time < scan_timeout:
+            self._check_running()
+            screen = self.adb.get_screenshot()
+            if screen is None: continue
+
+            # ── 阶段0：奖励区域预扫描（奖励弹窗出现在屏幕中央，不在底部ROI内）──
+            rx, ry, rw, rh = self.REGION_REWARD_RECOVERY
+            reward_roi = screen[ry:ry + rh, rx:rx + rw]
+            for rbtn in reward_buttons:
+                rres = self.adb.locate_image(self.icon_path + rbtn, confidence=0.65, screen_image=reward_roi)
+                if rres:
+                    reward_x = rres[0] + rx
+                    reward_y = rres[1] + ry
+                    self.log(f"   -> 🎁 [奖励区] 发现 {rbtn}，进入领奖流程")
+                    self.adb.click(reward_x, reward_y, random_offset=8)
+                    self.sleep(0.3)
+                    got_step2 = False
+                    t2_start = time.time()
+                    def _reward_step2_click(name):
+                        return self.find_and_click(name, confidence=0.72, wait=0.5, random_offset=8)
+                    while time.time() - t2_start < 15.0:
+                        self._check_running()
+                        if _reward_step2_click('get_award_2.png') or \
+                                _reward_step2_click('get_award_3.png') or \
+                                _reward_step2_click('get_award_4.png'):
+                            got_step2 = True
+                            break
+                        time.sleep(0.1)
+                    if not got_step2:
+                        self.log("🛑 领奖流程卡死")
+                        return False
+                    self.log("   -> 领奖确认，等待开始检测下一步...")
+                    self.sleep(1.4)
+                    t3_timeout = 1.0 if sm in ('nemu_ipc', 'uiautomator2') else 2.0
+                    t3_start = time.time()
+                    bx, by, bw, bh = self.REGION_BOTTOM_ROI
+                    while time.time() - t3_start < t3_timeout:
+                        self._check_running()
+                        s3_screen = self.adb.get_screenshot()
+                        if s3_screen is None:
+                            time.sleep(0.1)
+                            continue
+                        s3_roi = s3_screen[by:by + bh, bx:bx + bw]
+                        for final_btn in ['push_back.png', 'taxi_to_runway.png', 'start_general.png']:
+                            res_final = self.adb.locate_image(self.icon_path + final_btn, confidence=0.7,
+                                                              screen_image=s3_roi)
+                            if res_final:
+                                if final_btn in ('push_back.png', 'taxi_to_runway.png'):
+                                    self._stat_depart += 1
+                                    self._stat_session_depart += 1
+                                self.adb.click(res_final[0] + bx, res_final[1] + by, random_offset=8)
+                                self.log("   -> ✅ 离场动作执行完毕")
+                                return True
+                        time.sleep(0.06)
+                    if self.safe_locate('green_dot.png', region=self.REGION_GREEN_DOT):
+                        self.log("   -> ⚠️ 检测到绿点，跳转至地勤分配...")
+                        self.sleep(0.3)
+                        return self.handle_stand_task()
+                    self.log("   -> ℹ️ 未检测到绿点，判定为塔台已接管")
+                    return True
+
+            # ── 阶段1：底部ROI扫描常规操作按钮 ──
+            bx, by, bw, bh = self.REGION_BOTTOM_ROI
+            roi_img = screen[by:by + bh, bx:bx + bw]
+            for btn in action_buttons:
+                # 奖励图标已在上方奖励区预扫描过，底部ROI跳过以节省匹配开销
+                if btn in reward_buttons:
+                    continue
+                res = self.adb.locate_image(self.icon_path + btn, confidence=0.8, screen_image=roi_img)
+                if res:
+                    x = res[0] + bx
+                    y = res[1] + by
+                    if btn in ('push_back.png', 'taxi_to_runway.png'):
+                        self._stat_depart += 1
+                        self._stat_session_depart += 1
+                    self.adb.click(x, y, random_offset=8)
+                    self.sleep(0.25)
+                    return True
+            time.sleep(0.06)
+        self.log("⚠️ 离场任务扫描超时")
+        self.close_window()
+        return False
+
+    def handle_stand_task(self, target_pos=None):
+        self.sleep(0.1)
+        if not self._verify_and_redirect('status_stand.png'): return True
+        self.log(">>> [任务] 处理停机位队列...")
+        _stand_deadline = time.time() + 30.0
+        while time.time() < _stand_deadline:
+            self._check_running()
+            avail_staff = None
+            is_read_success = False
+            for _ in range(3):
+                val = self.check_global_staff()
+                if val is not None and val < 900:
+                    avail_staff = val
+                    is_read_success = True
+                    self._update_staff_tracker(val)
+                    break
+                self.sleep(0.12)
+            if avail_staff is None:
+                self.log("⚠️ 无法读取地勤人数，尝试盲做")
+                self._update_staff_tracker(None)
+                avail_staff = 999
+                is_read_success = False
+            required_cost = None
+            for region in self._iter_region_fallbacks(self.REGION_TASK_COST, pad_x=12, pad_y=6):
+                cost_text = self.ocr.recognize_number(region, mode='task')
+                required_cost = self.ocr.parse_cost(cost_text)
+                if required_cost is not None:
+                    break
+            self._stat_last_required_cost = required_cost
+            if required_cost is None:
+                self.log(f"⚠️ 读取花费失败，盲做")
+                if self._perform_stand_action_sequence(force_verify=not is_read_success):
+                    self.log("   -> 盲做成功")
+                    self.stand_skip_index = 0
+                    self.doing_task_forbidden_until = time.time() + 6.0
+                    self.next_list_refresh_time = time.time() + 6.0
+                    return True
+                else:
+                    if self.in_staff_shortage_mode:
+                        self.log("🛑 盲做触发人员不足")
+                        self.close_window()
+                        if self._try_get_bonus_staff():
+                            self.stand_skip_index = 0
+                            return True
+                    self.stand_skip_index += 1
+                    return False
+            self.log(f"   -> 需求: {required_cost}+1 | 可用: {avail_staff}")
+
+            if avail_staff >= (required_cost + 1):
+                self.in_staff_shortage_mode = False
+                self._next_staff_recovery_probe_time = 0.0
+                green_screen = self.adb.get_screenshot()
+                if self._locate_on_screen('green_dot.png', green_screen, region=self.REGION_GREEN_DOT):
+                    self.log("   -> ✅ 地勤人员充足，开始分配")
+                    if self._perform_stand_action_sequence(force_verify=not is_read_success):
+                        self.log("   -> 地勤保障开始成功")
+                        self.stand_skip_index = 0
+                        self.doing_task_forbidden_until = time.time() + 6.0
+                        self.next_list_refresh_time = time.time() + 6.0
+                        return True
+                    else:
+                        if not self.in_staff_shortage_mode:
+                            self.log("   -> 操作未成功，跳过本架")
+                            self.stand_skip_index += 1
+                            return False
+                else:
+                    self.log("   -> ⚠️ 人员充足但未检测到绿点，跳过")
+                    self.close_window()
+                    return False
+
+            self.log(f"🛑 人力不足 (缺 {required_cost + 1 - avail_staff})，跳过本架尝试下一架")
+            self.close_window()
+            if self._try_get_bonus_staff():
+                self.log("   -> 领取成功，重试")
+                self.stand_skip_index = 0
+                return True
+            # 逐架跳过而非全局阻断：仅跳过当前不能满足的飞机
+            self.stand_skip_index += 1
+            # 连续3架以上都失败才进入全局短缺模式，且冷却日志避免刷屏
+            if self.stand_skip_index >= 3:
+                self.in_staff_shortage_mode = True
+                self._next_staff_recovery_probe_time = time.time() + self._staff_recovery_probe_interval
+                now_ts = time.time()
+                last_log = getattr(self, '_last_staff_shortage_log_ts', 0.0)
+                if now_ts - last_log > 8.0:  # 8秒内不重复刷短缺日志
+                    self.log(f"🛑 连续 {self.stand_skip_index} 架均人力不足，进入短缺模式，{self._staff_recovery_probe_interval}s 后探测恢复")
+                    self._last_staff_shortage_log_ts = now_ts
+            self.last_known_available_staff = avail_staff
+            return False
+
+    def handle_ice_task(self, target_pos=None):
+        self.sleep(0.2)
+        if not self._verify_and_redirect('status_ice.png'): return True
+        self.log(">>> [任务] 处理除冰...")
+        ice_timeout = 1.0 if getattr(self.adb, 'screenshot_method', 'adb') in ('nemu_ipc', 'uiautomator2') else 3.0
+        if self.wait_and_click('start_ice.png', timeout=ice_timeout, click_wait=0.5):
+            self.log("   -> 除冰开始")
+            return True
+        self.log("⚠️ 未找到除冰按钮")
+        self.close_window()
+        return False
+
+    def handle_repair_task(self, target_pos=None):
+        self.sleep(0.2)
+        self.log(">>> [任务] 处理维修/维护...")
+        action_buttons = ['go_repair.png', 'start_repair.png', 'start_general.png']
+        start_time = time.time()
+        repair_timeout = 1.0 if getattr(self.adb, 'screenshot_method', 'adb') in ('nemu_ipc', 'uiautomator2') else 3.0
+        while time.time() - start_time < repair_timeout:
+            self._check_running()
+            screen = self.adb.get_screenshot()
+            if screen is None: continue
+            bx, by, bw, bh = self.REGION_BOTTOM_ROI
+            roi_img = screen[by:by + bh, bx:bx + bw]
+            for btn in action_buttons:
+                res = self.adb.locate_image(self.icon_path + btn, confidence=0.8, screen_image=roi_img)
+                if res:
+                    abs_x = res[0] + bx
+                    abs_y = res[1] + by
+                    self.adb.click(abs_x, abs_y)
+                    self.log(f"   -> ✅ 维护开始 ({btn})")
+                    self.sleep(0.5)
+                    if btn == 'start_repair.png':
+                        self._check_running()
+                        s2 = self.adb.get_screenshot()
+                        if s2 is not None:
+                            roi2 = s2[by:by + bh, bx:bx + bw]
+                            res2 = self.adb.locate_image(self.icon_path + 'go_repair.png', confidence=0.8, screen_image=roi2)
+                            if res2:
+                                self.adb.click(res2[0] + bx, res2[1] + by)
+                                self.log("   -> ✅ 点击 go_repair")
+                                self.sleep(0.5)
+                    return True
+            time.sleep(0.1)
+        self.log("⚠️ 未找到维修按钮")
+        self.close_window()
+        return False
+
+    def _persist_silver_gold_next(self, ts):
+        self._silver_gold_next_at = float(ts)
+        if not self.config_callback:
+            return
+        try:
+            self.config_callback("silver_gold_next_at", self._silver_gold_next_at)
+        except Exception:
+            pass
+
+    def _silver_gold_templates_ready(self):
+        missing = [name for name in ("silver.png", "exchange_1500_head.png")
+                   if not os.path.exists(self.icon_path + name)]
+        if not missing:
+            return True
+        if not self._silver_gold_missing_logged:
+            self._silver_gold_missing_logged = True
+            self.log("🪙 [兑换] 还不能自动兑换，icon 目录缺少：" + "、".join(missing))
+            self.log("🪙 [兑换] silver.png：主界面顶部的银飞机图标。exchange_1500_head.png：银币页左侧 1 金币卡的上半部分。")
+        self._silver_gold_retry_at = time.time() + 3600
+        return False
+
+    def _fresh_screen(self):
+        if self.adb is None:
+            return None
+        if hasattr(self.adb, "invalidate_screenshot_cache"):
+            try:
+                self.adb.invalidate_screenshot_cache()
+            except Exception:
+                pass
+        return self.adb.get_screenshot()
+
+    def _locate_template_hit(self, image_name, confidence=0.75, screen=None):
+        if self.adb is None:
+            return None
+        if screen is None:
+            screen = self._fresh_screen()
+        if screen is None:
+            return None
+        hit = self.adb.locate_image(self.icon_path + image_name, confidence=confidence, screen_image=screen)
+        if not hit:
+            return None
+        return hit
+
+    def _exchange_buy_roi(self, box):
+        """1 金币卡上半部分匹配框，换算到底部购买/倒计时那一行。坐标来自 1600×900 银币页。"""
+        x, y, w, h = box
+        scale_x = w / 310.0
+        scale_y = h / 390.0
+        bx = int(round(x + 40 * scale_x))
+        by = int(round(y + 400 * scale_y))
+        bw = max(8, int(round(230 * scale_x)))
+        bh = max(8, int(round(50 * scale_y)))
+        cx = int(round(x + w / 2.0))
+        cy = int(round(y + 422 * scale_y))
+        return bx, by, bw, bh, cx, cy
+
+    def _roi_is_yellow_button(self, screen, bx, by, bw, bh):
+        if screen is None:
+            return False
+        height, width = screen.shape[:2]
+        x1, y1 = max(0, int(bx)), max(0, int(by))
+        x2, y2 = min(width, int(bx + bw)), min(height, int(by + bh))
+        if x2 - x1 < 8 or y2 - y1 < 8:
+            return False
+        roi = screen[y1:y2, x1:x2]
+        blue = roi[:, :, 0].astype(np.int16)
+        green = roi[:, :, 1].astype(np.int16)
+        red = roi[:, :, 2].astype(np.int16)
+        yellow = (red > 190) & (green > 150) & (blue < 100)
+        return float(yellow.mean()) > 0.45
+
+    def _leave_silver_gold_shop(self):
+        for _ in range(4):
+            self._check_running()
+            screen = self._fresh_screen()
+            if screen is not None and self._locate_on_screen(
+                    'main_interface.png', screen, confidence=0.75, region=self.REGION_MAIN_ANCHOR):
+                return True
+            if self.find_and_click('back.png', wait=0.35, random_offset=2):
+                continue
+            self.close_window()
+            self.sleep(0.35)
+        return False
+
+    def _maybe_daily_silver_gold(self):
+        """到点后在主界面兑换一次 1500 银币。未到冷却时间时不做截图。"""
+        if not self.enable_silver_gold or self.adb is None:
+            return False
+        now = time.time()
+        if now < self._silver_gold_next_at or now < self._silver_gold_retry_at:
+            return False
+        if not self._silver_gold_templates_ready():
+            return False
+        if not self.safe_locate('main_interface.png', region=self.REGION_MAIN_ANCHOR, confidence=0.75):
+            self._silver_gold_retry_at = now + 45
+            return False
+        try:
+            self._do_daily_silver_gold()
+        except StopSignal:
+            raise
+        except Exception as e:
+            self.log(f"🪙 [兑换] 流程出错: {e}")
+            self._silver_gold_retry_at = time.time() + 20 * 60
+            try:
+                self._leave_silver_gold_shop()
+            except StopSignal:
+                raise
+            except Exception:
+                pass
+        return True
+
+    def _do_daily_silver_gold(self):
+        self._check_running()
+        self.log("🪙 [兑换] 点击银飞机图标，进入银币页")
+        if not self.find_and_click('silver.png', confidence=0.82, wait=0.8, random_offset=3):
+            self.log("🪙 [兑换] 主界面没有找到银飞机图标，10 分钟后再试")
+            self._silver_gold_retry_at = time.time() + 10 * 60
+            return
+
+        hit = None
+        screen = None
+        deadline = time.time() + 4.0
+        while time.time() < deadline:
+            self._check_running()
+            screen = self._fresh_screen()
+            hit = self._locate_template_hit('exchange_1500_head.png', confidence=0.82, screen=screen)
+            if hit and len(hit) >= 3 and isinstance(hit[2], tuple):
+                break
+            hit = None
+            self.sleep(0.25)
+
+        if not hit or screen is None:
+            self.log("🪙 [兑换] 银币页里没有看到 1 金币兑换卡，20 分钟后再试")
+            self._silver_gold_retry_at = time.time() + 20 * 60
+            self._leave_silver_gold_shop()
+            return
+
+        bx, by, bw, bh, cx, cy = self._exchange_buy_roi(hit[2])
+        if not self._roi_is_yellow_button(screen, bx, by, bw, bh):
+            self.log("🪙 [兑换] 这张卡还在冷却（距下次刷新），先不点，30 分钟后再看")
+            self._silver_gold_retry_at = time.time() + 30 * 60
+            self._leave_silver_gold_shop()
+            return
+
+        self.log("🪙 [兑换] 购买按钮已亮，兑换 1 金币")
+        self.adb.click(cx, cy, random_offset=4)
+        self.sleep(0.55)
+
+        confirmed = False
+        saw_error = False
+        confirm_deadline = time.time() + 3.0
+        while time.time() < confirm_deadline:
+            self._check_running()
+            screen = self._fresh_screen()
+            if screen is None:
+                self.sleep(0.2)
+                continue
+            if self._locate_on_screen('error_ok.png', screen, confidence=0.75):
+                self.find_and_click('error_ok.png', confidence=0.75, wait=0.3, random_offset=4)
+                saw_error = True
+                break
+            if self._locate_on_screen('buy_vehicle_confirm.png', screen, confidence=0.75):
+                self.find_and_click('buy_vehicle_confirm.png', confidence=0.75, wait=0.4, random_offset=4)
+                confirmed = True
+                break
+            if self._locate_on_screen('yes.png', screen, confidence=0.72):
+                self.find_and_click('yes.png', confidence=0.72, wait=0.4, random_offset=4)
+                confirmed = True
+                break
+            self.sleep(0.2)
+
+        self.sleep(0.45)
+        screen = self._fresh_screen()
+        still_yellow = False
+        hit_after = self._locate_template_hit('exchange_1500_head.png', confidence=0.82, screen=screen)
+        if hit_after and len(hit_after) >= 3 and isinstance(hit_after[2], tuple):
+            bx, by, bw, bh, _, _ = self._exchange_buy_roi(hit_after[2])
+            still_yellow = self._roi_is_yellow_button(screen, bx, by, bw, bh)
+        dialog_open = False
+        if screen is not None:
+            dialog_open = bool(
+                self._locate_on_screen('cancel.png', screen, confidence=0.75)
+                or self._locate_on_screen('yes.png', screen, confidence=0.72)
+                or self._locate_on_screen('buy_vehicle_confirm.png', screen, confidence=0.75)
+            )
+        exchanged = (not saw_error) and (not dialog_open) and (confirmed or not still_yellow)
+        if saw_error:
+            self.log("🪙 [兑换] 出现提示（多半是银币不足），未兑换。1 小时后再试")
+            self._silver_gold_retry_at = time.time() + 60 * 60
+        elif exchanged:
+            next_at = time.time() + self.SILVER_GOLD_COOLDOWN_SEC
+            self._persist_silver_gold_next(next_at)
+            self._silver_gold_retry_at = next_at
+            self.log("🪙 [兑换] 已兑换 1 金币，下次约 24 小时后")
+        else:
+            self.log("🪙 [兑换] 点了购买但没有确认成功，20 分钟后再试")
+            self._silver_gold_retry_at = time.time() + 20 * 60
+        self._leave_silver_gold_shop()
+
+    def _try_get_bonus_staff(self):
+        if not self.enable_bonus_staff: return False
+        now = time.time()
+        if now < self.next_bonus_retry_time: return False
+        self.log(">>> [福利] 开始领取流程...")
+        if self.find_and_click('top_ground_staff.png', wait=0.8):
+            self.adb.click(800, 580)
+            self.sleep(2.0)
+            if self.wait_and_click('get_staff.png', timeout=2.0, click_wait=1.0, confidence=0.7):
+                self.log("   -> ✅ 领取成功！")
+                self.sleep(2.0)
+                self.next_bonus_retry_time = time.time() + (2 * 60 * 60)
+                # back.png 偏移量减小
+                self.find_and_click('back.png', wait=0.5, random_offset=2)
+                self.sleep(3.0)
+                return True
+            else:
+                self.log("   -> 未找到领取按钮")
+                self.next_bonus_retry_time = time.time() + (15 * 60)
+                # back.png 偏移量减小
+                self.find_and_click('back.png', wait=0.5, random_offset=2)
+                self.sleep(3.0)
+                return True
+        self.log("❌ 未找到顶部地勤图标")
+        self.next_bonus_retry_time = time.time() + (15 * 60)
+        return False
+
+    def _perform_stand_action_sequence(self, force_verify=False):
+        if self.slide_min_duration >= self.slide_max_duration:
+            rand_duration = self.slide_min_duration
+        else:
+            rand_duration = random.randint(self.slide_min_duration, self.slide_max_duration)
+
+        start_x = int(random.gauss(494, 5))
+        start_y = int(random.gauss(574, 5))
+        end_x = random.randint(800, 900)
+        end_y = int(random.gauss(574, 5))
+
+        self.log(f"   -> [动作] 拟人滑块: ({start_x},{start_y})->({end_x},{end_y}) 耗时:{rand_duration}ms")
+        self.adb.swipe(start_x, start_y, end_x, end_y, duration_ms=rand_duration)
+
+        self.sleep(0.1)
+        agent_x = int(random.gauss(803, 5))
+        agent_y = int(random.gauss(646, 5))
+        self.adb.click(agent_x, agent_y)
+        self.sleep(0.3)
+
+        if self.safe_locate('insufficient_ground_staff.png', confidence=0.7):
+            self.log("🛑 警告：人员不足 (盲操作后检测)")
+            self.in_staff_shortage_mode = True
+            self.last_known_available_staff = 0
+            self.close_window()
+            return False
+
+        should_skip = self.enable_skip_staff and (not force_verify)
+        if should_skip:
+            self.log("   -> [极速] 跳过地勤验证")
+        else:
+            if self.enable_skip_staff and force_verify:
+                self.log("   -> [安全] 地勤人数未知，强制执行验证")
+            self.sleep(0.2)
+            check_x, check_y = 63, 546
+            b, g, r = self.adb.get_pixel_color(check_x, check_y)
+            target_b, target_g, target_r = 153, 220, 96
+            diff = abs(b - target_b) + abs(g - target_g) + abs(r - target_r)
+            is_green = diff < 100
+
+            if is_green:
+                self.log("   -> [颜色检测] ✅ 通过")
+            else:
+                self.log(f"   -> [颜色检测] ❌ 失败 (diff={diff})")
+
+            is_success_icon = self.safe_locate('stand_agent_true.png', confidence=0.85)
+            if is_success_icon:
+                self.log("   -> [图标检测] ✅ 通过")
+            else:
+                self.log("   -> [图标检测] ❌ 失败")
+            if not (is_green and is_success_icon):
+                self.log("🛑 验证失败：颜色或图标未通过")
+                if self.safe_locate('insufficient_ground_staff.png', confidence=0.7):
+                    self.log("   -> 原因：发现了人员不足警告，跳过本架")
+                    self.stand_skip_index += 1
+                    if self.stand_skip_index >= 3:
+                        self.in_staff_shortage_mode = True
+                        self._next_staff_recovery_probe_time = time.time() + self._staff_recovery_probe_interval
+                self.close_window()
+                return False
+
+        if self.wait_and_click('start_ground_support.png', timeout=2.0, click_wait=0):
+            self._stat_stand_count += 1
+            self._stat_session_stand_count += 1
+            cost = self._stat_last_required_cost
+            if cost is not None:
+                add_staff = cost + 1
+                self._stat_stand_staff += add_staff
+                self._stat_session_stand_staff += add_staff
+            self.sleep(0.5)
+            return True
+        else:
+            if self.safe_locate('insufficient_ground_staff.png', confidence=0.7):
+                self.log("🛑 警告：人员不足 (寻找开始按钮时)，跳过本架")
+                self.stand_skip_index += 1
+                if self.stand_skip_index >= 3:
+                    self.in_staff_shortage_mode = True
+                    self._next_staff_recovery_probe_time = time.time() + self._staff_recovery_probe_interval
+            self.close_window()
+            return False
+
+    def _check_and_recover_interface(self, current_screen=None):
+        now_ts = time.time()
+        if now_ts < self._next_interface_check_time:
+            return
+        self._next_interface_check_time = now_ts + self._interface_check_interval
+
+        main_hit = self._locate_on_screen('main_interface.png', current_screen, confidence=0.8, region=self.REGION_MAIN_ANCHOR)
+        if main_hit:
+            self.last_seen_main_interface_time = now_ts
+            return
+        if current_screen is None and self.safe_locate('main_interface.png', region=self.REGION_MAIN_ANCHOR, confidence=0.8):
+            self.last_seen_main_interface_time = now_ts
+            return
+        if not self.enable_anti_stuck:
+            return
+        elapsed = now_ts - self.last_seen_main_interface_time
+        if elapsed > self.STUCK_TIMEOUT:
+            self._record_anti_stuck_trigger(f"未检测到主界面已 {int(elapsed)} 秒，尝试强行返回")
+
+            # First Start 恢复逻辑
+            if self.find_and_click('first_start_1.png', wait=0.3):
+                self.log("   -> 尝试 First Start 恢复流程...")
+                fs_start = time.time()
+                found_step2 = False
+                while time.time() - fs_start < 4.0:
+                    self._check_running()
+                    if self.find_and_click('first_start_2.png', wait=0.3):
+                        found_step2 = True
+                        break
+                    self.sleep(0.3)
+
+                if found_step2:
+                    self.log("   -> 正在等待返回主界面...")
+                    wait_main = time.time()
+                    while time.time() - wait_main < 15.0:
+                        self._check_running()
+                        if self.safe_locate('main_interface.png', region=self.REGION_MAIN_ANCHOR, confidence=0.8):
+                            self.last_seen_main_interface_time = time.time()
+                            self.log("   -> ✅ 恢复成功")
+                            return
+                        self.sleep(0.5)
+
+            if self.wait_and_click('back.png', timeout=0.8, click_wait=0.3, random_offset=2):
+                self.log("   -> 点击了 Back 按钮")
+                self.last_seen_main_interface_time = time.time()
+                return
+            if self.wait_and_click('cancel.png', timeout=0.8, click_wait=0.3):
+                self.log("   -> 点击了 Cancel 按钮")
+                self.last_seen_main_interface_time = time.time()
+                return
+            self.log("   -> 尝试盲点关闭区域")
+            self.close_window()
+            self.last_seen_main_interface_time = time.time() - (self.STUCK_TIMEOUT - 5)
+
+    def _task_key(self, task):
+        center = task.get('center', (0, 0))
+        return f"{task.get('name', '')}:{center[0]}:{center[1]}"
+
+    def _is_task_on_cooldown(self, task):
+        key = self._task_key(task)
+        until = self._task_fail_cooldown.get(key, 0.0)
+        return time.time() < until
+
+    def _mark_task_failed(self, task):
+        key = self._task_key(task)
+        self._task_fail_cooldown[key] = time.time() + self._task_fail_cooldown_sec
+
+    def _cleanup_task_cooldown(self):
+        now = time.time()
+        expired = [k for k, v in self._task_fail_cooldown.items() if v <= now]
+        for k in expired:
+            self._task_fail_cooldown.pop(k, None)
+
+    def _execute_task(self, task):
+        # 短缺模式下跳过冗余日志，减少 I/O 卡顿
+        if not (self.in_staff_shortage_mode and task['type'] == 'stand'):
+            self.log(f"识别结果: {task['name']} (分数: {task['score']:.2f})")
+        self.adb.click(task['center'][0] + 60, task['center'][1], random_offset=8)
+        try:
+            result = task['handler']()
+        except (StopSignal, KeyboardInterrupt, SystemExit):
+            raise
+        except TypeError:
+            result = task['handler'](None)
+
+        if result:
+            self._task_fail_cooldown.pop(self._task_key(task), None)
+            return True
+
+        self._mark_task_failed(task)
+        self.log(f"📋 [调度] 当前任务未满足，自动切换下一任务: {task['name']}")
+        return False
+
+    # ═══════════════════════════════════════════════════════════
+    #  实时智能状态机 — 秒级响应核心
+    # ═══════════════════════════════════════════════════════════
+
+    # 游戏界面状态枚举
+    STATE_MAIN = 'main'             # 主界面（可看到飞机列表）
+    STATE_TASK_DETAIL = 'task'      # 任务详情弹窗
+    STATE_TOWER_MENU = 'tower'      # 塔台菜单
+    STATE_POPUP = 'popup'           # 弹窗（领奖/错误/确认）
+    STATE_UNKNOWN = 'unknown'       # 无法识别
+    STATE_TRANSITION = 'transition' # 界面切换过渡中
+
+    def _quick_detect_state(self, screen):
+        """毫秒级游戏界面状态识别（纯视觉，零 OCR）。
+        
+        检测顺序按出现频率排序，命中即返回，避免全量扫描。
+        利用截图缓存，连续调用不会重复抓取。
+        """
+        if screen is None:
+            return self.STATE_UNKNOWN
+
+        h, w = screen.shape[:2]
+        # 边界检查
+        if h < 100 or w < 100:
+            return self.STATE_UNKNOWN
+
+        # 1. 主界面检测（最高频，优先检查主界面锚点图标）
+        loc = self.adb.locate_image(
+            self.icon_path + 'main_interface.png',
+            confidence=0.75,
+            screen_image=screen[self.REGION_MAIN_ANCHOR[1]:self.REGION_MAIN_ANCHOR[1]+self.REGION_MAIN_ANCHOR[3],
+                                self.REGION_MAIN_ANCHOR[0]:self.REGION_MAIN_ANCHOR[0]+self.REGION_MAIN_ANCHOR[2]]
+        )
+        if loc is not None:
+            return self.STATE_MAIN
+
+        # 2. 任务详情弹窗（检测任务状态图标区域）
+        rx, ry, rw, rh = self.REGION_STATUS_TITLE
+        if ry + rh <= h and rx + rw <= w:
+            status_icons = ['status_stand.png', 'status_takeoff.png', 'status_taxiing.png',
+                           'status_approach.png', 'status_ice.png', 'status_doing.png']
+            status_roi = screen[ry:ry+rh, rx:rx+rw]
+            for icon in status_icons:
+                if self.adb.locate_image(self.icon_path + icon, confidence=0.7, screen_image=status_roi):
+                    return self.STATE_TASK_DETAIL
+
+        # 3. 塔台菜单（检测 tower_1.png）
+        tower_roi_y, tower_roi_h = 271, 56
+        tower_roi_x, tower_roi_w = 32, 58
+        if tower_roi_y + tower_roi_h <= h and tower_roi_x + tower_roi_w <= w:
+            tower_roi = screen[tower_roi_y:tower_roi_y+tower_roi_h, tower_roi_x:tower_roi_x+tower_roi_w]
+            if self.adb.locate_image(self.icon_path + 'tower_1.png', confidence=0.78, screen_image=tower_roi):
+                return self.STATE_TOWER_MENU
+
+        # 4. 弹窗检测（error_ok, yes, delay 等）
+        popup_icons = ['error_ok.png', 'yes.png', 'delay.png', 'delay_1.png',
+                       'get_award_1.png', 'get_award_2.png', 'get_award_3.png', 'get_award_4.png']
+        for icon in popup_icons:
+            if self.adb.locate_image(self.icon_path + icon, confidence=0.65, screen_image=screen):
+                return self.STATE_POPUP
+
+        return self.STATE_UNKNOWN
+
+    def _handle_popup_state(self, screen):
+        """智能弹窗处理：根据弹窗类型自动选择合适的关闭方式。"""
+        # 错误弹窗
+        if self._locate_on_screen('error_ok.png', screen, confidence=0.75):
+            self.log("⚡ [秒处理] 检测到错误弹窗，自动关闭")
+            self.adb.click(715, 546, random_offset=8)
+            self.sleep(0.1)
+            return True
+        # 确认弹窗
+        if self._locate_on_screen('yes.png', screen, confidence=0.72):
+            self.log("⚡ [秒处理] 检测到确认弹窗，自动点击")
+            self.adb.click(715, 546, random_offset=8)
+            self.sleep(0.1)
+            return True
+        # 延时弹窗
+        for btn in ('delay.png', 'delay_1.png'):
+            pos = self._locate_on_screen(btn, screen, confidence=0.7)
+            if pos:
+                self.log(f"⚡ [秒处理] 检测到延时弹窗({btn})，自动确认")
+                self.adb.click(pos[0], pos[1], random_offset=5)
+                self.sleep(0.1)
+                return True
+        # 领奖弹窗
+        rx, ry, rw, rh = self.REGION_REWARD_RECOVERY
+        if ry + rh <= screen.shape[0] and rx + rw <= screen.shape[1]:
+            reward_roi = screen[ry:ry+rh, rx:rx+rw]
+            for btn in ('get_award_1.png', 'get_award_2.png', 'get_award_3.png', 'get_award_4.png'):
+                pos = self.adb.locate_image(self.icon_path + btn, confidence=0.6, screen_image=reward_roi)
+                if pos:
+                    self.log(f"⚡ [秒处理] 检测到领奖弹窗({btn})，自动领取")
+                    self.adb.click(pos[0] + rx, pos[1] + ry, random_offset=8)
+                    self.sleep(0.15)
+                    return True
+        return False
+
+    def _scan_tasks_ultra_fast(self, screen):
+        """超快速任务检测：单帧内并行匹配所有任务类型，返回匹配列表。
+        
+        优化要点：
+        1. 复用截图缓存，不重复抓取
+        2. 单次遍历所有模板，避免多次 matchTemplate 调用
+        3. 仅扫描任务列表 ROI 列（60px 宽），大幅减少计算量
+        """
+        lx, ly, lw, lh = self.LIST_ROI_X, 0, self.LIST_ROI_W, self.LIST_ROI_H
+        if screen.shape[1] < lx + lw or screen.shape[0] < lh:
+            return []
+        list_roi = screen[ly:ly+lh, lx:lx+lw]
+
+        all_matches = []
+        for name, tmpl in self.task_templates.items():
+            if tmpl is None:
+                continue
+            try:
+                res = cv2.matchTemplate(list_roi, tmpl, cv2.TM_CCOEFF_NORMED)
+            except Exception:
+                continue
+
+            # 动态阈值：根据图标类型微调
+            base_conf = 0.70
+            if 'doing' in name:
+                base_conf = 0.76
+            elif 'approach' in name:
+                base_conf = 0.68
+            elif 'stand' in name:
+                base_conf = 0.72
+
+            ys, xs = np.where(res >= base_conf)
+            if len(xs) == 0:
+                # 宽松回退
+                fallback = max(base_conf - 0.06, 0.62)
+                ys, xs = np.where(res >= fallback)
+
+            bucket = {}
+            for x, y in zip(xs, ys):
+                key = (int(x) // 8, int(y) // 8)
+                score = float(res[y, x])
+                old = bucket.get(key)
+                if old is None or score > old['score']:
+                    bucket[key] = {
+                        'center': (int(x) + tmpl.shape[1] // 2 + lx, int(y) + tmpl.shape[0] // 2),
+                        'score': score,
+                        'name': name,
+                    }
+            all_matches.extend(bucket.values())
+
+        if not all_matches:
+            return []
+
+        # 按行分组取最高分
+        all_matches.sort(key=lambda d: d['center'][1])
+        final = []
+        i = 0
+        while i < len(all_matches):
+            row = [all_matches[i]]
+            anchor_y = all_matches[i]['center'][1]
+            j = i + 1
+            while j < len(all_matches) and abs(all_matches[j]['center'][1] - anchor_y) <= 24:
+                row.append(all_matches[j])
+                j += 1
+            best = max(row, key=lambda d: d['score'])
+            final.append(best)
+            i = j
+        return final
+
+    def _map_task_to_handler(self, match_info):
+        """将匹配结果映射到处理函数和任务类型。"""
+        name = match_info['name']
+        mapping = {
+            'pending_ice.png':     ('ice',     self.handle_ice_task,         'task_ice'),
+            'pending_repair.png':  ('repair',  self.handle_repair_task,      'task_repair'),
+            'pending_doing.png':   ('doing',   self.handle_vehicle_check_task, 'task_doing'),
+            'pending_approach.png':('approach',self.handle_approach_task,    'task_approach'),
+            'pending_taxiing.png': ('taxiing', self.handle_taxiing_task,     'task_taxiing'),
+            'pending_takeoff.png': ('takeoff', self.handle_takeoff_task,     'task_takeoff'),
+            'pending_stand.png':   ('stand',   self.handle_stand_task,       'task_stand'),
+        }
+        t_type, handler, module = mapping.get(name, ('other', None, None))
+        if module and not self._is_module_enabled(module):
+            return None
+        return {
+            'type': t_type,
+            'handler': handler,
+            'score': match_info['score'],
+            'name': name,
+            'center': match_info['center'],
+        }
+
+    def scan_and_process(self):
+        """智能秒级扫描：状态机驱动 + 截图缓存 + 超快速任务检测。
+        
+        流程：
+        1. 获取截图（缓存复用）
+        2. 快速状态检测 → 弹窗/过渡态立即处理
+        3. 仅在主界面执行任务扫描
+        4. 匹配到任务即刻执行
+        """
+        # 使用缓存截图，同一帧内所有检测共享
+        screen = self.adb.get_screenshot_cached(max_age_ms=30)
+        if screen is None:
+            self._scan_screenshot_fails += 1
+            if self._scan_screenshot_fails >= 5:
+                self.log(f"⚠️ [连接] 截图连续{self._scan_screenshot_fails}次失败，尝试重建...")
+                self._scan_screenshot_fails = 0
+                try:
+                    self.adb.connect()
+                    self.adb._start_persistent_shell()
+                except Exception as e:
+                    self.log(f"⚠️ [连接] ADB 重连异常: {e}")
+                self.sleep(1.0)
+            return False
+        self._scan_screenshot_fails = 0
+        # 推送截图到 Web 控制面板（如果可用，按当前实例）
+        if _WEB_PANEL_AVAILABLE and _wp_update_frame is not None:
+            try:
+                _wp_update_frame(screen, self.instance_id)
+            except Exception:
+                pass
+
+        # ── 阶段 0：快速状态检测 ──
+        state = self._quick_detect_state(screen)
+
+        # 弹窗 → 秒处理
+        if state == self.STATE_POPUP:
+            self._handle_popup_state(screen)
+            self.sleep(0.03)
+            return True
+
+        # 非主界面（过渡/未知/塔台菜单）→ 尝试关窗回归主界面
+        if state == self.STATE_TOWER_MENU:
+            self.log("⚡ [状态] 检测到塔台菜单，关闭回归主界面")
+            self._close_tower_menu(fast=True)
+            return True
+
+        if state == self.STATE_TASK_DETAIL:
+            # 已在任务详情中，由各 handler 内部处理，此处仅做界面恢复
+            self._check_and_recover_interface(current_screen=screen)
+            return False
+
+        if state != self.STATE_MAIN:
+            # 过渡态或未知态 → 周期性检查 + 尝试关窗
+            self._periodic_15s_check()
+            if self._check_and_perform_auto_delay(screen):
+                return True
+            return False
+
+        # ── 阶段 1：主界面常规维护 ──
+        self._check_and_recover_interface(current_screen=screen)
+        self._periodic_15s_check()
+        self._cleanup_task_cooldown()
+
+        # ── 阶段 2：红灯最高优先级 ──
+        if self._check_and_perform_auto_delay(screen):
+            return True
+
+        # ── 阶段 3：实时地勤检测（绿点快速预检 + OCR）──
+        now = time.time()
+        staff_check_interval = 0.6 if (self.in_staff_shortage_mode or self.stand_skip_index > 0) else 1.2
+        if now - self.last_staff_check_time > staff_check_interval:
+            fast_staff_ok = (self._locate_on_screen('green_dot.png', screen,
+                              region=self.REGION_GREEN_DOT) is not None)
+            if fast_staff_ok and not self.in_staff_shortage_mode and self.stand_skip_index == 0:
+                self.last_staff_check_time = now
+            else:
+                staff_val = self.check_global_staff(screen_image=screen)
+                self._update_staff_tracker(staff_val)
+                self.last_staff_check_time = now
+                # 短缺恢复检测：地勤恢复到充足水平自动退出短缺模式
+                if self.in_staff_shortage_mode or self.stand_skip_index > 0:
+                    prev = self.last_checked_avail_staff
+                    if staff_val is not None:
+                        should_recover = False
+                        if prev != -1 and staff_val != prev:
+                            self.log(f"✅ [实时] 地勤变化 ({prev}→{staff_val})，恢复执行")
+                            should_recover = True
+                        elif staff_val >= 15:
+                            self.log(f"✅ [实时] 地勤充足 ({staff_val})，恢复执行")
+                            should_recover = True
+                        else:
+                            req = self._stat_last_required_cost
+                            if req is not None and staff_val >= (req + 1):
+                                self.log(f"✅ [实时] 地勤满足需求 ({staff_val}>={req+1})，恢复执行")
+                                should_recover = True
+                        if should_recover:
+                            self.in_staff_shortage_mode = False
+                            self.stand_skip_index = 0
+                            self._next_staff_recovery_probe_time = 0.0
+                        self.last_checked_avail_staff = staff_val
+
+        # ── 阶段 4：超快速任务扫描 ──
+        raw_matches = self._scan_tasks_ultra_fast(screen)
+        tasks = []
+        for m in raw_matches:
+            mapped = self._map_task_to_handler(m)
+            if mapped:
+                tasks.append(mapped)
+
+        if not tasks:
+            if not self._no_candidate_closed:
+                self._no_candidate_closed = True
+                self.close_window()
+            return False
+
+        self._no_candidate_closed = False
+
+        # 分离 Doing 任务（高优先级）
+        doing_tasks = [t for t in tasks if t['type'] == 'doing']
+        other_tasks = [t for t in tasks if t['type'] != 'doing']
+
+        # Doing 任务优先秒处理
+        if not self.enable_no_takeoff_mode:
+            for dt in doing_tasks:
+                if time.time() <= self.doing_task_forbidden_until:
+                    continue
+                if self._is_task_on_cooldown(dt):
+                    continue
+                self.log(f"⚡ [秒处理] Doing 任务 (分数:{dt['score']:.2f})")
+                if self._execute_task(dt):
+                    return True
+
+        # 构建有效候选
+        valid = []
+        skips = self.stand_skip_index
+        for t in other_tasks:
+            if self.enable_no_takeoff_mode:
+                # 不起飞模式下所有非 Doing 任务都有效
+                if t['type'] == 'stand':
+                    if self.in_staff_shortage_mode:
+                        if time.time() < self._next_staff_recovery_probe_time:
+                            continue
+                        self._next_staff_recovery_probe_time = time.time() + self._staff_recovery_probe_interval
+                    elif skips > 0:
+                        skips -= 1
+                        continue
+            if self._is_task_on_cooldown(t):
+                continue
+            valid.append(t)
+
+        if not valid:
+            if not self._no_candidate_closed:
+                self._no_candidate_closed = True
+                self.close_window()
+            return False
+
+        self._no_candidate_closed = False
+
+        # 随机排序（可选）
+        if self.enable_random_task and len(valid) > 1:
+            if random.random() < 0.8:
+                first = random.choice(valid[:min(3, len(valid))])
+            else:
+                rest = valid[min(3, len(valid)):]
+                first = random.choice(rest if rest else valid[:1])
+            ordered = [first] + [t for t in valid if t is not first]
+        else:
+            ordered = valid
+
+        # 列表刷新冷却
+        if 0 < self.next_list_refresh_time - time.time() < 0.6:
+            self.sleep(self.next_list_refresh_time - time.time() + 0.3)
+            return False
+
+        # 执行任务
+        for task in ordered:
+            if self._execute_task(task):
+                return True
+        return False

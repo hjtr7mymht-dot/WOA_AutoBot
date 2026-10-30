@@ -1,0 +1,22 @@
+{
+  "version": "1.5.1",
+  "package_urls": [
+    {
+      "name": "GitHub Release (Windows)",
+      "url": "https://github.com/hjtr7mymht-dot/WOA_AutoBot/releases/download/v1.5.1/WOA_AutoBot_Windows.zip"
+    },
+    {
+      "name": "ghproxy Release (Windows)",
+      "url": "https://ghproxy.cn/https://github.com/hjtr7mymht-dot/WOA_AutoBot/releases/download/v1.5.1/WOA_AutoBot_Windows.zip"
+    },
+    {
+      "name": "GitHub Release (macOS)",
+      "url": "https://github.com/hjtr7mymht-dot/WOA_AutoBot/releases/download/v1.5.1/WOA_AutoBot_macOS.zip"
+    },
+    {
+      "name": "GitHub Release (macOS DMG)",
+      "url": "https://github.com/hjtr7mymht-dot/WOA_AutoBot/releases/download/v1.5.1/WOA_AutoBot_macOS.dmg"
+    }
+  ],
+  "notes": "1.5.1：新增每日银币兑换金币、Web 控制面板与远程熔断，不起飞模式改为待降落+停机坪双筛选常开，许可协议更新为个人非商用禁止倒卖，修复 macOS 打包版剪贴板快捷键。"
+}
